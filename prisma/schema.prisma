@@ -1,0 +1,132 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model WatchlistStock {
+  id        String   @id @default(cuid())
+  symbol    String   @unique
+  name      String
+  sector    String?
+  addedAt   DateTime @default(now())
+  screenResults ScreeningResult[]
+}
+
+model ScreeningResult {
+  id          String   @id @default(cuid())
+  stockId     String
+  stock       WatchlistStock @relation(fields: [stockId], references: [id])
+  symbol      String
+  date        DateTime @default(now())
+  score       Int            // 0-6 confluence score
+  setupType   String         // "A+" or "B"
+  entryPrice  Float
+  stopLoss    Float
+  targetPrice Float
+  riskReward  Float
+  atr         Float
+  rsi         Float
+  trendAbove  Boolean
+  pullbackOk  Boolean
+  triggerOk   Boolean
+  volumeOk    Boolean
+  rsOk        Boolean
+  gapOk       Boolean
+  regimeSafe  Boolean
+  liquid      Boolean
+  trending    Boolean
+  validVol    Boolean
+  qtyA        Int            // Suggested qty for A+ setup
+  qtyB        Int            // Suggested qty for B setup
+  notes       String?
+  createdAt   DateTime @default(now())
+}
+
+model PaperTrade {
+  id          String   @id @default(cuid())
+  symbol      String
+  stockName   String?
+  direction   String   @default("LONG")  // LONG / SHORT
+  entryDate   DateTime
+  entryPrice  Float
+  qty         Int
+  stopLoss    Float
+  targetPrice Float
+  status      String   @default("OPEN")  // OPEN / CLOSED / CANCELLED
+  exitDate    DateTime?
+  exitPrice   Float?
+  pnl         Float?
+  pnlPercent  Float?
+  screenshot  String?  // path to screenshot
+  notes       String?
+  tags        String?  // comma-separated tags
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  journal     TradeJournalEntry?
+}
+
+model TradeJournalEntry {
+  id          String   @id @default(cuid())
+  tradeId     String   @unique
+  trade       PaperTrade @relation(fields: [tradeId], references: [id])
+  mood        String   @default("NEUTRAL")  // CONFIDENT / NEUTRAL / ANXIOUS / FOMO
+  marketContext String?
+  emotions    String?
+  lessonsLearned String?
+  rating      Int?     // 1-5 self-rating
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model BacktestRun {
+  id            String   @id @default(cuid())
+  name          String
+  symbol        String
+  startDate     DateTime
+  endDate       DateTime
+  initialCapital Float
+  finalCapital  Float
+  totalTrades   Int
+  winTrades     Int
+  lossTrades    Int
+  winRate       Float
+  profitFactor  Float
+  maxDrawdown   Float
+  avgWin        Float
+  avgLoss       Float
+  bestTrade     Float
+  worstTrade    Float
+  sharpeRatio   Float?
+  config        String   // JSON string of parameters used
+  createdAt     DateTime @default(now())
+  trades        BacktestTrade[]
+}
+
+model BacktestTrade {
+  id            String   @id @default(cuid())
+  runId         String
+  run           BacktestRun @relation(fields: [runId], references: [id])
+  symbol        String
+  entryDate     DateTime
+  entryPrice    Float
+  exitDate      DateTime
+  exitPrice     Float
+  qty           Int
+  pnl           Float
+  pnlPercent    Float
+  score         Int
+  setupType     String
+  exitReason    String  // TP_HIT / SL_HIT / DEAD_CAPITAL / TRAIL_STOP
+  createdAt     DateTime @default(now())
+}
+
+model AppSettings {
+  id           String   @id @default(cuid())
+  key          String   @unique
+  value        String
+  updatedAt    DateTime @updatedAt
+}
