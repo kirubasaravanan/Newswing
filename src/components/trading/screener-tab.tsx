@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils';
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts';
+import { WatchlistPanel } from './watchlist-panel';
 
 const SCORE_LABELS = ['Trend', 'Pullback', 'Trigger', 'Volume', 'RS vs Nifty', 'Gap < 3.5%'];
 const SCORE_ICONS = [TrendingUp, ArrowDownRight, Zap, BarChart2, Activity, Shield];
@@ -231,7 +232,22 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
     config, lastScanTime, setLastScanTime,
   } = useTradeStore();
 
-  const [selectedSymbols] = useState<string[]>(DEFAULT_WATCHLIST.map(s => s.symbol));
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>(DEFAULT_WATCHLIST.map(s => s.symbol));
+  const [watchlistCount, setWatchlistCount] = useState(selectedSymbols.length);
+
+  // Fetch watchlist symbols from DB
+  useEffect(() => {
+    fetch('/api/watchlist')
+      .then(res => res.json())
+      .then(data => {
+        if (data.success && data.stocks.length > 0) {
+          const syms = data.stocks.map((s: any) => s.symbol);
+          setSelectedSymbols(syms);
+          setWatchlistCount(syms.length);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const runScan = useCallback(async () => {
     setIsScreening(true);
@@ -282,6 +298,7 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
           <span className="text-xs text-muted-foreground mr-1 hidden sm:inline">
             {selectedSymbols.length} stocks
           </span>
+          <WatchlistPanel stockCount={watchlistCount} />
           <ConfigPanel />
           <Button
             onClick={runScan}

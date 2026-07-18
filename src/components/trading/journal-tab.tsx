@@ -15,10 +15,12 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { BookOpen, Plus, X, TrendingUp, TrendingDown, Minus,
-  Edit, Trash2, ChevronDown, ChevronUp, Brain, Download } from 'lucide-react';
+  Edit, Trash2, ChevronDown, ChevronUp, Brain, Download, Shield } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { ScreeningResult } from '@/lib/trading/screening-engine';
 import { toast } from 'sonner';
+import { TradeQualityChecklist, type ChecklistItem } from './trade-quality-checklist';
+import { LivePnlTracker } from './live-pnl-tracker';
 
 interface Trade {
   id: string;
@@ -66,6 +68,7 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
   const [closeTradeId, setCloseTradeId] = useState<string | null>(null);
   const [journalTradeId, setJournalTradeId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [checklistOpen, setChecklistOpen] = useState(false);
 
   // Form state
   const [form, setForm] = useState({
@@ -115,7 +118,65 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
 
   useEffect(() => { fetchTrades(); }, [fetchTrades]);
 
+  // Build trade quality checklist
+  const buildChecklist = (): ChecklistItem[] => {
+    const items: ChecklistItem[] = [];
+    const ep = parseFloat(form.entryPrice) || 0;
+    const sl = parseFloat(form.stopLoss) || 0;
+    const tp = parseFloat(form.targetPrice) || 0;
+    const qty = parseInt(form.qty) || 0;
+    const riskPerShare = ep > 0 && sl > 0 ? ep - sl : 0;
+    const rr = riskPerShare > 0 && tp > 0 ? (tp - ep) / riskPerShare : 0;
+
+    items.push({
+      id: 'symbol', label: 'Symbol specified',
+      description: 'Trade symbol is entered',
+      passed: form.symbol.trim().length > 0, critical: true,
+    });
+    items.push({
+      id: 'price', label: 'Valid entry price',
+      description: 'Entry price must be a positive number',
+      passed: ep > 0, critical: true,
+    });
+    items.push({
+      id: 'qty', label: 'Valid quantity',
+      description: 'Quantity must be a positive integer',
+      passed: qty > 0, critical: true,
+    });
+    items.push({
+      id: 'sl', label: 'Stop Loss set',
+      description: 'Every trade must have a stop loss to limit downside risk',
+      passed: sl > 0 && sl < ep, critical: true,
+    });
+    items.push({
+      id: 'rr', label: `Risk:Reward >= 1.5x (current: ${rr.toFixed(1)}x)`,
+      description: 'V-Swing requires minimum 1.5:1 R:R for favorable expectancy',
+      passed: rr >= 1.5, critical: true,
+    });
+    items.push({
+      id: 'tp', label: 'Target price set',
+      description: 'Having a target helps manage trade expectations',
+      passed: tp > ep, critical: false,
+    });
+    items.push({
+      id: 'capital_risk', label: 'Capital risk < 2%',
+      description: 'Single trade should not risk more than 2% of total capital',
+      passed: riskPerShare > 0 && (riskPerShare * qty) < 4000, critical: false,
+    });
+    items.push({
+      id: 'notes', label: 'Trade notes added',
+      description: 'Documenting the reason for the trade improves future review',
+      passed: form.notes.trim().length > 10, critical: false,
+    });
+    return items;
+  };
+
+  const openChecklist = () => {
+    setChecklistOpen(true);
+  };
+
   const createTrade = async () => {
+    setChecklistOpen(false);
     try {
       await fetch('/api/trades', {
         method: 'POST',
@@ -287,8 +348,9 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
               <DialogClose asChild>
                 <Button variant="outline">Cancel</Button>
               </DialogClose>
-              <Button onClick={createTrade} disabled={!form.symbol || !form.entryPrice || !form.qty || !form.stopLoss}>
-                Add Trade
+              <Button onClick={openChecklist} disabled={!form.symbol || !form.entryPrice || !form.qty || !form.stopLoss}>
+                <Shield className="h-4 w-4 mr-2" />
+                Quality Check & Add
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -315,6 +377,9 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
           </div>
         </CardContent></Card>
       </div>
+
+      {/* Live P&L Tracker for open positions */}
+      <LivePnlTracker />
 
       {/* Trade List */}
       <ScrollArea className="max-h-[calc(100vh-340px)]">
@@ -500,6 +565,15 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
           ))}
         </div>
       </ScrollArea>
+
+      {/* Trade Quality Checklist Dialog */}
+      <TradeQualityChecklist
+        open={checklistOpen}
+        onClose={() => setChecklistOpen(false)}
+        onConfirm={createTrade}
+        checklistItems={buildChecklist()}
+        symbol={form.symbol || 'TRADE'}
+      />
     </div>
   );
 }
