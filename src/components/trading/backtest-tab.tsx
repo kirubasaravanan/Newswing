@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useTradeStore } from '@/store/trade-store';
 import { DEFAULT_WATCHLIST, type BacktestResult } from '@/lib/trading/screening-engine';
 import { Button } from '@/components/ui/button';
@@ -35,7 +35,7 @@ export function BacktestTab() {
     }
   }, []);
 
-  useState(() => { fetchPastRuns(); });
+  useEffect(() => { fetchPastRuns(); }, [fetchPastRuns]);
 
   const runBacktest = async () => {
     setRunning(true);

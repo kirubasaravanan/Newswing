@@ -145,18 +145,6 @@ model CapitalWallet {
   createdAt     DateTime @default(now())
 }
 
-model PositionLimit {
-  id              String   @id @default(cuid())
-  symbol          String   @unique
-  maxPerStock     Float    @default(50000)    // Max ₹ per stock (e.g. 50K)
-  maxBuysPerMonth Int      @default(3)        // Max entries per stock per month
-  maxHoldingDays  Int      @default(25)       // Max holding period in days
-  maxTotalPositions Int    @default(8)        // Max concurrent positions
-  riskPerTrade    Float    @default(1.0)      // % risk per trade
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-}
-
 model AutoTradeLog {
   id            String   @id @default(cuid())
   action        String   // AUTO_ENTRY / AUTO_EXIT_TP / AUTO_EXIT_SL / AUTO_EXIT_MAX_HOLDING / AUTO_EXIT_TRAIL

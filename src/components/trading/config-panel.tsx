@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { useTradeStore } from '@/store/trade-store';
-import { DEFAULT_WATCHLIST } from '@/lib/trading/screening-engine';
 import type { ScreeningConfig } from '@/lib/trading/screening-engine';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
