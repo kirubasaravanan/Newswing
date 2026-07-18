@@ -23,13 +23,15 @@ export async function POST(request: NextRequest) {
         symbol: body.symbol,
         stockName: body.stockName || null,
         direction: body.direction || 'LONG',
-        entryDate: new Date(body.entryDate),
+        entryDate: new Date(body.entryDate || Date.now()),
         entryPrice: parseFloat(body.entryPrice),
         qty: parseInt(body.qty),
         stopLoss: parseFloat(body.stopLoss),
         targetPrice: parseFloat(body.targetPrice),
         notes: body.notes || null,
         tags: body.tags || null,
+        autoTraded: body.autoTraded || false,
+        exitReason: body.exitReason || null,
       },
     });
     return NextResponse.json({ success: true, trade });
@@ -38,19 +40,34 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// PUT update a trade (close it)
+// PUT update a trade (close it) — updates CapitalWallet like a real PMS
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json();
-    const { id, exitDate, exitPrice, status } = body;
-    
+    const { id, exitDate, exitPrice, status, exitReason } = body;
+
     const trade = await db.paperTrade.findUnique({ where: { id } });
     if (!trade) {
       return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
     }
 
-    const pnl = exitPrice ? (exitPrice - trade.entryPrice) * trade.qty : null;
-    const pnlPercent = exitPrice ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100 : null;
+    // Calculate P&L with direction awareness
+    let pnl: number | null = null;
+    let pnlPercent: number | null = null;
+
+    if (exitPrice != null) {
+      const ep = trade.entryPrice;
+      const xp = parseFloat(exitPrice);
+      if (trade.direction === 'SHORT') {
+        // SHORT: profit when price goes down
+        pnl = (ep - xp) * trade.qty;
+        pnlPercent = ((ep - xp) / ep) * 100;
+      } else {
+        // LONG: profit when price goes up
+        pnl = (xp - ep) * trade.qty;
+        pnlPercent = ((xp - ep) / ep) * 100;
+      }
+    }
 
     const updated = await db.paperTrade.update({
       where: { id },
@@ -60,8 +77,25 @@ export async function PUT(request: NextRequest) {
         pnl,
         pnlPercent,
         status: status || 'CLOSED',
+        exitReason: exitReason || 'MANUAL',
       },
     });
+
+    // ── CRITICAL: Update CapitalWallet when closing a trade ──
+    if (pnl != null && (status === 'CLOSED' || !status)) {
+      try {
+        const wallet = await db.capitalWallet.findFirst();
+        if (wallet) {
+          await db.capitalWallet.update({
+            where: { id: wallet.id },
+            data: { realizedPnl: wallet.realizedPnl + pnl },
+          });
+        }
+      } catch (walletErr) {
+        console.error('Wallet update failed on trade close:', walletErr);
+      }
+    }
+
     return NextResponse.json({ success: true, trade: updated });
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });

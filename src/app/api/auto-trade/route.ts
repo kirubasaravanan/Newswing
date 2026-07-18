@@ -133,7 +133,7 @@ async function resetDailyCounters() {
 
 async function getWallet() {
   let w = await db.capitalWallet.findFirst();
-  if (!w) w = await db.capitalWallet.create({ data: { totalCapital: 200000, available: 200000 } });
+  if (!w) w = await db.capitalWallet.create({ data: { totalCapital: 200000, initialCapital: 200000, available: 200000 } });
   return w;
 }
 
@@ -153,7 +153,7 @@ async function recalcWallet() {
     } catch { /* skip */ }
   }
   await db.capitalWallet.update({ where: { id: w.id }, data: { deployed, available: total - deployed, unrealizedPnl, totalCapital: total } });
-  return { ...w, deployed, available: total - deployed, unrealizedPnl, totalCapital: total };
+  return { ...w, deployed, available: total - deployed, unrealizedPnl, totalCapital: total, initialCapital: w.initialCapital };
 }
 
 async function getSectorAllocation(): Promise<Record<string, number>> {

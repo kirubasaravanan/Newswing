@@ -138,15 +138,30 @@ model AppSettings {
 }
 
 model CapitalWallet {
-  id            String   @id @default(cuid())
-  name          String   @default("Main Wallet")
-  totalCapital  Float    @default(200000)    // Total allocated capital
-  deployed      Float    @default(0)         // Currently invested
-  available     Float    @default(200000)    // Available for new trades
-  realizedPnl   Float    @default(0)         // Total realized P&L
-  unrealizedPnl Float    @default(0)         // Current open positions P&L
-  updatedAt     DateTime @updatedAt
-  createdAt     DateTime @default(now())
+  id             String   @id @default(cuid())
+  name           String   @default("Main Wallet")
+  totalCapital   Float    @default(200000)    // Current total (base + realized P&L)
+  initialCapital Float    @default(200000)    // Original allocated capital (never changes from recalc)
+  deployed       Float    @default(0)         // Currently invested
+  available      Float    @default(200000)    // Available for new trades
+  realizedPnl    Float    @default(0)         // Total realized P&L
+  unrealizedPnl  Float    @default(0)         // Current open positions P&L
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+}
+
+model DailySnapshot {
+  id             String   @id @default(cuid())
+  date           String   @unique             // YYYY-MM-DD
+  nav            Float                       // Net Asset Value = totalCapital + unrealizedPnl
+  realizedPnl    Float    @default(0)
+  unrealizedPnl  Float    @default(0)
+  totalCapital   Float    @default(0)
+  deployed       Float    @default(0)
+  openPositions  Int      @default(0)
+  dailyPnl       Float    @default(0)         // P&L change from previous snapshot
+  dailyReturn    Float    @default(0)         // % return from previous snapshot
+  createdAt      DateTime @default(now())
 }
 
 model AutoTradeLog {

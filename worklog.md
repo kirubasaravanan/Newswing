@@ -86,3 +86,42 @@ Stage Summary:
 - Real-time monitoring: 30s refresh, R-multiple tracking, SL proximity alerts
 - Complete audit trail: every action logged with signal details
 - Zero mock data, all Yahoo Finance live
+
+---
+Task ID: 10-15
+Agent: Main Agent
+Task: PMS Logic Deep Fixes — Data Integrity, Risk Math, Equity Curve, Screener Integration
+
+Work Log:
+- Fixed trades/route.ts PUT: manual sell now updates CapitalWallet.realizedPnl (was a data integrity bug causing wallet to go stale)
+- Fixed trades/route.ts: Added SHORT direction P&L calculation (was always using LONG formula)
+- Fixed trades/route.ts: Added exitReason field on manual close (was not set)
+- Rewrote risk-metrics/route.ts:
+  - Changed from absolute ₹ to % returns for Sharpe/Sortino/VaR
+  - Fixed Sortino formula: divide by N not just negative count (was inflating the ratio)
+  - Fixed CAGR: uses actual wallet initialCapital instead of hardcoded 200000
+  - Uses sample std dev (n-1) instead of population
+  - Min 5 trades required (was 2 — statistically meaningless)
+  - Added R-multiple calculation per trade (pnl / risk per share)
+  - Added Expectancy, Profit Factor, Avg R-Multiple, Avg Win/Loss, Win Rate
+  - VaR now returns % not ₹
+  - All best/worst trade values in % not ₹
+- Added DailySnapshot model to Prisma schema (date, nav, realizedPnl, unrealizedPnl, dailyPnl, dailyReturn, openPositions)
+- Added initialCapital field to CapitalWallet (preserved separately from totalCapital)
+- Created /api/portfolio/equity-curve API (GET with drawdown overlay, POST for forced snapshot)
+- Added EquityCurveCard component to analytics-tab: NAV line chart + drawdown bars + summary stats
+- Added RMultipleDistribution component to analytics-tab: histogram of R-multiples with green/red bars + expectancy/PF stats
+- Updated analytics-tab: 12 risk metric items (added Expectancy, Avg R-Multiple, Profit Factor), VaR in %, best/worst in %
+- Added auto-trade button to screener ResultCard (single stock → calls /api/auto-trade scan_and_trade)
+- Added "Auto-Trade All A+" bulk action button to screener summary cards
+- Fixed auto-trade getWallet() to set initialCapital on wallet creation
+- Fixed auto-trade recalcWallet() to return initialCapital in response
+- Build verified: 26 routes, 0 errors
+
+Stage Summary:
+- Critical data integrity bugs fixed (wallet not updating on manual sell, wrong SHORT P&L)
+- Risk metrics now mathematically correct (% returns, proper Sortino, real capital)
+- Equity curve with daily NAV tracking and drawdown overlay
+- R-multiple distribution for strategy evaluation
+- Screener → Auto-Trade integration complete (single + bulk A+)
+- initialCapital tracking preserves base capital across P&L recalculation

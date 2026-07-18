@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
-  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine, Cell, Legend,
+  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine, Cell, Legend, ComposedChart,
 } from 'recharts';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -52,11 +52,14 @@ function RiskMetricsCard() {
     { label: 'Sortino Ratio', value: m.sortino.toFixed(2), color: m.sortino >= 1.5 ? 'text-emerald-400' : 'text-amber-400', desc: 'Downside risk adjusted' },
     { label: 'Max Drawdown', value: `${m.maxDD.toFixed(1)}%`, color: 'text-red-400', desc: 'Worst peak-to-trough' },
     { label: 'Calmar Ratio', value: m.calmar.toFixed(2), color: m.calmar >= 1 ? 'text-emerald-400' : 'text-amber-400', desc: 'Return / MaxDD' },
-    { label: 'VaR (95%)', value: `₹${Math.abs(m.var95).toLocaleString()}`, color: 'text-red-400', desc: 'Max daily loss (95% conf)' },
+    { label: 'VaR (95%)', value: `${m.var95.toFixed(2)}%`, color: 'text-red-400', desc: 'Worst 5% day loss' },
     { label: 'CAGR', value: `${m.cagr.toFixed(1)}%`, color: m.cagr >= 15 ? 'text-emerald-400' : 'text-amber-400', desc: 'Annualized return' },
+    { label: 'Expectancy', value: `${m.expectancy?.toFixed(2) || 0}%`, color: (m.expectancy || 0) > 0 ? 'text-emerald-400' : 'text-red-400', desc: 'Avg win% x WR - Avg loss% x LR' },
+    { label: 'Avg R-Multiple', value: `${m.avgRMultiple?.toFixed(2) || 0}R`, color: (m.avgRMultiple || 0) >= 1 ? 'text-emerald-400' : 'text-red-400', desc: 'Avg profit / risk per trade' },
+    { label: 'Profit Factor', value: m.profitFactor?.toFixed(2) || '0', color: (m.profitFactor || 0) >= 1.5 ? 'text-emerald-400' : 'text-amber-400', desc: 'Gross profit / gross loss' },
     { label: 'Avg Holding', value: `${m.avgHoldingDays}d`, color: 'text-indigo-400', desc: 'Average trade duration' },
-    { label: 'Best Trade', value: `₹${m.bestTrade.toLocaleString()}`, color: 'text-emerald-400', desc: '' },
-    { label: 'Worst Trade', value: `₹${m.worstTrade.toLocaleString()}`, color: 'text-red-400', desc: '' },
+    { label: 'Best Trade', value: `${m.bestTrade?.toFixed(1) || 0}%`, color: 'text-emerald-400', desc: '' },
+    { label: 'Worst Trade', value: `${m.worstTrade?.toFixed(1) || 0}%`, color: 'text-red-400', desc: '' },
   ];
 
   return (
@@ -528,6 +531,162 @@ function DividendTracker() {
   );
 }
 
+// ── R-Multiple Distribution ────────────────────────────
+function RMultipleDistribution() {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/portfolio/risk-metrics');
+        const json = await res.json();
+        if (json.success) setData(json);
+      } catch { /* ignore */ }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+  if (!data || !data.rMultiples?.length) return <p className="text-center py-8 text-muted-foreground text-sm">No closed trades yet.</p>;
+
+  const rMultiples = data.rMultiples;
+  const m = data.metrics;
+
+  // Build histogram buckets
+  const buckets: { range: string; count: number; positive: boolean }[] = [];
+  const ranges = [
+    [-10, -3], [-3, -2], [-2, -1], [-1, -0.5], [-0.5, 0],
+    [0, 0.5], [0.5, 1], [1, 1.5], [1.5, 2], [2, 3], [3, 10],
+  ];
+  for (const [lo, hi] of ranges) {
+    const count = rMultiples.filter(r => r >= lo && r < hi).length;
+    if (count > 0) buckets.push({ range: `${lo}R to ${hi}R`, count, positive: lo >= 0 });
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold">R-Multiple Distribution</h3>
+        <div className="flex gap-4 text-xs">
+          <span className="text-muted-foreground">Avg: <span className={cn('font-bold', (m.avgRMultiple || 0) >= 1 ? 'text-emerald-400' : 'text-red-400')}>{m.avgRMultiple?.toFixed(2) || 0}R</span></span>
+          <span className="text-muted-foreground">Expectancy: <span className={cn('font-bold', (m.expectancy || 0) > 0 ? 'text-emerald-400' : 'text-red-400')}>{m.expectancy?.toFixed(2) || 0}%</span></span>
+        </div>
+      </div>
+      <div className="h-[250px]">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={buckets}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+            <XAxis dataKey="range" tick={{ fontSize: 9, fill: '#71717a' }} angle={-45} textAnchor="end" height={60} />
+            <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
+            <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 11 }} />
+            <ReferenceLine x={0} stroke="rgba(255,255,255,0.2)" />
+            <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+              {buckets.map((b, i) => <Cell key={i} fill={b.positive ? '#10b981' : '#ef4444'} fillOpacity={0.8} />)}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Profit Factor</div>
+          <div className={cn('text-lg font-bold font-mono', (m.profitFactor || 0) >= 1.5 ? 'text-emerald-400' : 'text-amber-400')}>
+            {m.profitFactor?.toFixed(2) || '0'}x
+          </div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Avg Win</div>
+          <div className="text-lg font-bold font-mono text-emerald-400">{m.avgWin?.toFixed(2) || 0}%</div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Avg Loss</div>
+          <div className="text-lg font-bold font-mono text-red-400">{m.avgLoss?.toFixed(2) || 0}%</div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Win Rate</div>
+          <div className="text-lg font-bold font-mono text-indigo-400">{m.winRate?.toFixed(1) || 0}%</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Equity Curve with Drawdown ─────────────────────────
+function EquityCurveCard() {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/portfolio/equity-curve?days=90');
+        const json = await res.json();
+        if (json.success) setData(json);
+      } catch { /* ignore */ }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+  if (!data || !data.chartData?.length) return (
+    <div className="text-center py-8">
+      <p className="text-sm text-muted-foreground">No equity curve data yet.</p>
+      <p className="text-xs text-muted-foreground mt-1">NAV snapshots are taken when you visit Dashboard or Analytics.</p>
+    </div>
+  );
+
+  const s = data.summary;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold">Equity Curve & Drawdown</h3>
+        <div className="flex gap-3 text-xs">
+          <span className="text-muted-foreground">NAV: <span className="font-bold font-mono">₹{s.currentNAV.toLocaleString()}</span></span>
+          <span className={cn('font-mono', s.totalReturn >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+            {s.totalReturn >= 0 ? '+' : ''}{s.totalReturn.toFixed(2)}%
+          </span>
+        </div>
+      </div>
+      <div className="h-[280px]">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={data.chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+            <XAxis dataKey="date" tick={{ fontSize: 9, fill: '#71717a' }} interval={Math.floor(data.chartData.length / 6)} />
+            <YAxis yAxisId="nav" tick={{ fontSize: 10, fill: '#71717a' }} />
+            <YAxis yAxisId="dd" orientation="right" tick={{ fontSize: 9, fill: '#ef4444' }} />
+            <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 11 }} />
+            <ReferenceLine yAxisId="dd" y={0} stroke="rgba(255,255,255,0.15)" />
+            <Area yAxisId="nav" type="monotone" dataKey="nav" stroke="#6366f1" fill="url(#navGrad)" strokeWidth={2} name="NAV" dot={false} />
+            <Bar yAxisId="dd" dataKey="drawdown" fill="#ef4444" fillOpacity={0.3} name="Drawdown %" />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <defs>
+              <linearGradient id="navGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="#6366f1" stopOpacity={0.15} />
+                <stop offset="95%" stopColor="transparent" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        {[
+          { l: 'Total Return', v: `${s.totalReturn >= 0 ? '+' : ''}${s.totalReturn.toFixed(2)}%`, c: s.totalReturn >= 0 ? 'text-emerald-400' : 'text-red-400' },
+          { l: 'Max Drawdown', v: `-${s.maxDD.toFixed(2)}%`, c: 'text-red-400' },
+          { l: 'Best Day', v: `+₹${s.bestDay.toLocaleString()}`, c: 'text-emerald-400' },
+          { l: 'Worst Day', v: `₹${s.worstDay.toLocaleString()}`, c: 'text-red-400' },
+          { l: 'Positive Days', v: `${s.positiveDays}/${s.snapshots}`, c: 'text-indigo-400' },
+        ].map(item => (
+          <div key={item.l} className="rounded-lg bg-secondary/50 p-3">
+            <div className="text-[10px] text-muted-foreground uppercase">{item.l}</div>
+            <div className={cn('text-sm font-bold font-mono mt-0.5', item.c)}>{item.v}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Main Analytics Tab ─────────────────────────────────
 export function AnalyticsTab() {
   const [trades, setTrades] = useState<any[]>([]);
@@ -606,6 +765,8 @@ export function AnalyticsTab() {
         <TabsList className="w-full justify-start mb-4">
           <TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger>
           <TabsTrigger value="risk" className="text-xs">Risk Metrics</TabsTrigger>
+          <TabsTrigger value="rmultiple" className="text-xs">R-Multiples</TabsTrigger>
+          <TabsTrigger value="equity" className="text-xs">Equity Curve</TabsTrigger>
           <TabsTrigger value="benchmark" className="text-xs">Benchmark</TabsTrigger>
           <TabsTrigger value="alerts" className="text-xs">Alerts</TabsTrigger>
           <TabsTrigger value="tax" className="text-xs">Capital Gains</TabsTrigger>
@@ -718,6 +879,8 @@ export function AnalyticsTab() {
         </TabsContent>
 
         <TabsContent value="risk"><Card className="border-border"><CardContent className="p-4"><RiskMetricsCard /></CardContent></Card></TabsContent>
+        <TabsContent value="rmultiple"><Card className="border-border"><CardContent className="p-4"><RMultipleDistribution /></CardContent></Card></TabsContent>
+        <TabsContent value="equity"><Card className="border-border"><CardContent className="p-4"><EquityCurveCard /></CardContent></Card></TabsContent>
         <TabsContent value="benchmark"><Card className="border-border"><CardContent className="p-4"><BenchmarkChart /></CardContent></Card></TabsContent>
         <TabsContent value="alerts"><Card className="border-border"><CardContent className="p-4"><AlertsPanel /></CardContent></Card></TabsContent>
         <TabsContent value="tax"><Card className="border-border"><CardContent className="p-4"><CapitalGainsReport /></CardContent></Card></TabsContent>

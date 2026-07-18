@@ -12,7 +12,7 @@ import { toast } from 'sonner';
 import {
   Radar, Play, Clock, ArrowUpRight, ArrowDownRight,
   Shield, TrendingUp, BarChart2, Activity, Zap,
-  ChevronDown, ChevronUp, Plus, Target, StopCircle,
+  ChevronDown, ChevronUp, Plus, Target, StopCircle, Bot, Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -85,6 +85,7 @@ function MiniChart({ symbol, entryPrice, stopLoss, targetPrice }: { symbol: stri
 
 function ResultCard({ result, onAddTrade }: { result: ScreeningResult; onAddTrade: (r: ScreeningResult) => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [autoTrading, setAutoTrading] = useState(false);
   const isAPlus = result.setupType === 'A+';
   const qty = isAPlus ? result.sizing.qtyA : result.sizing.qtyB;
   const riskAmt = isAPlus ? result.sizing.riskAmtA : result.sizing.riskAmtB;
@@ -94,6 +95,33 @@ function ResultCard({ result, onAddTrade }: { result: ScreeningResult; onAddTrad
     toast.success(`${result.symbol} added to Paper Trade Journal`, {
       description: `${result.setupType} Setup | Score ${result.score}/6 | Qty: ${qty}`,
     });
+  };
+
+  const handleAutoTrade = async () => {
+    setAutoTrading(true);
+    try {
+      const res = await fetch('/api/auto-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'scan_and_trade',
+          config: { liveCapital: 200000, riskPct: 1.0, maxSlots: 8, minScore: 3, minRR: 1.5 },
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        const entry = data.entries?.find((e: any) => e.symbol === result.symbol);
+        if (entry) {
+          toast.success(`${result.symbol} auto-entered`, {
+            description: `${result.setupType} | Qty ${entry.qty} @ ₹${entry.entryPrice}`,
+          });
+        } else {
+          const skip = data.skipped?.find((s: any) => s.symbol === result.symbol);
+          toast.info(`${result.symbol} skipped`, { description: skip?.reason || 'Rule violation' });
+        }
+      }
+    } catch { toast.error('Auto-trade failed'); }
+    finally { setAutoTrading(false); }
   };
 
   return (
@@ -137,6 +165,15 @@ function ResultCard({ result, onAddTrade }: { result: ScreeningResult; onAddTrad
             >
               <Plus className="h-3 w-3" />
               <span className="hidden sm:inline">Paper Trade</span>
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleAutoTrade}
+              disabled={autoTrading}
+              className="h-7 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700"
+            >
+              {autoTrading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Bot className="h-3 w-3" />}
+              <span className="hidden sm:inline">Auto Trade</span>
             </Button>
             <Button
               variant="ghost"
@@ -283,6 +320,30 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
 
   const aPlusCount = screeningResults.filter(r => r.score === 6).length;
   const bCount = screeningResults.filter(r => r.score < 6).length;
+  const [bulkTrading, setBulkTrading] = useState(false);
+
+  const handleBulkAutoTrade = async () => {
+    const aPlusResults = screeningResults.filter(r => r.score === 6);
+    if (aPlusResults.length === 0) { toast.info('No A+ setups to auto-trade'); return; }
+    setBulkTrading(true);
+    try {
+      const res = await fetch('/api/auto-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'scan_and_trade',
+          config: { liveCapital: 200000, riskPct: 1.0, maxSlots: 8, minScore: 6, minRR: 1.5 },
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(`Bulk Auto-Trade: ${data.entries.length} entered, ${data.skipped.length} skipped`, {
+          description: data.entries.map((e: any) => e.symbol).join(', ') || 'No new entries',
+        });
+      }
+    } catch { toast.error('Bulk auto-trade failed'); }
+    finally { setBulkTrading(false); }
+  };
 
   return (
     <div className="space-y-4">
@@ -334,7 +395,7 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
 
       {/* Summary Cards */}
       {screeningResults.length > 0 && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
           <Card className="border-border">
             <CardContent className="p-3">
               <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Signals</div>
@@ -362,6 +423,20 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
                   : '0'
                 }x
               </div>
+            </CardContent>
+          </Card>
+          <Card className="border-emerald-500/30 bg-emerald-500/5">
+            <CardContent className="p-3 flex flex-col justify-between h-full">
+              <div className="text-[10px] uppercase tracking-wider text-emerald-400">Quick Actions</div>
+              <Button
+                size="sm"
+                onClick={handleBulkAutoTrade}
+                disabled={bulkTrading || aPlusCount === 0}
+                className="mt-1.5 h-8 text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700"
+              >
+                {bulkTrading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Bot className="h-3 w-3" />}
+                Auto-Trade All A+ ({aPlusCount})
+              </Button>
             </CardContent>
           </Card>
         </div>
