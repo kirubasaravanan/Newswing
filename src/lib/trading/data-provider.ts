@@ -1,12 +1,16 @@
 /**
  * Data Provider Layer
- * Provides real market data via Yahoo Finance with mock fallback.
- * 
+ * Provides real market data via Yahoo Finance REST API (direct fetch)
+ * with mock fallback.
+ *
  * Data paths:
- *   - Historical OHLCV → Yahoo Finance (up to 10 years daily)
- *   - Current/LTP price → Yahoo Finance quote
+ *   - Historical OHLCV → Yahoo Finance chart API (up to 10 years daily)
+ *   - Current/LTP price → Yahoo Finance quote API
  *   - Chart display → TradingView Widget (client-side embed)
  *   - Fallback → Mock data generator (if API fails)
+ *
+ * NOTE: We use direct fetch() to Yahoo Finance instead of the yahoo-finance2
+ * npm package, which causes native crashes in the Next.js server context.
  */
 
 import type { OHLCV } from './screening-engine';
@@ -22,7 +26,6 @@ const SYMBOL_MAP: Record<string, string> = {
 
 export function toYahooSymbol(nseSymbol: string): string {
   if (SYMBOL_MAP[nseSymbol]) return SYMBOL_MAP[nseSymbol];
-  // Most NSE stocks: RELIANCE → RELIANCE.NS
   if (nseSymbol.endsWith('.NS')) return nseSymbol;
   return `${nseSymbol}.NS`;
 }
@@ -46,10 +49,10 @@ export interface DataProviderStatus {
 const historicalCache = new Map<string, { data: OHLCV[]; fetchedAt: number }>();
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
-// Rate limiter: max 2 requests per second for Yahoo Finance free tier
+// Rate limiter: max ~2.5 requests per second for Yahoo Finance
 const requestQueue: Array<() => Promise<void>> = [];
 let isProcessing = false;
-const MIN_INTERVAL = 350; // ms between requests
+const MIN_INTERVAL = 400; // ms between requests
 
 async function rateLimitedFetch<T>(fn: () => Promise<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -61,7 +64,6 @@ async function rateLimitedFetch<T>(fn: () => Promise<T>): Promise<T> {
         reject(err);
       }
     });
-    // Ensure queue processing doesn't crash on unhandled rejections
     processQueue().catch(() => {});
   });
 }
@@ -74,58 +76,102 @@ async function processQueue() {
     try {
       await task();
     } catch (err) {
-      // Swallow task-level errors — they're handled by the caller via resolve/reject
+      // Task-level errors handled by caller
     }
     await new Promise(r => setTimeout(r, MIN_INTERVAL));
   }
   isProcessing = false;
 }
 
-// ── Yahoo Finance Historical Data ─────────────────────────
+// ── Yahoo Finance Direct API ──────────────────────────────
 
-// Singleton Yahoo Finance v4 instance
-let yfInstance: any = null;
-async function getYahooFinance() {
-  if (!yfInstance) {
-    const mod = await import('yahoo-finance2');
-    yfInstance = new mod.default({ 
-      suppressNotices: ['yahooSurvey'],
-      validation: { logErrors: false },
-    });
-  }
-  return yfInstance;
+const YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+const YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v7/finance/quote?';
+
+const YAHOO_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+};
+
+interface YahooChartResult {
+  timestamp: number[];
+  indicators: {
+    quote: Array<{
+      open: (number | null)[];
+      high: (number | null)[];
+      low: (number | null)[];
+      close: (number | null)[];
+      volume: (number | null)[];
+    }>;
+  };
+}
+
+interface YahooQuoteResponse {
+  quoteResponse: {
+    result: Array<{
+      regularMarketPrice: number;
+      regularMarketChange: number;
+      regularMarketChangePercent: number;
+      regularMarketVolume: number;
+      regularMarketDayHigh: number;
+      regularMarketDayLow: number;
+      regularMarketPreviousClose: number;
+      marketCap: number;
+      shortName: string;
+    }>;
+    error: any;
+  };
 }
 
 async function fetchYahooHistorical(
   symbol: string,
   days: number = 300
 ): Promise<OHLCV[]> {
-  const yahooFinance = await getYahooFinance();
   const yahooSym = toYahooSymbol(symbol);
-  const endDate = new Date();
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - days * 1.5);
+  const endDate = Math.floor(Date.now() / 1000);
+  const startDate = Math.floor((Date.now() - days * 1.5 * 86400000) / 1000);
 
-  const result = await yahooFinance.chart(yahooSym, {
-    period1: startDate,
-    period2: endDate,
-    interval: '1d' as const,
-  });
+  const url = `${YAHOO_CHART_URL}${encodeURIComponent(yahooSym)}?period1=${startDate}&period2=${endDate}&interval=1d`;
 
-  if (!result || !result.quotes || result.quotes.length === 0) {
-    throw new Error(`No data returned for ${yahooSym}`);
+  const response = await fetch(url, { headers: YAHOO_HEADERS });
+  if (!response.ok) {
+    throw new Error(`Yahoo chart HTTP ${response.status} for ${yahooSym}`);
   }
 
-  const candles: OHLCV[] = result.quotes
-    .filter((q: any) => q.close != null && q.open != null && q.high != null && q.low != null && q.volume != null)
-    .map((q: any) => ({
-      date: typeof q.date === 'string' ? q.date.split('T')[0] : (q.date?.toISOString?.()?.split('T')[0] || new Date().toISOString().split('T')[0]),
-      open: Math.round(q.open * 100) / 100,
-      high: Math.round(q.high * 100) / 100,
-      low: Math.round(q.low * 100) / 100,
-      close: Math.round(q.close * 100) / 100,
-      volume: q.volume || 0,
-    }));
+  const json = await response.json() as any;
+
+  if (!json.chart?.result?.[0]) {
+    const errMsg = json.chart?.error?.description || 'No result';
+    throw new Error(`Yahoo chart error for ${yahooSym}: ${errMsg}`);
+  }
+
+  const result: YahooChartResult = json.chart.result[0];
+  const timestamps = result.timestamp || [];
+  const quote = result.indicators?.quote?.[0];
+
+  if (!quote || !timestamps.length) {
+    throw new Error(`No quote data for ${yahooSym}`);
+  }
+
+  const candles: OHLCV[] = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    const open = quote.open?.[i];
+    const high = quote.high?.[i];
+    const low = quote.low?.[i];
+    const close = quote.close?.[i];
+    const volume = quote.volume?.[i];
+
+    if (open != null && high != null && low != null && close != null && volume != null) {
+      const d = new Date(timestamps[i] * 1000);
+      candles.push({
+        date: d.toISOString().split('T')[0],
+        open: Math.round(open * 100) / 100,
+        high: Math.round(high * 100) / 100,
+        low: Math.round(low * 100) / 100,
+        close: Math.round(close * 100) / 100,
+        volume: volume || 0,
+      });
+    }
+  }
 
   if (candles.length < 10) {
     throw new Error(`Insufficient data for ${yahooSym}: ${candles.length} candles`);
@@ -146,18 +192,30 @@ async function fetchYahooQuote(symbol: string): Promise<{
   previousClose: number;
   marketCap: number | null;
 }> {
-  const yahooFinance = await getYahooFinance();
   const yahooSym = toYahooSymbol(symbol);
-  const quote = await yahooFinance.quote(yahooSym);
+  const url = `${YAHOO_QUOTE_URL}symbols=${encodeURIComponent(yahooSym)}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketVolume,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose,marketCap`;
+
+  const response = await fetch(url, { headers: YAHOO_HEADERS });
+  if (!response.ok) {
+    throw new Error(`Yahoo quote HTTP ${response.status} for ${yahooSym}`);
+  }
+
+  const json: YahooQuoteResponse = await response.json();
+
+  if (json.quoteResponse?.error || !json.quoteResponse?.result?.[0]) {
+    throw new Error(`Yahoo quote error for ${yahooSym}`);
+  }
+
+  const q = json.quoteResponse.result[0];
   return {
-    price: quote.regularMarketPrice || 0,
-    change: quote.regularMarketChange || 0,
-    changePercent: quote.regularMarketChangePercent || 0,
-    volume: quote.regularMarketVolume || 0,
-    high: quote.regularMarketDayHigh || quote.regularMarketPrice || 0,
-    low: quote.regularMarketDayLow || quote.regularMarketPrice || 0,
-    previousClose: quote.regularMarketPreviousClose || 0,
-    marketCap: quote.marketCap || null,
+    price: q.regularMarketPrice || 0,
+    change: q.regularMarketChange || 0,
+    changePercent: q.regularMarketChangePercent || 0,
+    volume: q.regularMarketVolume || 0,
+    high: q.regularMarketDayHigh || q.regularMarketPrice || 0,
+    low: q.regularMarketDayLow || q.regularMarketPrice || 0,
+    previousClose: q.regularMarketPreviousClose || 0,
+    marketCap: q.marketCap || null,
   };
 }
 
@@ -167,9 +225,8 @@ let yahooAvailable: boolean | null = null;
 
 export async function checkYahooAvailability(): Promise<boolean> {
   try {
-    const yahooFinance = await getYahooFinance();
-    const quote = await yahooFinance.quote('^NSEI');
-    yahooAvailable = !!(quote && quote.regularMarketPrice);
+    const quote = await fetchYahooQuote('NIFTY50');
+    yahooAvailable = !!(quote && quote.price > 0);
     return yahooAvailable;
   } catch {
     yahooAvailable = false;
@@ -200,9 +257,8 @@ export async function getHistoricalData(
       yahooAvailable = true;
       return { data, source: 'yahoo' };
     } catch (err) {
-      // Don't permanently disable yahoo for per-symbol failures (e.g. delisted)
       const msg = String(err);
-      if (msg.includes('delisted') || msg.includes('No data found')) {
+      if (msg.includes('delisted') || msg.includes('No data found') || msg.includes('Not Found')) {
         console.warn(`Yahoo: ${symbol} - ${msg.substring(0, 80)}`);
       } else {
         console.error(`Yahoo Finance failed for ${symbol}:`, msg.substring(0, 120));
@@ -253,6 +309,7 @@ export function getDataProviderStatus(): DataProviderStatus {
 
 export function clearCache(): void {
   historicalCache.clear();
+  yahooAvailable = null;
 }
 
 export { fromYahooSymbol };
