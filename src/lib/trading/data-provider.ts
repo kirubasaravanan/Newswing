@@ -49,47 +49,48 @@ export interface DataProviderStatus {
 const historicalCache = new Map<string, { data: OHLCV[]; fetchedAt: number }>();
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
-// Rate limiter: max ~2.5 requests per second for Yahoo Finance
-const requestQueue: Array<() => Promise<void>> = [];
-let isProcessing = false;
-const MIN_INTERVAL = 400; // ms between requests
+// Rate limiter — serializes Yahoo API calls with minimum interval.
+// Uses a promise-chain mutex: each call chains onto the previous one,
+// ensuring only one fetch is in-flight at a time with proper spacing.
+let serialLock: Promise<unknown> = Promise.resolve();
+let lastCallTime = 0;
+const MIN_INTERVAL = 400; // ms between Yahoo API calls
 
-async function rateLimitedFetch<T>(fn: () => Promise<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    requestQueue.push(async () => {
-      try {
-        const result = await fn();
-        resolve(result);
-      } catch (err) {
-        reject(err);
-      }
-    });
-    processQueue().catch(() => {});
+function rateLimitedFetch<T>(fn: () => Promise<T>): Promise<T> {
+  // Create a deferred pair
+  let resolveResult!: (v: T) => void;
+  let rejectResult!: (e: unknown) => void;
+  const resultPromise = new Promise<T>((res, rej) => {
+    resolveResult = res;
+    rejectResult = rej;
   });
-}
 
-async function processQueue() {
-  if (isProcessing) return;
-  isProcessing = true;
-  while (requestQueue.length > 0) {
-    const task = requestQueue.shift()!;
+  // Chain: wait for previous fetch, add delay, then run this fetch
+  serialLock = serialLock.then(async () => {
+    const now = Date.now();
+    const gap = lastCallTime + MIN_INTERVAL - now;
+    if (gap > 0) await new Promise(r => setTimeout(r, gap));
+    lastCallTime = Date.now();
     try {
-      await task();
+      const result = await fn();
+      resolveResult(result);
     } catch (err) {
-      // Task-level errors handled by caller
+      rejectResult(err);
     }
-    await new Promise(r => setTimeout(r, MIN_INTERVAL));
-  }
-  isProcessing = false;
+  }).catch(() => {
+    // Swallow to keep the chain alive — errors are propagated via rejectResult
+  });
+
+  return resultPromise;
 }
 
 // ── Yahoo Finance Direct API ──────────────────────────────
 
 const YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/';
-const YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v7/finance/quote?';
 
 const YAHOO_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Connection': 'close',
 };
 
 interface YahooChartResult {
@@ -105,21 +106,20 @@ interface YahooChartResult {
   };
 }
 
-interface YahooQuoteResponse {
-  quoteResponse: {
-    result: Array<{
-      regularMarketPrice: number;
-      regularMarketChange: number;
-      regularMarketChangePercent: number;
-      regularMarketVolume: number;
-      regularMarketDayHigh: number;
-      regularMarketDayLow: number;
-      regularMarketPreviousClose: number;
-      marketCap: number;
-      shortName: string;
-    }>;
-    error: any;
-  };
+interface YahooChartMeta {
+  regularMarketPrice: number;
+  chartPreviousClose: number;
+  regularMarketDayHigh: number;
+  regularMarketDayLow: number;
+  regularMarketVolume: number;
+  fiftyTwoWeekHigh: number;
+  fiftyTwoWeekLow: number;
+  currency: string;
+  exchangeName: string;
+  shortName: string;
+  longName: string;
+  instrumentType: string;
+  regularMarketTime: number;
 }
 
 async function fetchYahooHistorical(
@@ -192,30 +192,40 @@ async function fetchYahooQuote(symbol: string): Promise<{
   previousClose: number;
   marketCap: number | null;
 }> {
+  // Use chart API with 5-day window — the meta object contains all quote data.
+  // The v7 quote endpoint now returns 401, so this is our only free option.
   const yahooSym = toYahooSymbol(symbol);
-  const url = `${YAHOO_QUOTE_URL}symbols=${encodeURIComponent(yahooSym)}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketVolume,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose,marketCap`;
+  const end = Math.floor(Date.now() / 1000);
+  const start = end - 5 * 86400;
+
+  const url = `${YAHOO_CHART_URL}${encodeURIComponent(yahooSym)}?period1=${start}&period2=${end}&interval=1d`;
 
   const response = await fetch(url, { headers: YAHOO_HEADERS });
   if (!response.ok) {
-    throw new Error(`Yahoo quote HTTP ${response.status} for ${yahooSym}`);
+    throw new Error(`Yahoo chart(quote) HTTP ${response.status} for ${yahooSym}`);
   }
 
-  const json: YahooQuoteResponse = await response.json();
+  const json = await response.json() as any;
+  const meta: YahooChartMeta = json.chart?.result?.[0]?.meta;
 
-  if (json.quoteResponse?.error || !json.quoteResponse?.result?.[0]) {
-    throw new Error(`Yahoo quote error for ${yahooSym}`);
+  if (!meta || !meta.regularMarketPrice) {
+    throw new Error(`No quote meta for ${yahooSym}`);
   }
 
-  const q = json.quoteResponse.result[0];
+  const price = meta.regularMarketPrice;
+  const previousClose = meta.chartPreviousClose || 0;
+  const change = price - previousClose;
+  const changePercent = previousClose > 0 ? (change / previousClose) * 100 : 0;
+
   return {
-    price: q.regularMarketPrice || 0,
-    change: q.regularMarketChange || 0,
-    changePercent: q.regularMarketChangePercent || 0,
-    volume: q.regularMarketVolume || 0,
-    high: q.regularMarketDayHigh || q.regularMarketPrice || 0,
-    low: q.regularMarketDayLow || q.regularMarketPrice || 0,
-    previousClose: q.regularMarketPreviousClose || 0,
-    marketCap: q.marketCap || null,
+    price: Math.round(price * 100) / 100,
+    change: Math.round(change * 100) / 100,
+    changePercent: Math.round(changePercent * 100) / 100,
+    volume: meta.regularMarketVolume || 0,
+    high: meta.regularMarketDayHigh || price,
+    low: meta.regularMarketDayLow || price,
+    previousClose: Math.round(previousClose * 100) / 100,
+    marketCap: null, // chart meta doesn't include marketCap
   };
 }
 

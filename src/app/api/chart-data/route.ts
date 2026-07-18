@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getHistoricalData, getCurrentPrice, toYahooSymbol } from '@/lib/trading/data-provider';
+import { EMA } from 'technicalindicators';
 
 // GET /api/chart-data?symbol=RELIANCE&days=60
 // Returns OHLCV + EMA20 for the mini sparkline chart
@@ -17,7 +18,6 @@ export async function GET(request: NextRequest) {
     const recent = candles.slice(-days);
 
     // Calculate EMA20
-    const { EMA } = await import('technicalindicators');
     const ema20 = EMA.calculate({ period: 20, values: recent.map(c => c.close) });
     const paddedEMA = new Array(recent.length - ema20.length).fill(null).concat(ema20);
 
