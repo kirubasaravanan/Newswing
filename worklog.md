@@ -1,27 +1,24 @@
 ---
-Task ID: 1
+Task ID: 2
 Agent: Main Agent
-Task: Kill all mock data fallbacks, transform into Portfolio Management System
+Task: Add PMS improvements — full universe scan, risk metrics, benchmark, alerts, capital gains, rebalance, multi-portfolio
 
 Work Log:
-- Removed mock fallbacks from data-provider.ts getHistoricalData() and getCurrentPrice() — now throws errors instead of silently returning fake data
-- Replaced sticky global yahooAvailable flag with per-symbol failure tracking (symbolFailures Map + MAX_SYMBOL_FAILURES=2)
-- Changed DataSource type from 'yahoo'|'mock'|'auto' to 'yahoo'|'error'
-- Created /src/lib/trading/default-stocks.ts — clean stock metadata list separated from mock-data.ts
-- Fixed /api/watchlist/route.ts to seed from default-stocks.ts instead of mock-data.ts
-- Rewrote /api/market-data/route.ts to fetch live Yahoo quotes (with 5-min cache, 20-symbol cap)
-- Created /api/portfolio/summary/route.ts — new endpoint for dashboard (positions, sector allocation, P&L)
-- Created /src/components/trading/dashboard-tab.tsx — portfolio dashboard with KPI cards, positions list, watchlist live prices, sector allocation pie chart, activity log
-- Created /src/components/trading/holdings-tab.tsx — full holdings management (add/sell positions, live P&L, closed trades, TradingView charts)
-- Updated sidebar.tsx — new nav (Dashboard, Holdings, Scanner, Journal, Analytics, Backtest, Settings), PM branding, Yahoo status indicator
-- Updated store (trade-store.ts) — new AppTab type, default tab 'dashboard'
-- Updated page.tsx — new tab routing, removed old header bar
-- Updated layout.tsx metadata — "Portfolio Manager — Private System"
-- Fixed auto-trade-tab.tsx badge text from 'Mock' to 'Error'
+- Updated screener API to support `scanMode: 'universe'` — scans ~230 F&O+midcap stocks instead of 30 watchlist
+- Added scanner UI toggle: "Watchlist (30)" vs "Full Universe (~230)" buttons
+- Created `/api/portfolio/risk-metrics` — Sharpe, Sortino, Max DD, Calmar, VaR 95%, CAGR, avg holding days
+- Created `/api/portfolio/benchmark` — portfolio vs Nifty 50 comparison chart with alpha/beta calculation
+- Created `/api/portfolio/alerts` — CRUD + check alerts against live Yahoo prices (ABOVE/BELOW conditions)
+- Created `/api/portfolio/capital-gains` — STCG (20%) / LTCG (12.5% with ₹1.25L exemption) tax report by FY
+- Created `/api/portfolio/rebalance` — sector allocation analysis with buy/sell suggestions
+- Created `/api/portfolios` — multi-portfolio support (create/list/delete portfolios)
+- Added Prisma models: Portfolio, PriceAlert
+- Enhanced Analytics tab with 6 sub-tabs: Overview, Risk Metrics, Benchmark, Alerts, Capital Gains, Rebalance
+- Added Active Alerts panel to Dashboard
+- Build passes with all 6 new API routes
 
 Stage Summary:
-- ALL mock data fallbacks eliminated — 100% real Yahoo Finance data
-- UI transformed from "V-Swing Trading Desk" to "Portfolio Manager" (Private System)
-- New Dashboard tab: portfolio value, P&L, win rate, sector allocation pie, watchlist live prices
-- New Holdings tab: position table with live P&L, add/sell dialogs, closed trades section
-- Build passes, APIs verified (15+ real stock prices confirmed from Yahoo)
+- Scanner now supports full NSE universe (~230 stocks) via toggle
+- 6 new PMS-grade features added
+- Analytics tab transformed from 1 view to 6-tab professional analytics dashboard
+- All data remains 100% real Yahoo Finance — zero mock

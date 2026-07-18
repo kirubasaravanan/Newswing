@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   TrendingUp, TrendingDown, Briefcase, Wallet, PieChart as PieIcon,
-  RefreshCw, ArrowRight, Activity,
+  RefreshCw, ArrowRight, Activity, Bell,
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -37,21 +37,24 @@ export function DashboardTab() {
   const { setActiveTab } = useTradeStore();
   const [data, setData] = useState<SummaryData | null>(null);
   const [quotes, setQuotes] = useState<WatchlistQuote[]>([]);
+  const [alerts, setAlerts] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [sumRes, mdRes, atRes] = await Promise.all([
+      const [sumRes, mdRes, atRes, alRes] = await Promise.all([
         fetch('/api/portfolio/summary'),
         fetch('/api/market-data'),
         fetch('/api/auto-trade'),
+        fetch('/api/portfolio/alerts'),
       ]);
-      const [sum, md, at] = await Promise.all([sumRes.json(), mdRes.json(), atRes.json()]);
+      const [sum, md, at, al] = await Promise.all([sumRes.json(), mdRes.json(), atRes.json(), alRes.json()]);
       if (sum.success) setData(sum);
       if (md.success) setQuotes(md.quotes || []);
       if (at.success) setLogs(at.recentLogs || []);
+      if (al.success) setAlerts((al.alerts || []).filter((a: any) => a.active && !a.triggered));
     } catch (err) {
       console.error('Dashboard fetch error:', err);
     } finally {
@@ -312,6 +315,31 @@ export function DashboardTab() {
                     })}
                   </div>
                 </ScrollArea>
+              )}
+            </CardContent>
+          </Card>
+          {/* Active Alerts */}
+          <Card className="border-border">
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold flex items-center gap-2">
+                  <Bell className="h-4 w-4 text-amber-400" />
+                  Active Alerts ({alerts.length})
+                </h3>
+              </div>
+              {alerts.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-4">No active alerts. Set alerts in Analytics tab.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {alerts.slice(0, 5).map(a => (
+                    <div key={a.id} className="flex items-center gap-2 text-xs py-1.5 border-b border-border/30 last:border-0">
+                      <div className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+                      <span className="font-semibold">{a.symbol}</span>
+                      <span className="text-muted-foreground">{a.condition} ₹{a.targetPrice.toLocaleString()}</span>
+                    </div>
+                  ))}
+                  {alerts.length > 5 && <p className="text-[10px] text-muted-foreground">+{alerts.length - 5} more</p>}
+                </div>
               )}
             </CardContent>
           </Card>

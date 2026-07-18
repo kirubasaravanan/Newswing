@@ -66,6 +66,8 @@ model PaperTrade {
   tags          String?  // comma-separated tags
   autoTraded    Boolean  @default(false)   // Was this auto-entered?
   exitReason    String?  // TP_HIT / SL_HIT / DEAD_CAPITAL / TRAIL_STOP / MAX_HOLDING
+  portfolioId   String?
+  portfolio     Portfolio?  @relation(fields: [portfolioId], references: [id])
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   journal       TradeJournalEntry?
@@ -162,8 +164,33 @@ model UniverseScan {
   totalScanned  Int
   l1Passed      Int
   l2Signals     Int
-  dataSource    String   @default("yahoo")    // yahoo / mock
+  dataSource    String   @default("yahoo")    // yahoo / error
   duration      Float    @default(0)         // seconds
   results       String   // JSON of results
   createdAt     DateTime @default(now())
+}
+
+model Portfolio {
+  id            String   @id @default(cuid())
+  name          String                        // e.g. "Aggressive", "Conservative"
+  description   String?
+  isDefault     Boolean @default(false)
+  totalCapital  Float   @default(200000)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  trades        PaperTrade[]
+}
+
+model PriceAlert {
+  id            String   @id @default(cuid())
+  symbol        String
+  condition      String   // ABOVE / BELOW / CROSSES_ABOVE / CROSSES_BELOW
+  targetPrice   Float
+  notes         String?
+  active        Boolean @default(true)
+  triggered     Boolean @default(false)
+  triggeredAt    DateTime?
+  triggeredPrice Float?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }

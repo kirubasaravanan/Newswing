@@ -3,30 +3,427 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { LineChart, BarChart3, TrendingUp, PieChart as PieIcon, RefreshCw } from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
-  AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
-  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
-  Legend, ReferenceLine,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogClose,
+} from '@/components/ui/dialog';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
+import {
+  BarChart3, TrendingUp, Shield, Bell, Plus, X, RefreshCw, Trash2,
+  Target, PieChart as PieIcon, AlertTriangle, CheckCircle2, Loader2,
+  ArrowUpRight, ArrowDownRight, Scale,
+} from 'lucide-react';
+import {
+  LineChart, Line, BarChart, Bar, AreaChart, Area,
+  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine, Cell, Legend,
 } from 'recharts';
 import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 
-interface AnalyticsData {
-  trades: any[];
-  totalPnL: number;
-  winRate: number;
-  avgWin: number;
-  avgLoss: number;
-  profitFactor: number;
-  maxDD: number;
-  bySetupType: { name: string; value: number; wins: number; losses: number }[];
-  byMonth: { month: string; pnl: number; trades: number }[];
-  byScore: { score: string; avgPnL: number; count: number }[];
-  pnlDistribution: { range: string; count: number }[];
+// ── Risk Metrics Card ─────────────────────────────────
+function RiskMetricsCard() {
+  const [metrics, setMetrics] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchMetrics = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/portfolio/risk-metrics');
+      const data = await res.json();
+      if (data.success) setMetrics(data);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { fetchMetrics(); }, [fetchMetrics]);
+
+  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+  if (!metrics || metrics.tradeCount < 2) return <p className="text-center py-8 text-muted-foreground text-sm">Need at least 2 closed trades for risk metrics.</p>;
+
+  const m = metrics.metrics;
+  const items = [
+    { label: 'Sharpe Ratio', value: m.sharpe.toFixed(2), color: m.sharpe >= 1 ? 'text-emerald-400' : m.sharpe >= 0 ? 'text-amber-400' : 'text-red-400', desc: m.sharpe >= 1 ? 'Good' : m.sharpe >= 0 ? 'Moderate' : 'Poor' },
+    { label: 'Sortino Ratio', value: m.sortino.toFixed(2), color: m.sortino >= 1.5 ? 'text-emerald-400' : 'text-amber-400', desc: 'Downside risk adjusted' },
+    { label: 'Max Drawdown', value: `${m.maxDD.toFixed(1)}%`, color: 'text-red-400', desc: 'Worst peak-to-trough' },
+    { label: 'Calmar Ratio', value: m.calmar.toFixed(2), color: m.calmar >= 1 ? 'text-emerald-400' : 'text-amber-400', desc: 'Return / MaxDD' },
+    { label: 'VaR (95%)', value: `₹${Math.abs(m.var95).toLocaleString()}`, color: 'text-red-400', desc: 'Max daily loss (95% conf)' },
+    { label: 'CAGR', value: `${m.cagr.toFixed(1)}%`, color: m.cagr >= 15 ? 'text-emerald-400' : 'text-amber-400', desc: 'Annualized return' },
+    { label: 'Avg Holding', value: `${m.avgHoldingDays}d`, color: 'text-indigo-400', desc: 'Average trade duration' },
+    { label: 'Best Trade', value: `₹${m.bestTrade.toLocaleString()}`, color: 'text-emerald-400', desc: '' },
+    { label: 'Worst Trade', value: `₹${m.worstTrade.toLocaleString()}`, color: 'text-red-400', desc: '' },
+  ];
+
+  return (
+    <div className="grid grid-cols-3 lg:grid-cols-3 xl:grid-cols-3 gap-3">
+      {items.map(item => (
+        <div key={item.label} className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">{item.label}</div>
+          <div className={cn('text-lg font-bold font-mono mt-0.5', item.color)}>{item.value}</div>
+          {item.desc && <div className="text-[10px] text-muted-foreground mt-0.5">{item.desc}</div>}
+        </div>
+      ))}
+    </div>
+  );
 }
 
+// ── Benchmark Comparison ────────────────────────────────
+function BenchmarkChart() {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/portfolio/benchmark?days=90');
+        const json = await res.json();
+        if (json.success) setData(json.benchmark);
+      } catch { /* ignore */ }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+  if (!data || !data.chartData?.length) return <p className="text-center py-8 text-muted-foreground text-sm">No benchmark data available.</p>;
+
+  return (
+    <div>
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Portfolio Return</div>
+          <div className={cn('text-lg font-bold font-mono', data.portfolioTotalReturn >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+            {data.portfolioTotalReturn >= 0 ? '+' : ''}₹{data.portfolioTotalReturn.toLocaleString()}
+          </div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Nifty 50 Return</div>
+          <div className={cn('text-lg font-bold font-mono', data.niftyTotalReturn >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+            {data.niftyTotalReturn >= 0 ? '+' : ''}{data.niftyTotalReturn.toFixed(2)}%
+          </div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Alpha / Beta</div>
+          <div className="text-lg font-bold font-mono text-indigo-400">
+            {data.alpha}%
+            {data.beta != null && <span className="text-xs text-muted-foreground ml-1">β{data.beta}</span>}
+          </div>
+        </div>
+      </div>
+      <div className="h-[280px]">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data.chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+            <XAxis dataKey="date" tick={{ fontSize: 9, fill: '#71717a' }} interval={Math.floor(data.chartData.length / 6)} />
+            <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
+            <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 11 }} />
+            <ReferenceLine y={0} stroke="rgba(255,255,255,0.2)" />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Line type="monotone" dataKey="portfolio" stroke="#6366f1" strokeWidth={2} name="Portfolio (₹)" dot={false} />
+            <Line type="monotone" dataKey="nifty" stroke="#10b981" strokeWidth={1.5} name="Nifty 50 (%)" dot={false} strokeDasharray="4 2" />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+// ── Price Alerts ────────────────────────────────────────
+function AlertsPanel() {
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ symbol: '', condition: 'ABOVE', targetPrice: '', notes: '' });
+  const [checking, setChecking] = useState(false);
+
+  const fetchAlerts = useCallback(async () => {
+    try {
+      const res = await fetch('/api/portfolio/alerts');
+      const data = await res.json();
+      if (data.success) setAlerts(data.alerts);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { fetchAlerts(); }, [fetchAlerts]);
+
+  const createAlert = async () => {
+    if (!form.symbol || !form.targetPrice) return;
+    try {
+      const res = await fetch('/api/portfolio/alerts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(`Alert set: ${form.symbol} ${form.condition} ₹${form.targetPrice}`);
+        setForm({ symbol: '', condition: 'ABOVE', targetPrice: '', notes: '' });
+        setOpen(false);
+        fetchAlerts();
+      }
+    } catch { toast.error('Failed to create alert'); }
+  };
+
+  const deleteAlert = async (id: string) => {
+    await fetch(`/api/portfolio/alerts?id=${id}`, { method: 'DELETE' });
+    fetchAlerts();
+  };
+
+  const checkAlerts = async () => {
+    setChecking(true);
+    try {
+      const res = await fetch('/api/portfolio/alerts', { method: 'PUT' });
+      const data = await res.json();
+      if (data.success && data.triggered.length > 0) {
+        for (const t of data.triggered) {
+          toast.success(`🔔 ${t.symbol} hit ₹${t.triggeredPrice}!`, {
+            description: `Target: ₹${t.targetPrice} ${t.condition}`,
+            duration: 8000,
+          });
+        }
+        fetchAlerts();
+      } else {
+        toast.info('No alerts triggered');
+      }
+    } catch { toast.error('Failed to check alerts'); }
+    finally { setChecking(false); }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold flex items-center gap-2"><Bell className="h-4 w-4" /> Price Alerts</h3>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={checkAlerts} disabled={checking} className="h-7 text-xs gap-1">
+            {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <Target className="h-3 w-3" />} Check
+          </Button>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild><Button size="sm" className="h-7 text-xs gap-1"><Plus className="h-3 w-3" /> New Alert</Button></DialogTrigger>
+            <DialogContent className="sm:max-w-sm">
+              <DialogHeader><DialogTitle>Create Price Alert</DialogTitle></DialogHeader>
+              <div className="grid gap-3 py-2">
+                <div><Label className="text-xs">Symbol</Label>
+                  <Input value={form.symbol} onChange={e => setForm({ ...form, symbol: e.target.value.toUpperCase() })} placeholder="RELIANCE" className="h-8 text-xs" /></div>
+                <div><Label className="text-xs">Condition</Label>
+                  <Select value={form.condition} onValueChange={v => setForm({ ...form, condition: v })}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="ABOVE">Price goes ABOVE</SelectItem><SelectItem value="BELOW">Price goes BELOW</SelectItem></SelectContent>
+                  </Select></div>
+                <div><Label className="text-xs">Target Price (₹)</Label>
+                  <Input type="number" value={form.targetPrice} onChange={e => setForm({ ...form, targetPrice: e.target.value })} placeholder="2500" className="h-8 text-xs" /></div>
+              </div>
+              <DialogFooter>
+                <DialogClose asChild><Button variant="ghost" size="sm">Cancel</Button></DialogClose>
+                <Button size="sm" onClick={createAlert}>Create</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
+      </div>
+      {alerts.length === 0 ? (
+        <p className="text-xs text-muted-foreground text-center py-4">No alerts set. Create one to get notified when a price target is hit.</p>
+      ) : (
+        <ScrollArea className="max-h-[200px]">
+          <div className="space-y-1.5 pr-2">
+            {alerts.slice(0, 20).map(a => (
+              <div key={a.id} className="flex items-center gap-2 text-xs py-1.5 border-b border-border/30">
+                <div className={cn('h-2 w-2 rounded-full shrink-0', a.triggered ? 'bg-amber-400' : 'bg-blue-400')} />
+                <span className="font-semibold">{a.symbol}</span>
+                <Badge variant="outline" className="text-[9px] h-4">{a.condition}</Badge>
+                <span className="font-mono">₹{a.targetPrice.toLocaleString()}</span>
+                {a.triggered && <Badge className="text-[9px] h-4 bg-amber-500/20 text-amber-400">HIT ₹{a.triggeredPrice}</Badge>}
+                <button onClick={() => deleteAlert(a.id)} className="ml-auto text-muted-foreground hover:text-red-400"><X className="h-3 w-3" /></button>
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      )}
+    </div>
+  );
+}
+
+// ── Capital Gains Report ────────────────────────────────
+function CapitalGainsReport() {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/portfolio/capital-gains');
+        const json = await res.json();
+        if (json.success) setData(json);
+      } catch { /* ignore */ }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+  if (!data || (data.stcg.length === 0 && data.ltcg.length === 0)) return <p className="text-center py-8 text-muted-foreground text-sm">No closed trades for capital gains report.</p>;
+
+  const s = data.summary;
+  return (
+    <div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <div className="rounded-lg bg-red-500/10 p-3">
+          <div className="text-[10px] text-red-400 uppercase">STCG ({s.stcgRate})</div>
+          <div className="text-lg font-bold font-mono text-red-400">₹{Math.round(s.totalSTCG).toLocaleString()}</div>
+          <div className="text-[10px] text-muted-foreground">Tax: ₹{s.stcgTax.toLocaleString()}</div>
+        </div>
+        <div className="rounded-lg bg-blue-500/10 p-3">
+          <div className="text-[10px] text-blue-400 uppercase">LTCG ({s.ltcgRate})</div>
+          <div className="text-lg font-bold font-mono text-blue-400">₹{Math.round(s.totalLTCG).toLocaleString()}</div>
+          <div className="text-[10px] text-muted-foreground">Tax: ₹{s.ltcgTax.toLocaleString()}</div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Exemption</div>
+          <div className="text-lg font-bold font-mono">₹{s.ltcgExemption.toLocaleString()}</div>
+          <div className="text-[10px] text-muted-foreground">LTCG threshold</div>
+        </div>
+        <div className="rounded-lg bg-amber-500/10 p-3">
+          <div className="text-[10px] text-amber-400 uppercase">Total Tax Est.</div>
+          <div className="text-lg font-bold font-mono text-amber-400">₹{s.totalTax.toLocaleString()}</div>
+        </div>
+      </div>
+      {data.byFinancialYear.length > 0 && (
+        <div className="mb-4">
+          <h4 className="text-xs font-semibold mb-2">By Financial Year</h4>
+          <ScrollArea className="max-h-[150px]">
+            <table className="w-full text-xs">
+              <thead><tr className="border-b border-border text-muted-foreground">
+                <th className="text-left py-1 font-medium">FY</th><th className="text-right py-1 font-medium">STCG</th>
+                <th className="text-right py-1 font-medium">LTCG</th><th className="text-right py-1 font-medium">Tax</th>
+              </tr></thead>
+              <tbody>
+                {data.byFinancialYear.map((fy: any) => (
+                  <tr key={fy.fy} className="border-b border-border/30">
+                    <td className="py-1 font-mono">{fy.fy}</td>
+                    <td className={cn('text-right py-1 font-mono', fy.stcg >= 0 ? 'text-red-400' : 'text-emerald-400')}>{fy.stcg >= 0 ? '+' : ''}₹{fy.stcg.toLocaleString()}</td>
+                    <td className={cn('text-right py-1 font-mono', fy.ltcg >= 0 ? 'text-red-400' : 'text-emerald-400')}>{fy.ltcg >= 0 ? '+' : ''}₹{fy.ltcg.toLocaleString()}</td>
+                    <td className="text-right py-1 font-mono text-amber-400">₹{(fy.stcgTax + fy.ltcgTax).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </ScrollArea>
+        </div>
+      )}
+      <ScrollArea className="max-h-[200px]">
+        <table className="w-full text-xs">
+          <thead><tr className="border-b border-border text-muted-foreground">
+            <th className="text-left py-1 font-medium">Symbol</th><th className="text-right py-1 font-medium">P&L</th>
+            <th className="text-right py-1 font-medium">Type</th><th className="text-right py-1 font-medium">Days</th>
+            <th className="text-right py-1 font-medium">Exit</th>
+          </tr></thead>
+          <tbody>
+            {[...data.stcg.map((t: any) => ({ ...t, type: 'STCG' })), ...data.ltcg.map((t: any) => ({ ...t, type: 'LTCG' }))]
+              .sort((a: any, b: any) => new Date(b.exitDate).getTime() - new Date(a.exitDate).getTime())
+              .slice(0, 20)
+              .map((t: any) => (
+                <tr key={t.id} className="border-b border-border/30">
+                  <td className="py-1 font-semibold">{t.symbol}</td>
+                  <td className={cn('text-right py-1 font-mono', (t.pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                    {(t.pnl || 0) >= 0 ? '+' : ''}₹{Math.round(t.pnl || 0).toLocaleString()}
+                  </td>
+                  <td className="text-right py-1"><Badge variant="outline" className={cn('text-[9px] h-4', t.type === 'LTCG' ? 'text-blue-400' : 'text-red-400')}>{t.type}</Badge></td>
+                  <td className="text-right py-1 font-mono text-muted-foreground">{t.holdingDays}d</td>
+                  <td className="text-right py-1 text-muted-foreground">{new Date(t.exitDate).toLocaleDateString()}</td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+      </ScrollArea>
+    </div>
+  );
+}
+
+// ── Rebalance Tool ─────────────────────────────────────
+function RebalancePanel() {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchRebalance = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/portfolio/rebalance');
+      const json = await res.json();
+      if (json.success) setData(json.rebalance);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { fetchRebalance(); }, [fetchRebalance]);
+
+  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+  if (!data || data.allocations.length === 0) return <p className="text-center py-8 text-muted-foreground text-sm">Open some positions to see rebalancing suggestions.</p>;
+
+  return (
+    <div>
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Portfolio Value</div>
+          <div className="text-lg font-bold font-mono">₹{data.totalValue.toLocaleString()}</div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Cash Available</div>
+          <div className="text-lg font-bold font-mono text-emerald-400">₹{data.cashAvailable.toLocaleString()}</div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Sectors</div>
+          <div className="text-lg font-bold font-mono text-indigo-400">{data.sectorCount}</div>
+        </div>
+      </div>
+
+      {data.actions.length > 0 && (
+        <div className="mb-4 space-y-1.5">
+          <h4 className="text-xs font-semibold flex items-center gap-1"><Scale className="h-3 w-3" /> Suggested Actions</h4>
+          {data.actions.map((a: any, i: number) => (
+            <div key={i} className={cn('flex items-center gap-2 text-xs p-2 rounded-lg',
+              a.type === 'REDUCE' ? 'bg-red-500/10' : 'bg-emerald-500/10')}>
+              {a.type === 'REDUCE' ? <ArrowDownRight className="h-3 w-3 text-red-400" /> : <ArrowUpRight className="h-3 w-3 text-emerald-400" />}
+              <Badge variant="outline" className={cn('text-[9px] h-4', a.type === 'REDUCE' ? 'text-red-400' : 'text-emerald-400')}>{a.type}</Badge>
+              <span>{a.note}</span>
+              <span className="ml-auto font-mono">₹{a.amount.toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <h4 className="text-xs font-semibold mb-2">Sector Allocation</h4>
+      <ScrollArea className="max-h-[180px]">
+        <table className="w-full text-xs">
+          <thead><tr className="border-b border-border text-muted-foreground">
+            <th className="text-left py-1 font-medium">Sector</th>
+            <th className="text-right py-1 font-medium">Value</th>
+            <th className="text-right py-1 font-medium">Now</th>
+            <th className="text-right py-1 font-medium">Target</th>
+            <th className="text-right py-1 font-medium">Diff</th>
+          </tr></thead>
+          <tbody>
+            {data.allocations.map((a: any) => (
+              <tr key={a.sector} className="border-b border-border/30">
+                <td className="py-1">{a.sector}</td>
+                <td className="text-right py-1 font-mono">₹{a.value.toLocaleString()}</td>
+                <td className="text-right py-1 font-mono">{a.currentPct}%</td>
+                <td className="text-right py-1 font-mono text-muted-foreground">{a.targetPct}%</td>
+                <td className={cn('text-right py-1 font-mono', Math.abs(a.diff) > 10 ? (a.diff > 0 ? 'text-red-400' : 'text-emerald-400') : 'text-muted-foreground')}>
+                  {a.diff > 0 ? '+' : ''}{a.diff}%
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </ScrollArea>
+    </div>
+  );
+}
+
+// ── Main Analytics Tab ─────────────────────────────────
 export function AnalyticsTab() {
-  const [data, setData] = useState<AnalyticsData | null>(null);
+  const [trades, setTrades] = useState<any[]>([]);
+  const [analyticsData, setAnalyticsData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchAnalytics = useCallback(async () => {
@@ -34,16 +431,14 @@ export function AnalyticsTab() {
     try {
       const res = await fetch('/api/trades');
       const json = await res.json();
-      const trades = json.trades || [];
-      const closed = trades.filter((t: any) => t.status === 'CLOSED' && t.pnl != null);
+      const allTrades = json.trades || [];
+      const closed = allTrades.filter((t: any) => t.status === 'CLOSED' && t.pnl != null);
 
       const wins = closed.filter((t: any) => t.pnl > 0);
-      const losses = closed.filter((t: any) => t.pnl <= 0);
       const totalPnL = closed.reduce((s: number, t: any) => s + t.pnl, 0);
       const grossProfit = wins.reduce((s: number, t: any) => s + t.pnl, 0);
-      const grossLoss = Math.abs(losses.reduce((s: number, t: any) => s + t.pnl, 0));
+      const grossLoss = Math.abs(closed.filter((t: any) => t.pnl <= 0).reduce((s: number, t: any) => s + t.pnl, 0));
 
-      // PnL by month
       const monthMap = new Map<string, { pnl: number; trades: number }>();
       for (const t of closed) {
         const d = new Date(t.exitDate);
@@ -54,231 +449,170 @@ export function AnalyticsTab() {
         monthMap.set(key, prev);
       }
       const byMonth = Array.from(monthMap.entries()).map(([month, v]) => ({
-        month,
-        pnl: Math.round(v.pnl),
-        trades: v.trades,
+        month, pnl: Math.round(v.pnl), trades: v.trades,
       })).sort((a, b) => a.month.localeCompare(b.month));
 
-      // PnL distribution
       const buckets = [
-        { range: '< -5%', min: -Infinity, max: -5 },
-        { range: '-5% to -2%', min: -5, max: -2 },
-        { range: '-2% to 0%', min: -2, max: 0 },
-        { range: '0% to 2%', min: 0, max: 2 },
-        { range: '2% to 5%', min: 2, max: 5 },
-        { range: '> 5%', min: 5, max: Infinity },
+        { range: '< -5%', min: -Infinity, max: -5 }, { range: '-5% to -2%', min: -5, max: -2 },
+        { range: '-2% to 0%', min: -2, max: 0 }, { range: '0% to 2%', min: 0, max: 2 },
+        { range: '2% to 5%', min: 2, max: 5 }, { range: '> 5%', min: 5, max: Infinity },
       ];
       const pnlDistribution = buckets.map(b => ({
         range: b.range,
         count: closed.filter((t: any) => t.pnlPercent >= b.min && t.pnlPercent < b.max).length,
       }));
 
-      // By tags/setup type
-      const tagMap = new Map<string, { pnl: number; wins: number; losses: number }>();
-      for (const t of closed) {
-        const tags = (t.tags || '').split(',').map((s: string) => s.trim()).filter(Boolean);
-        const key = tags[0] || 'Manual';
-        const prev = tagMap.get(key) || { pnl: 0, wins: 0, losses: 0 };
-        prev.pnl += t.pnl;
-        if (t.pnl > 0) prev.wins++; else prev.losses++;
-        tagMap.set(key, prev);
-      }
-      const bySetupType = Array.from(tagMap.entries()).map(([name, v]) => ({
-        name, value: Math.round(v.pnl), wins: v.wins, losses: v.losses,
-      }));
-
-      // Calculate max DD from trade sequence
-      let peak = 0;
-      let running = 0;
-      let maxDD = 0;
+      let peak = 0, running = 0, maxDD = 0;
       for (const t of closed.sort((a: any, b: any) => new Date(a.exitDate).getTime() - new Date(b.exitDate).getTime())) {
         running += t.pnl;
         peak = Math.max(peak, running);
         maxDD = Math.max(maxDD, (peak - running) / peak * 100);
       }
 
-      setData({
-        trades: closed,
-        totalPnL,
+      setAnalyticsData({
+        trades: closed, totalPnL,
         winRate: closed.length > 0 ? (wins.length / closed.length) * 100 : 0,
         avgWin: wins.length > 0 ? grossProfit / wins.length : 0,
-        avgLoss: losses.length > 0 ? grossLoss / losses.length : 0,
+        avgLoss: closed.length - wins.length > 0 ? grossLoss / (closed.length - wins.length) : 0,
         profitFactor: grossLoss > 0 ? grossProfit / grossLoss : 0,
-        maxDD,
-        bySetupType,
-        byMonth,
-        byScore: [],
-        pnlDistribution,
+        maxDD, byMonth, pnlDistribution,
       });
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
   }, []);
 
   useEffect(() => { fetchAnalytics(); }, [fetchAnalytics]);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-16">
-        <div className="text-center text-muted-foreground">
-          <RefreshCw className="h-6 w-6 mx-auto mb-2 animate-spin" />
-          <p className="text-sm">Loading analytics...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!data || data.trades.length === 0) {
-    return (
-      <div className="text-center py-16 text-muted-foreground">
-        <LineChart className="h-12 w-12 mx-auto mb-3 opacity-30" />
-        <p className="text-sm">Close some paper trades to see analytics here.</p>
-      </div>
-    );
-  }
+  if (loading) return <div className="flex items-center justify-center py-16"><div className="text-center text-muted-foreground"><RefreshCw className="h-6 w-6 mx-auto mb-2 animate-spin" /><p className="text-sm">Loading analytics...</p></div></div>;
 
   const COLORS = ['#10b981', '#f59e0b', '#6366f1', '#ef4444', '#06b6d4', '#ec4899'];
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-bold flex items-center gap-2">
-          <BarChart3 className="h-5 w-5 text-primary" />
-          Trading Analytics
-        </h2>
-        <Button variant="outline" size="sm" onClick={fetchAnalytics} className="gap-2">
-          <RefreshCw className="h-3.5 w-3.5" />
-          Refresh
-        </Button>
+        <h2 className="text-lg font-bold flex items-center gap-2"><BarChart3 className="h-5 w-5 text-indigo-400" /> Analytics</h2>
+        <Button variant="outline" size="sm" onClick={fetchAnalytics} className="gap-2 h-8 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</Button>
       </div>
 
-      {/* KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
-        <Card><CardContent className="p-3">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total P&L</div>
-          <div className={cn('text-xl font-bold mt-1', data.totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-            {data.totalPnL >= 0 ? '+' : ''}₹{Math.round(data.totalPnL).toLocaleString()}
-          </div>
-        </CardContent></Card>
-        <Card><CardContent className="p-3">
-          <div className="text-[10px] uppercase tracking-wider text-emerald-400">Win Rate</div>
-          <div className="text-xl font-bold mt-1 text-emerald-400">{data.winRate.toFixed(1)}%</div>
-        </CardContent></Card>
-        <Card><CardContent className="p-3">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Profit Factor</div>
-          <div className={cn('text-xl font-bold mt-1', data.profitFactor >= 1.5 ? 'text-emerald-400' : data.profitFactor >= 1 ? 'text-amber-400' : 'text-red-400')}>
-            {data.profitFactor.toFixed(2)}x
-          </div>
-        </CardContent></Card>
-        <Card><CardContent className="p-3">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Avg Win</div>
-          <div className="text-xl font-bold mt-1 text-emerald-400">+₹{Math.round(data.avgWin).toLocaleString()}</div>
-        </CardContent></Card>
-        <Card><CardContent className="p-3">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Avg Loss</div>
-          <div className="text-xl font-bold mt-1 text-red-400">-₹{Math.round(data.avgLoss).toLocaleString()}</div>
-        </CardContent></Card>
-        <Card><CardContent className="p-3">
-          <div className="text-[10px] uppercase tracking-wider text-red-400">Max Drawdown</div>
-          <div className="text-xl font-bold mt-1 text-red-400">{data.maxDD.toFixed(1)}%</div>
-        </CardContent></Card>
-      </div>
+      <Tabs defaultValue="overview" className="w-full">
+        <TabsList className="w-full justify-start mb-4">
+          <TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger>
+          <TabsTrigger value="risk" className="text-xs">Risk Metrics</TabsTrigger>
+          <TabsTrigger value="benchmark" className="text-xs">Benchmark</TabsTrigger>
+          <TabsTrigger value="alerts" className="text-xs">Alerts</TabsTrigger>
+          <TabsTrigger value="tax" className="text-xs">Capital Gains</TabsTrigger>
+          <TabsTrigger value="rebalance" className="text-xs">Rebalance</TabsTrigger>
+        </TabsList>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Monthly P&L */}
-        {data.byMonth.length > 0 && (
-          <Card className="border-border">
-            <CardContent className="p-4">
-              <h3 className="text-sm font-semibold mb-4 flex items-center gap-2">
-                <TrendingUp className="h-4 w-4" /> Monthly P&L
-              </h3>
-              <div className="h-52">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={data.byMonth}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                    <XAxis dataKey="month" tick={{ fontSize: 10, fill: '#71717a' }} />
-                    <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
-                    <Tooltip
-                      contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }}
-                      formatter={(value: number) => [`₹${value.toLocaleString()}`, 'P&L']}
-                    />
-                    <ReferenceLine y={0} stroke="rgba(255,255,255,0.3)" />
-                    <Bar dataKey="pnl" name="P&L" radius={[3, 3, 0, 0]}>
-                      {data.byMonth.map((m, i) => (
-                        <Cell key={i} fill={m.pnl >= 0 ? '#10b981' : '#ef4444'} fillOpacity={0.7} />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+        <TabsContent value="overview">
+          {analyticsData && analyticsData.trades.length > 0 ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+                <Card><CardContent className="p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total P&L</div>
+                  <div className={cn('text-xl font-bold mt-1', analyticsData.totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                    {analyticsData.totalPnL >= 0 ? '+' : ''}₹{Math.round(analyticsData.totalPnL).toLocaleString()}
+                  </div>
+                </CardContent></Card>
+                <Card><CardContent className="p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-emerald-400">Win Rate</div>
+                  <div className="text-xl font-bold mt-1 text-emerald-400">{analyticsData.winRate.toFixed(1)}%</div>
+                </CardContent></Card>
+                <Card><CardContent className="p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Profit Factor</div>
+                  <div className={cn('text-xl font-bold mt-1', analyticsData.profitFactor >= 1.5 ? 'text-emerald-400' : analyticsData.profitFactor >= 1 ? 'text-amber-400' : 'text-red-400')}>
+                    {analyticsData.profitFactor.toFixed(2)}x
+                  </div>
+                </CardContent></Card>
+                <Card><CardContent className="p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Avg Win</div>
+                  <div className="text-xl font-bold mt-1 text-emerald-400">+₹{Math.round(analyticsData.avgWin).toLocaleString()}</div>
+                </CardContent></Card>
+                <Card><CardContent className="p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Avg Loss</div>
+                  <div className="text-xl font-bold mt-1 text-red-400">-₹{Math.round(analyticsData.avgLoss).toLocaleString()}</div>
+                </CardContent></Card>
+                <Card><CardContent className="p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-red-400">Max Drawdown</div>
+                  <div className="text-xl font-bold mt-1 text-red-400">{analyticsData.maxDD.toFixed(1)}%</div>
+                </CardContent></Card>
               </div>
-            </CardContent>
-          </Card>
-        )}
 
-        {/* P&L Distribution */}
-        <Card className="border-border">
-          <CardContent className="p-4">
-            <h3 className="text-sm font-semibold mb-4 flex items-center gap-2">
-              <PieIcon className="h-4 w-4" /> P&L Distribution
-            </h3>
-            <div className="h-52">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data.pnlDistribution} layout="vertical">
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                  <XAxis type="number" tick={{ fontSize: 10, fill: '#71717a' }} />
-                  <YAxis dataKey="range" type="category" tick={{ fontSize: 10, fill: '#71717a' }} width={80} />
-                  <Tooltip
-                    contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }}
-                  />
-                  <Bar dataKey="count" name="Trades" radius={[0, 3, 3, 0]}>
-                    {data.pnlDistribution.map((_, i) => (
-                      <Cell key={i} fill={COLORS[i % COLORS.length]} fillOpacity={0.7} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {analyticsData.byMonth.length > 0 && (
+                  <Card className="border-border"><CardContent className="p-4">
+                    <h3 className="text-sm font-semibold mb-4 flex items-center gap-2"><TrendingUp className="h-4 w-4" /> Monthly P&L</h3>
+                    <div className="h-52">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={analyticsData.byMonth}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="month" tick={{ fontSize: 10, fill: '#71717a' }} />
+                          <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
+                          <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} formatter={(v: number) => [`₹${v.toLocaleString()}`, 'P&L']} />
+                          <ReferenceLine y={0} stroke="rgba(255,255,255,0.3)" />
+                          <Bar dataKey="pnl" name="P&L" radius={[3, 3, 0, 0]}>
+                            {analyticsData.byMonth.map((m: any, i: number) => <Cell key={i} fill={m.pnl >= 0 ? '#10b981' : '#ef4444'} fillOpacity={0.7} />)}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </CardContent></Card>
+                )}
+
+                <Card className="border-border"><CardContent className="p-4">
+                  <h3 className="text-sm font-semibold mb-4 flex items-center gap-2"><PieIcon className="h-4 w-4" /> P&L Distribution</h3>
+                  <div className="h-52">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={analyticsData.pnlDistribution} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                        <XAxis type="number" tick={{ fontSize: 10, fill: '#71717a' }} />
+                        <YAxis dataKey="range" type="category" tick={{ fontSize: 10, fill: '#71717a' }} width={80} />
+                        <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} />
+                        <Bar dataKey="count" name="Trades" radius={[0, 3, 3, 0]}>
+                          {analyticsData.pnlDistribution.map((_: any, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} fillOpacity={0.7} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent></Card>
+
+                {analyticsData.trades.length > 1 && (
+                  <Card className="border-border lg:col-span-2"><CardContent className="p-4">
+                    <h3 className="text-sm font-semibold mb-4">Cumulative P&L</h3>
+                    <div className="h-52">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={(() => { let cum = 0; return analyticsData.trades.map((t: any, i: number) => { cum += t.pnl; return { idx: i + 1, cumPnL: Math.round(cum), pnl: Math.round(t.pnl) }; }); })()}>
+                          <defs><linearGradient id="cumGrad2" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={analyticsData.totalPnL >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
+                            <stop offset="95%" stopColor="transparent" stopOpacity={0} />
+                          </linearGradient></defs>
+                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="idx" tick={{ fontSize: 10, fill: '#71717a' }} />
+                          <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
+                          <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} />
+                          <ReferenceLine y={0} stroke="rgba(255,255,255,0.3)" />
+                          <Area type="monotone" dataKey="cumPnL" stroke={analyticsData.totalPnL >= 0 ? '#10b981' : '#ef4444'} fill="url(#cumGrad2)" strokeWidth={2} />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </CardContent></Card>
+                )}
+              </div>
             </div>
-          </CardContent>
-        </Card>
+          ) : (
+            <div className="text-center py-16 text-muted-foreground">
+              <LineChart className="h-12 w-12 mx-auto mb-3 opacity-20" />
+              <p className="text-sm">Close some trades to see analytics.</p>
+            </div>
+          )}
+        </TabsContent>
 
-        {/* Cumulative P&L */}
-        {data.trades.length > 1 && (
-          <Card className="border-border lg:col-span-2">
-            <CardContent className="p-4">
-              <h3 className="text-sm font-semibold mb-4">Cumulative P&L</h3>
-              <div className="h-52">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={(() => {
-                    let cum = 0;
-                    return data.trades.map((t, i) => {
-                      cum += t.pnl;
-                      return { idx: i + 1, cumPnL: Math.round(cum), pnl: Math.round(t.pnl) };
-                    });
-                  })()}>
-                    <defs>
-                      <linearGradient id="cumGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor={data.totalPnL >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="transparent" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                    <XAxis dataKey="idx" tick={{ fontSize: 10, fill: '#71717a' }} label={{ value: 'Trade #', position: 'bottom', fontSize: 10, fill: '#71717a' }} />
-                    <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
-                    <Tooltip
-                      contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }}
-                      formatter={(value: number, name: string) => [`₹${value.toLocaleString()}`, name === 'cumPnL' ? 'Cumulative' : 'Trade P&L']}
-                    />
-                    <ReferenceLine y={0} stroke="rgba(255,255,255,0.3)" />
-                    <Area type="monotone" dataKey="cumPnL" stroke={data.totalPnL >= 0 ? '#10b981' : '#ef4444'} fill="url(#cumGrad)" strokeWidth={2} name="cumPnL" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-      </div>
+        <TabsContent value="risk"><Card className="border-border"><CardContent className="p-4"><RiskMetricsCard /></CardContent></Card></TabsContent>
+        <TabsContent value="benchmark"><Card className="border-border"><CardContent className="p-4"><BenchmarkChart /></CardContent></Card></TabsContent>
+        <TabsContent value="alerts"><Card className="border-border"><CardContent className="p-4"><AlertsPanel /></CardContent></Card></TabsContent>
+        <TabsContent value="tax"><Card className="border-border"><CardContent className="p-4"><CapitalGainsReport /></CardContent></Card></TabsContent>
+        <TabsContent value="rebalance"><Card className="border-border"><CardContent className="p-4"><RebalancePanel /></CardContent></Card></TabsContent>
+      </Tabs>
     </div>
   );
 }

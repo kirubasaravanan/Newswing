@@ -2,26 +2,36 @@ import { NextRequest, NextResponse } from 'next/server';
 import { runScreening, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/trading/screening-engine';
 import { getHistoricalData } from '@/lib/trading/data-provider';
 import { db } from '@/lib/db';
+import { getFullUniverse } from '@/lib/trading/universe-scanner';
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const config: ScreeningConfig = { ...DEFAULT_CONFIG, ...body.config };
-    const symbols: string[] = body.symbols || [];
+    const scanMode: string = body.scanMode || 'watchlist'; // 'watchlist' or 'universe'
     const days = body.days || 300;
+    let symbols: string[] = body.symbols || [];
 
     if (symbols.length === 0) {
-      // If no symbols provided, use watchlist
-      const wl = await db.watchlistStock.findMany({ orderBy: { symbol: 'asc' } });
-      symbols.push(...wl.map(s => s.symbol));
+      if (scanMode === 'universe') {
+        // Use the full NSE F&O + midcap universe (~230 stocks)
+        const universe = getFullUniverse();
+        symbols = universe.map(s => s.symbol);
+      } else {
+        // Use watchlist (default)
+        const wl = await db.watchlistStock.findMany({ orderBy: { symbol: 'asc' } });
+        symbols.push(...wl.map(s => s.symbol));
+      }
     }
+
     if (symbols.length === 0) {
       return NextResponse.json({ success: true, results: [], totalScanned: 0, signalsFound: 0 });
     }
 
-    // Fetch Nifty data
-    const { data: niftyCandles, source } = await getHistoricalData('NIFTY50', days);
+    // Fetch Nifty data for relative strength check
+    const { data: niftyCandles } = await getHistoricalData('NIFTY50', days);
     const results: ReturnType<typeof runScreening>[] = [];
+    let failedCount = 0;
 
     for (const symbol of symbols) {
       try {
@@ -29,7 +39,7 @@ export async function POST(request: NextRequest) {
         const result = runScreening(symbol, candles, niftyCandles, config);
         if (result) results.push(result);
       } catch (err) {
-        console.error(`Screening failed for ${symbol}:`, err);
+        failedCount++;
       }
     }
 
@@ -62,7 +72,9 @@ export async function POST(request: NextRequest) {
       scannedAt: new Date().toISOString(),
       totalScanned: symbols.length,
       signalsFound: results.length,
-      dataSource: source,
+      failed: failedCount,
+      scanMode,
+      dataSource: 'yahoo',
     });
   } catch (error) {
     console.error('Screening error:', error);

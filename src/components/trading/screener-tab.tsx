@@ -249,13 +249,19 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
       .catch(() => {});
   }, []);
 
+  const [scanMode, setScanMode] = useState<'watchlist' | 'universe'>('watchlist');
+
   const runScan = useCallback(async () => {
     setIsScreening(true);
     try {
       const res = await fetch('/api/screener', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols: selectedSymbols, config, days: 300 }),
+        body: JSON.stringify({
+          symbols: scanMode === 'watchlist' ? selectedSymbols : [],
+          scanMode,
+          config, days: 300,
+        }),
       });
       const data = await res.json();
       if (data.success) {
@@ -273,7 +279,7 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
     } finally {
       setIsScreening(false);
     }
-  }, [selectedSymbols, config, setIsScreening, setScreeningResults, setLastScanTime]);
+  }, [selectedSymbols, config, scanMode, setIsScreening, setScreeningResults, setLastScanTime]);
 
   const aPlusCount = screeningResults.filter(r => r.score === 6).length;
   const bCount = screeningResults.filter(r => r.score < 6).length;
@@ -284,9 +290,21 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-bold flex items-center gap-2">
-            <Radar className="h-5 w-5 text-primary" />
-            V-Swing Screener
+            <Radar className="h-5 w-5 text-indigo-400" />
+            V-Swing Scanner
           </h2>
+          <div className="flex items-center gap-1 rounded-lg bg-secondary/50 p-0.5">
+            <button
+              onClick={() => setScanMode('watchlist')}
+              className={cn('px-2.5 py-1 text-xs rounded-md transition',
+                scanMode === 'watchlist' ? 'bg-indigo-500/20 text-indigo-400' : 'text-muted-foreground hover:text-foreground')}
+            >Watchlist ({watchlistCount})</button>
+            <button
+              onClick={() => setScanMode('universe')}
+              className={cn('px-2.5 py-1 text-xs rounded-md transition',
+                scanMode === 'universe' ? 'bg-indigo-500/20 text-indigo-400' : 'text-muted-foreground hover:text-foreground')}
+            >Full Universe (~230)</button>
+          </div>
           {lastScanTime && (
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
               <Clock className="h-3 w-3" />
