@@ -12,6 +12,8 @@ model WatchlistStock {
   symbol    String   @unique
   name      String
   sector    String?
+  folderId  String?
+  folder    WatchlistFolder? @relation(fields: [folderId], references: [id])
   addedAt   DateTime @default(now())
   screenResults ScreeningResult[]
 }
@@ -179,6 +181,7 @@ model Portfolio {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   trades        PaperTrade[]
+  sipPlans      SIPPlan[]
 }
 
 model PriceAlert {
@@ -193,4 +196,44 @@ model PriceAlert {
   triggeredPrice Float?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+}
+
+model DividendRecord {
+  id            String   @id @default(cuid())
+  symbol        String
+  stockName     String?
+  exDate        DateTime
+  dividendPerShare Float
+  totalAmount   Float    // dividendPerShare * qty held
+  qty           Int?
+  recordDate    DateTime?
+  paymentDate   DateTime?
+  notes         String?
+  createdAt     DateTime @default(now())
+}
+
+model SIPPlan {
+  id            String   @id @default(cuid())
+  symbol        String
+  stockName     String?
+  amount        Float    // fixed amount per installment
+  frequency     String   @default("MONTHLY")  // WEEKLY / MONTHLY / QUARTERLY
+  nextDate      DateTime
+  totalInvested Float    @default(0)
+  totalQty      Int      @default(0)
+  installmentsCompleted Int @default(0)
+  active        Boolean  @default(true)
+  portfolioId   String?
+  portfolio     Portfolio? @relation(fields: [portfolioId], references: [id])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model WatchlistFolder {
+  id            String   @id @default(cuid())
+  name          String
+  color         String   @default("#6366f1")
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  stocks        WatchlistStock[]
 }
