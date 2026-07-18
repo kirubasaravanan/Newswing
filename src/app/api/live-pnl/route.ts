@@ -21,7 +21,20 @@ export async function GET() {
     }
 
     const positions = openTrades.map(trade => {
-      const currentPrice = priceMap[trade.symbol] || trade.entryPrice;
+      const currentPrice = priceMap[trade.symbol] || 0;
+      if (!currentPrice) {
+        // No live price available — return position without fake P&L
+        return {
+          id: trade.id, symbol: trade.symbol, direction, entryPrice: trade.entryPrice,
+          currentPrice: 0, qty: trade.qty, stopLoss: trade.stopLoss, targetPrice: trade.targetPrice,
+          pnl: 0, pnlPercent: 0, priceUnavailable: true,
+          maxLoss: Math.abs(trade.entryPrice - trade.stopLoss) * trade.qty,
+          maxProfit: Math.abs(trade.targetPrice - trade.entryPrice) * trade.qty,
+          entryDate: trade.entryDate,
+          holdingDays: Math.round((Date.now() - new Date(trade.entryDate).getTime()) / 86400000),
+          autoTraded: trade.autoTraded,
+        };
+      }
       const direction = trade.direction || 'LONG';
       const priceDiff = direction === 'LONG' ? currentPrice - trade.entryPrice : trade.entryPrice - currentPrice;
       const pnl = priceDiff * trade.qty;

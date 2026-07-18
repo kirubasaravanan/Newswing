@@ -59,8 +59,7 @@ export async function POST(request: NextRequest) {
       const batch = stocks.slice(i, i + BATCH);
       const results = await Promise.allSettled(
         batch.map(async (stock) => {
-          const { data, source } = await getHistoricalData(stock.symbol, days);
-          if (source === 'mock') fetchSource = 'mock';
+          const { data } = await getHistoricalData(stock.symbol, days);
           return { stock, data };
         })
       );
