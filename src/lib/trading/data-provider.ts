@@ -22,6 +22,28 @@ const SYMBOL_MAP: Record<string, string> = {
   'NIFTY50': '^NSEI',
   'BANKNIFTY': '^NSEBANK',
   'NIFTYMIDCAP': '^CNXMIDCAP',
+  // NSE symbols that differ from Yahoo Finance symbols
+  'BAJAJAUTO': 'BAJAJ-AUTO.NS',
+  'M&M': 'M&M.NS',
+  'MOTHERSON': 'MOTHERSONI.NS',
+  'SRF': 'SRFLTD.NS',
+  'LTI': 'LTIM.NS',
+  'TATACONSUM': 'TATACONSUM.NS',
+  'BERGEPAINT': 'BERGEPAINT.NS',
+  'MOTHERSON': 'MSUMI.NS',
+  'CASTROLIND': 'CASTROLIND.NS',
+  'JINDALSTEL': 'JINDALSTEL.NS',
+  'JSWSTEEL': 'JSWSTEEL.NS',
+  'TATAPOWER': 'TATAPOWER.NS',
+  'INDUSINDBK': 'INDUSINDBK.NS',
+  'GODREJCP': 'GODREJCP.NS',
+  'PIDILITIND': 'PIDILITIND.NS',
+  'AMBUJACEM': 'AMBUJACEM.NS',
+  'SHREECEM': 'SHREECEM.NS',
+  'ACC': 'ACC.NS',
+  'NAM-INDIA': 'NAM-INDIA.NS',
+  // Recently restructured/renamed on Yahoo
+  'TATAMOTORS': 'TMCV.NS',
 };
 
 export function toYahooSymbol(nseSymbol: string): string {
