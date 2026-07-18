@@ -47,26 +47,28 @@ model ScreeningResult {
 }
 
 model PaperTrade {
-  id          String   @id @default(cuid())
-  symbol      String
-  stockName   String?
-  direction   String   @default("LONG")  // LONG / SHORT
-  entryDate   DateTime
-  entryPrice  Float
-  qty         Int
-  stopLoss    Float
-  targetPrice Float
-  status      String   @default("OPEN")  // OPEN / CLOSED / CANCELLED
-  exitDate    DateTime?
-  exitPrice   Float?
-  pnl         Float?
-  pnlPercent  Float?
-  screenshot  String?  // path to screenshot
-  notes       String?
-  tags        String?  // comma-separated tags
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  journal     TradeJournalEntry?
+  id            String   @id @default(cuid())
+  symbol        String
+  stockName     String?
+  direction     String   @default("LONG")  // LONG / SHORT
+  entryDate     DateTime
+  entryPrice    Float
+  qty           Int
+  stopLoss      Float
+  targetPrice   Float
+  status        String   @default("OPEN")  // OPEN / CLOSED / CANCELLED / AUTO
+  exitDate      DateTime?
+  exitPrice     Float?
+  pnl           Float?
+  pnlPercent    Float?
+  screenshot    String?  // path to screenshot
+  notes         String?
+  tags          String?  // comma-separated tags
+  autoTraded    Boolean  @default(false)   // Was this auto-entered?
+  exitReason    String?  // TP_HIT / SL_HIT / DEAD_CAPITAL / TRAIL_STOP / MAX_HOLDING
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  journal       TradeJournalEntry?
 }
 
 model TradeJournalEntry {
@@ -129,4 +131,51 @@ model AppSettings {
   key          String   @unique
   value        String
   updatedAt    DateTime @updatedAt
+}
+
+model CapitalWallet {
+  id            String   @id @default(cuid())
+  name          String   @default("Main Wallet")
+  totalCapital  Float    @default(200000)    // Total allocated capital
+  deployed      Float    @default(0)         // Currently invested
+  available     Float    @default(200000)    // Available for new trades
+  realizedPnl   Float    @default(0)         // Total realized P&L
+  unrealizedPnl Float    @default(0)         // Current open positions P&L
+  updatedAt     DateTime @updatedAt
+  createdAt     DateTime @default(now())
+}
+
+model PositionLimit {
+  id              String   @id @default(cuid())
+  symbol          String   @unique
+  maxPerStock     Float    @default(50000)    // Max ₹ per stock (e.g. 50K)
+  maxBuysPerMonth Int      @default(3)        // Max entries per stock per month
+  maxHoldingDays  Int      @default(25)       // Max holding period in days
+  maxTotalPositions Int    @default(8)        // Max concurrent positions
+  riskPerTrade    Float    @default(1.0)      // % risk per trade
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model AutoTradeLog {
+  id            String   @id @default(cuid())
+  action        String   // AUTO_ENTRY / AUTO_EXIT_TP / AUTO_EXIT_SL / AUTO_EXIT_MAX_HOLDING / AUTO_EXIT_TRAIL
+  symbol        String
+  tradeId       String?
+  signal        String   // JSON of the signal data
+  executed      Boolean  @default(false)
+  reason        String?
+  createdAt     DateTime @default(now())
+}
+
+model UniverseScan {
+  id            String   @id @default(cuid())
+  scanType      String   @default("L1")       // L1 / FULL
+  totalScanned  Int
+  l1Passed      Int
+  l2Signals     Int
+  dataSource    String   @default("yahoo")    // yahoo / mock
+  duration      Float    @default(0)         // seconds
+  results       String   // JSON of results
+  createdAt     DateTime @default(now())
 }

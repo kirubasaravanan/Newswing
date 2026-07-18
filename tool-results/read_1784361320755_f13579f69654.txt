@@ -1,0 +1,579 @@
+     1→'use client';
+     2→
+     3→import { useState, useEffect, useCallback } from 'react';
+     4→import { Button } from '@/components/ui/button';
+     5→import { Card, CardContent } from '@/components/ui/card';
+     6→import { Input } from '@/components/ui/input';
+     7→import { Label } from '@/components/ui/label';
+     8→import { Badge } from '@/components/ui/badge';
+     9→import { ScrollArea } from '@/components/ui/scroll-area';
+    10→import { Textarea } from '@/components/ui/textarea';
+    11→import {
+    12→  Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogClose,
+    13→} from '@/components/ui/dialog';
+    14→import {
+    15→  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+    16→} from '@/components/ui/select';
+    17→import { BookOpen, Plus, X, TrendingUp, TrendingDown, Minus,
+    18→  Edit, Trash2, ChevronDown, ChevronUp, Brain, Download, Shield } from 'lucide-react';
+    19→import { cn } from '@/lib/utils';
+    20→import type { ScreeningResult } from '@/lib/trading/screening-engine';
+    21→import { toast } from 'sonner';
+    22→import { TradeQualityChecklist, type ChecklistItem } from './trade-quality-checklist';
+    23→import { LivePnlTracker } from './live-pnl-tracker';
+    24→
+    25→interface Trade {
+    26→  id: string;
+    27→  symbol: string;
+    28→  stockName: string | null;
+    29→  direction: string;
+    30→  entryDate: string;
+    31→  entryPrice: number;
+    32→  qty: number;
+    33→  stopLoss: number;
+    34→  targetPrice: number;
+    35→  status: string;
+    36→  exitDate: string | null;
+    37→  exitPrice: number | null;
+    38→  pnl: number | null;
+    39→  pnlPercent: number | null;
+    40→  notes: string | null;
+    41→  tags: string | null;
+    42→  journal?: {
+    43→    id: string;
+    44→    mood: string;
+    45→    marketContext: string | null;
+    46→    emotions: string | null;
+    47→    lessonsLearned: string | null;
+    48→    rating: number | null;
+    49→  } | null;
+    50→}
+    51→
+    52→interface JournalTabProps {
+    53→  prefillTrade?: ScreeningResult | null;
+    54→  onPrefillConsumed?: () => void;
+    55→}
+    56→
+    57→const MOODS = [
+    58→  { value: 'CONFIDENT', label: 'Confident', color: 'text-emerald-400' },
+    59→  { value: 'NEUTRAL', label: 'Neutral', color: 'text-sky-400' },
+    60→  { value: 'ANXIOUS', label: 'Anxious', color: 'text-amber-400' },
+    61→  { value: 'FOMO', label: 'FOMO', color: 'text-red-400' },
+    62→];
+    63→
+    64→export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps) {
+    65→  const [trades, setTrades] = useState<Trade[]>([]);
+    66→  const [loading, setLoading] = useState(true);
+    67→  const [addOpen, setAddOpen] = useState(!!prefillTrade);
+    68→  const [closeTradeId, setCloseTradeId] = useState<string | null>(null);
+    69→  const [journalTradeId, setJournalTradeId] = useState<string | null>(null);
+    70→  const [expandedId, setExpandedId] = useState<string | null>(null);
+    71→  const [checklistOpen, setChecklistOpen] = useState(false);
+    72→
+    73→  // Form state
+    74→  const [form, setForm] = useState({
+    75→    symbol: '', stockName: '', direction: 'LONG',
+    76→    entryDate: new Date().toISOString().split('T')[0],
+    77→    entryPrice: '', qty: '', stopLoss: '', targetPrice: '',
+    78→    notes: '', tags: '',
+    79→  });
+    80→
+    81→  const [closeForm, setCloseForm] = useState({ exitPrice: '', exitDate: new Date().toISOString().split('T')[0] });
+    82→
+    83→  const [journalForm, setJournalForm] = useState({
+    84→    mood: 'NEUTRAL', marketContext: '', emotions: '', lessonsLearned: '', rating: '3',
+    85→  });
+    86→
+    87→  // Prefill from screener
+    88→  useEffect(() => {
+    89→    if (prefillTrade) {
+    90→      setForm({
+    91→        symbol: prefillTrade.symbol,
+    92→        stockName: '',
+    93→        direction: 'LONG',
+    94→        entryDate: new Date().toISOString().split('T')[0],
+    95→        entryPrice: String(prefillTrade.entryPrice),
+    96→        qty: String(prefillTrade.sizing.qtyA),
+    97→        stopLoss: String(prefillTrade.stopLoss),
+    98→        targetPrice: String(prefillTrade.targetPrice),
+    99→        notes: `From screener: Score ${prefillTrade.score}/6, R:R ${prefillTrade.riskReward}x`,
+   100→        tags: 'screener,v-swing',
+   101→      });
+   102→      setAddOpen(true);
+   103→      onPrefillConsumed?.();
+   104→    }
+   105→  }, [prefillTrade, onPrefillConsumed]);
+   106→
+   107→  const fetchTrades = useCallback(async () => {
+   108→    try {
+   109→      const res = await fetch('/api/trades');
+   110→      const data = await res.json();
+   111→      if (data.success) setTrades(data.trades);
+   112→    } catch (err) {
+   113→      console.error('Fetch trades error:', err);
+   114→    } finally {
+   115→      setLoading(false);
+   116→    }
+   117→  }, []);
+   118→
+   119→  useEffect(() => { fetchTrades(); }, [fetchTrades]);
+   120→
+   121→  // Build trade quality checklist
+   122→  const buildChecklist = (): ChecklistItem[] => {
+   123→    const items: ChecklistItem[] = [];
+   124→    const ep = parseFloat(form.entryPrice) || 0;
+   125→    const sl = parseFloat(form.stopLoss) || 0;
+   126→    const tp = parseFloat(form.targetPrice) || 0;
+   127→    const qty = parseInt(form.qty) || 0;
+   128→    const riskPerShare = ep > 0 && sl > 0 ? ep - sl : 0;
+   129→    const rr = riskPerShare > 0 && tp > 0 ? (tp - ep) / riskPerShare : 0;
+   130→
+   131→    items.push({
+   132→      id: 'symbol', label: 'Symbol specified',
+   133→      description: 'Trade symbol is entered',
+   134→      passed: form.symbol.trim().length > 0, critical: true,
+   135→    });
+   136→    items.push({
+   137→      id: 'price', label: 'Valid entry price',
+   138→      description: 'Entry price must be a positive number',
+   139→      passed: ep > 0, critical: true,
+   140→    });
+   141→    items.push({
+   142→      id: 'qty', label: 'Valid quantity',
+   143→      description: 'Quantity must be a positive integer',
+   144→      passed: qty > 0, critical: true,
+   145→    });
+   146→    items.push({
+   147→      id: 'sl', label: 'Stop Loss set',
+   148→      description: 'Every trade must have a stop loss to limit downside risk',
+   149→      passed: sl > 0 && sl < ep, critical: true,
+   150→    });
+   151→    items.push({
+   152→      id: 'rr', label: `Risk:Reward >= 1.5x (current: ${rr.toFixed(1)}x)`,
+   153→      description: 'V-Swing requires minimum 1.5:1 R:R for favorable expectancy',
+   154→      passed: rr >= 1.5, critical: true,
+   155→    });
+   156→    items.push({
+   157→      id: 'tp', label: 'Target price set',
+   158→      description: 'Having a target helps manage trade expectations',
+   159→      passed: tp > ep, critical: false,
+   160→    });
+   161→    items.push({
+   162→      id: 'capital_risk', label: 'Capital risk < 2%',
+   163→      description: 'Single trade should not risk more than 2% of total capital',
+   164→      passed: riskPerShare > 0 && (riskPerShare * qty) < 4000, critical: false,
+   165→    });
+   166→    items.push({
+   167→      id: 'notes', label: 'Trade notes added',
+   168→      description: 'Documenting the reason for the trade improves future review',
+   169→      passed: form.notes.trim().length > 10, critical: false,
+   170→    });
+   171→    return items;
+   172→  };
+   173→
+   174→  const openChecklist = () => {
+   175→    setChecklistOpen(true);
+   176→  };
+   177→
+   178→  const createTrade = async () => {
+   179→    setChecklistOpen(false);
+   180→    try {
+   181→      await fetch('/api/trades', {
+   182→        method: 'POST',
+   183→        headers: { 'Content-Type': 'application/json' },
+   184→        body: JSON.stringify({
+   185→          ...form,
+   186→          entryPrice: parseFloat(form.entryPrice),
+   187→          qty: parseInt(form.qty),
+   188→          stopLoss: parseFloat(form.stopLoss),
+   189→          targetPrice: parseFloat(form.targetPrice),
+   190→        }),
+   191→      });
+   192→      setAddOpen(false);
+   193→      setForm({ symbol: '', stockName: '', direction: 'LONG', entryDate: new Date().toISOString().split('T')[0], entryPrice: '', qty: '', stopLoss: '', targetPrice: '', notes: '', tags: '' });
+   194→      fetchTrades();
+   195→      toast.success(`Paper trade logged: ${form.symbol} × ${form.qty}`, {
+   196→        description: `Entry: ₹${form.entryPrice} | SL: ₹${form.stopLoss} | Target: ₹${form.targetPrice}`,
+   197→      });
+   198→    } catch (err) {
+   199→      toast.error('Failed to create trade');
+   200→      console.error('Create trade error:', err);
+   201→    }
+   202→  };
+   203→
+   204→  const closeTrade = async (id: string) => {
+   205→    try {
+   206→      await fetch('/api/trades', {
+   207→        method: 'PUT',
+   208→        headers: { 'Content-Type': 'application/json' },
+   209→        body: JSON.stringify({
+   210→          id,
+   211→          exitPrice: parseFloat(closeForm.exitPrice),
+   212→          exitDate: closeForm.exitDate,
+   213→          status: 'CLOSED',
+   214→        }),
+   215→      });
+   216→      setCloseTradeId(null);
+   217→      fetchTrades();
+   218→      const t = trades.find(t => t.id === id);
+   219→      toast.success(`Trade closed: ${t?.symbol}`, { description: `Exit: ₹${closeForm.exitPrice}` });
+   220→    } catch (err) {
+   221→      toast.error('Failed to close trade');
+   222→      console.error('Close trade error:', err);
+   223→    }
+   224→  };
+   225→
+   226→  const deleteTrade = async (id: string) => {
+   227→    try {
+   228→      const t = trades.find(t => t.id === id);
+   229→      await fetch(`/api/trades?id=${id}`, { method: 'DELETE' });
+   230→      fetchTrades();
+   231→      toast.info(`Deleted trade: ${t?.symbol}`);
+   232→    } catch (err) {
+   233→      toast.error('Failed to delete trade');
+   234→      console.error('Delete error:', err);
+   235→    }
+   236→  };
+   237→
+   238→  const saveJournal = async (tradeId: string) => {
+   239→    try {
+   240→      await fetch('/api/journal', {
+   241→        method: 'POST',
+   242→        headers: { 'Content-Type': 'application/json' },
+   243→        body: JSON.stringify({
+   244→          tradeId,
+   245→          mood: journalForm.mood,
+   246→          marketContext: journalForm.marketContext || null,
+   247→          emotions: journalForm.emotions || null,
+   248→          lessonsLearned: journalForm.lessonsLearned || null,
+   249→          rating: parseInt(journalForm.rating) || null,
+   250→        }),
+   251→      });
+   252→      setJournalTradeId(null);
+   253→      fetchTrades();
+   254→      toast.success(`Journal saved for trade`);
+   255→    } catch (err) {
+   256→      toast.error('Failed to save journal');
+   257→      console.error('Journal error:', err);
+   258→    }
+   259→  };
+   260→
+   261→  const openTrades = trades.filter(t => t.status === 'OPEN');
+   262→  const closedTrades = trades.filter(t => t.status === 'CLOSED');
+   263→  const totalPnL = closedTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+   264→  const wins = closedTrades.filter(t => (t.pnl || 0) > 0).length;
+   265→
+   266→  return (
+   267→    <div className="space-y-4">
+   268→      {/* Header */}
+   269→      <div className="flex items-center justify-between flex-wrap gap-2">
+   270→        <h2 className="text-lg font-bold flex items-center gap-2">
+   271→          <BookOpen className="h-5 w-5 text-primary" />
+   272→          Paper Trade Journal
+   273→        </h2>
+   274→        <div className="flex items-center gap-2">
+   275→          <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => {
+   276→            window.open('/api/export', '_blank');
+   277→            toast.info('Exporting trades to CSV...');
+   278→          }}>
+   279→            <Download className="h-3.5 w-3.5" />
+   280→            <span className="hidden sm:inline">Export CSV</span>
+   281→          </Button>
+   282→        </div>
+   283→      </div>
+   284→
+   285→      {/* New Trade Dialog (outside header flex) */}
+   286→      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+   287→        <DialogTrigger asChild>
+   288→          <Button className="gap-2">
+   289→            <Plus className="h-4 w-4" />
+   290→            New Trade
+   291→          </Button>
+   292→        </DialogTrigger>
+   293→          <DialogContent className="max-w-md">
+   294→            <DialogHeader>
+   295→              <DialogTitle>Log Paper Trade</DialogTitle>
+   296→            </DialogHeader>
+   297→            <div className="grid gap-4 py-2">
+   298→              <div className="grid grid-cols-2 gap-3">
+   299→                <div className="space-y-2">
+   300→                  <Label className="text-xs">Symbol *</Label>
+   301→                  <Input value={form.symbol} onChange={e => setForm(f => ({ ...f, symbol: e.target.value }))} placeholder="RELIANCE" className="h-9 text-sm" />
+   302→                </div>
+   303→                <div className="space-y-2">
+   304→                  <Label className="text-xs">Direction</Label>
+   305→                  <Select value={form.direction} onValueChange={v => setForm(f => ({ ...f, direction: v }))}>
+   306→                    <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
+   307→                    <SelectContent>
+   308→                      <SelectItem value="LONG">LONG</SelectItem>
+   309→                      <SelectItem value="SHORT">SHORT</SelectItem>
+   310→                    </SelectContent>
+   311→                  </Select>
+   312→                </div>
+   313→              </div>
+   314→              <div className="grid grid-cols-3 gap-3">
+   315→                <div className="space-y-2">
+   316→                  <Label className="text-xs">Entry Date</Label>
+   317→                  <Input type="date" value={form.entryDate} onChange={e => setForm(f => ({ ...f, entryDate: e.target.value }))} className="h-9 text-sm" />
+   318→                </div>
+   319→                <div className="space-y-2">
+   320→                  <Label className="text-xs">Entry Price *</Label>
+   321→                  <Input type="number" value={form.entryPrice} onChange={e => setForm(f => ({ ...f, entryPrice: e.target.value }))} placeholder="0.00" className="h-9 text-sm" />
+   322→                </div>
+   323→                <div className="space-y-2">
+   324→                  <Label className="text-xs">Quantity *</Label>
+   325→                  <Input type="number" value={form.qty} onChange={e => setForm(f => ({ ...f, qty: e.target.value }))} placeholder="0" className="h-9 text-sm" />
+   326→                </div>
+   327→              </div>
+   328→              <div className="grid grid-cols-2 gap-3">
+   329→                <div className="space-y-2">
+   330→                  <Label className="text-xs">Stop Loss *</Label>
+   331→                  <Input type="number" value={form.stopLoss} onChange={e => setForm(f => ({ ...f, stopLoss: e.target.value }))} placeholder="0.00" className="h-9 text-sm" />
+   332→                </div>
+   333→                <div className="space-y-2">
+   334→                  <Label className="text-xs">Target Price</Label>
+   335→                  <Input type="number" value={form.targetPrice} onChange={e => setForm(f => ({ ...f, targetPrice: e.target.value }))} placeholder="0.00" className="h-9 text-sm" />
+   336→                </div>
+   337→              </div>
+   338→              <div className="space-y-2">
+   339→                <Label className="text-xs">Tags (comma separated)</Label>
+   340→                <Input value={form.tags} onChange={e => setForm(f => ({ ...f, tags: e.target.value }))} placeholder="screener, breakout" className="h-9 text-sm" />
+   341→              </div>
+   342→              <div className="space-y-2">
+   343→                <Label className="text-xs">Notes</Label>
+   344→                <Textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} placeholder="Why did you take this trade?" className="text-sm min-h-[60px]" />
+   345→              </div>
+   346→            </div>
+   347→            <DialogFooter>
+   348→              <DialogClose asChild>
+   349→                <Button variant="outline">Cancel</Button>
+   350→              </DialogClose>
+   351→              <Button onClick={openChecklist} disabled={!form.symbol || !form.entryPrice || !form.qty || !form.stopLoss}>
+   352→                <Shield className="h-4 w-4 mr-2" />
+   353→                Quality Check & Add
+   354→              </Button>
+   355→            </DialogFooter>
+   356→          </DialogContent>
+   357→        </Dialog>
+   358→
+   359→      {/* Stats */}
+   360→      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+   361→        <Card><CardContent className="p-3">
+   362→          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Open Trades</div>
+   363→          <div className="text-2xl font-bold mt-1">{openTrades.length}</div>
+   364→        </CardContent></Card>
+   365→        <Card><CardContent className="p-3">
+   366→          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Closed Trades</div>
+   367→          <div className="text-2xl font-bold mt-1">{closedTrades.length}</div>
+   368→        </CardContent></Card>
+   369→        <Card><CardContent className="p-3">
+   370→          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Win Rate</div>
+   371→          <div className="text-2xl font-bold mt-1">{closedTrades.length > 0 ? Math.round((wins / closedTrades.length) * 100) : 0}%</div>
+   372→        </CardContent></Card>
+   373→        <Card className={totalPnL >= 0 ? 'border-emerald-500/20' : 'border-red-500/20'}><CardContent className="p-3">
+   374→          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total P&L</div>
+   375→          <div className={cn('text-2xl font-bold mt-1', totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   376→            {totalPnL >= 0 ? '+' : ''}₹{Math.round(totalPnL).toLocaleString()}
+   377→          </div>
+   378→        </CardContent></Card>
+   379→      </div>
+   380→
+   381→      {/* Live P&L Tracker for open positions */}
+   382→      <LivePnlTracker />
+   383→
+   384→      {/* Trade List */}
+   385→      <ScrollArea className="max-h-[calc(100vh-340px)]">
+   386→        <div className="space-y-3 pr-4">
+   387→          {trades.length === 0 && !loading && (
+   388→            <div className="text-center py-16 text-muted-foreground">
+   389→              <BookOpen className="h-12 w-12 mx-auto mb-3 opacity-30" />
+   390→              <p className="text-sm">No trades yet. Start by adding a paper trade or scanning for setups.</p>
+   391→            </div>
+   392→          )}
+   393→
+   394→          {trades.map(trade => (
+   395→            <Card key={trade.id} className={cn(
+   396→              'border transition-all',
+   397→              trade.status === 'OPEN' ? 'border-primary/20' : '',
+   398→              (trade.pnl || 0) > 0 ? 'border-emerald-500/10' : (trade.pnl || 0) < 0 ? 'border-red-500/10' : '',
+   399→            )}>
+   400→              <CardContent className="p-4">
+   401→                <div className="flex items-start justify-between">
+   402→                  <div className="flex items-center gap-3">
+   403→                    <div className={cn(
+   404→                      'h-9 w-9 rounded-lg flex items-center justify-center text-xs font-bold',
+   405→                      trade.status === 'OPEN' ? 'bg-primary/15 text-primary' :
+   406→                      (trade.pnl || 0) > 0 ? 'bg-emerald-500/15 text-emerald-400' :
+   407→                      'bg-red-500/15 text-red-400'
+   408→                    )}>
+   409→                      {trade.status === 'OPEN' ? (
+   410→                        trade.direction === 'LONG' ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />
+   411→                      ) : (trade.pnl || 0) > 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
+   412→                    </div>
+   413→                    <div>
+   414→                      <div className="flex items-center gap-2">
+   415→                        <span className="font-semibold text-sm">{trade.symbol}</span>
+   416→                        <Badge variant="outline" className="text-[10px] px-1.5 py-0">{trade.status}</Badge>
+   417→                        {trade.direction === 'LONG' && <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-emerald-400 border-emerald-500/30">LONG</Badge>}
+   418→                      </div>
+   419→                      <div className="text-xs text-muted-foreground mt-0.5">
+   420→                        {new Date(trade.entryDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+   421→                        {' @ '}₹{trade.entryPrice} × {trade.qty}
+   422→                      </div>
+   423→                    </div>
+   424→                  </div>
+   425→                  <div className="flex items-center gap-1">
+   426→                    {trade.status === 'OPEN' && (
+   427→                      <Dialog open={closeTradeId === trade.id} onOpenChange={open => { if (!open) setCloseTradeId(null); else setCloseTradeId(trade.id); }}>
+   428→                        <DialogTrigger asChild>
+   429→                          <Button size="sm" variant="outline" className="h-7 text-xs">Close Trade</Button>
+   430→                        </DialogTrigger>
+   431→                        <DialogContent className="max-w-sm">
+   432→                          <DialogHeader><DialogTitle>Close Trade: {trade.symbol}</DialogTitle></DialogHeader>
+   433→                          <div className="grid gap-3 py-2">
+   434→                            <div className="space-y-2">
+   435→                              <Label className="text-xs">Exit Price</Label>
+   436→                              <Input type="number" value={closeForm.exitPrice} onChange={e => setCloseForm(f => ({ ...f, exitPrice: e.target.value }))} placeholder="0.00" className="h-9 text-sm" />
+   437→                            </div>
+   438→                            <div className="space-y-2">
+   439→                              <Label className="text-xs">Exit Date</Label>
+   440→                              <Input type="date" value={closeForm.exitDate} onChange={e => setCloseForm(f => ({ ...f, exitDate: e.target.value }))} className="h-9 text-sm" />
+   441→                            </div>
+   442→                          </div>
+   443→                          <DialogFooter>
+   444→                            <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
+   445→                            <Button onClick={() => closeTrade(trade.id)} disabled={!closeForm.exitPrice}>Close</Button>
+   446→                          </DialogFooter>
+   447→                        </DialogContent>
+   448→                      </Dialog>
+   449→                    )}
+   450→                    <Dialog open={journalTradeId === trade.id} onOpenChange={open => { if (!open) setJournalTradeId(null); else { setJournalTradeId(trade.id); setJournalForm({ mood: trade.journal?.mood || 'NEUTRAL', marketContext: trade.journal?.marketContext || '', emotions: trade.journal?.emotions || '', lessonsLearned: trade.journal?.lessonsLearned || '', rating: String(trade.journal?.rating || '3') }); }}}>
+   451→                      <DialogTrigger asChild>
+   452→                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0"><Brain className="h-3.5 w-3.5" /></Button>
+   453→                      </DialogTrigger>
+   454→                      <DialogContent className="max-w-md">
+   455→                        <DialogHeader><DialogTitle>Trade Journal: {trade.symbol}</DialogTitle></DialogHeader>
+   456→                        <div className="grid gap-4 py-2">
+   457→                          <div className="space-y-2">
+   458→                            <Label className="text-xs">Mood at Entry</Label>
+   459→                            <div className="flex gap-2">
+   460→                              {MOODS.map(m => (
+   461→                                <Button key={m.value} size="sm" variant={journalForm.mood === m.value ? 'default' : 'outline'} onClick={() => setJournalForm(f => ({ ...f, mood: m.value }))} className={cn('text-xs', journalForm.mood === m.value && 'bg-secondary text-foreground')}>
+   462→                                  {m.label}
+   463→                                </Button>
+   464→                              ))}
+   465→                            </div>
+   466→                          </div>
+   467→                          <div className="space-y-2">
+   468→                            <Label className="text-xs">Market Context</Label>
+   469→                            <Input value={journalForm.marketContext} onChange={e => setJournalForm(f => ({ ...f, marketContext: e.target.value }))} placeholder="Nifty trending, sector rotation..." className="h-9 text-sm" />
+   470→                          </div>
+   471→                          <div className="space-y-2">
+   472→                            <Label className="text-xs">Emotions / Psychology</Label>
+   473→                            <Textarea value={journalForm.emotions} onChange={e => setJournalForm(f => ({ ...f, emotions: e.target.value }))} placeholder="Felt anxious about size, confident in setup..." className="text-sm min-h-[50px]" />
+   474→                          </div>
+   475→                          <div className="space-y-2">
+   476→                            <Label className="text-xs">Lessons Learned</Label>
+   477→                            <Textarea value={journalForm.lessonsLearned} onChange={e => setJournalForm(f => ({ ...f, lessonsLearned: e.target.value }))} placeholder="What would you do differently?" className="text-sm min-h-[50px]" />
+   478→                          </div>
+   479→                          <div className="space-y-2">
+   480→                            <Label className="text-xs">Self-Rating: {journalForm.rating}/5</Label>
+   481→                            <input type="range" min="1" max="5" value={journalForm.rating} onChange={e => setJournalForm(f => ({ ...f, rating: e.target.value }))} className="w-full" />
+   482→                          </div>
+   483→                        </div>
+   484→                        <DialogFooter>
+   485→                          <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
+   486→                          <Button onClick={() => saveJournal(trade.id)}>Save Journal</Button>
+   487→                        </DialogFooter>
+   488→                      </DialogContent>
+   489→                    </Dialog>
+   490→                    <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-red-400" onClick={() => deleteTrade(trade.id)}>
+   491→                      <Trash2 className="h-3.5 w-3.5" />
+   492→                    </Button>
+   493→                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setExpandedId(expandedId === trade.id ? null : trade.id)}>
+   494→                      {expandedId === trade.id ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+   495→                    </Button>
+   496→                  </div>
+   497→                </div>
+   498→
+   499→                {/* P&L Bar for closed trades */}
+   500→                {trade.status === 'CLOSED' && trade.pnl != null && (
+   501→                  <div className="mt-3 flex items-center gap-3">
+   502→                    <div className={cn('text-sm font-mono font-bold', trade.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   503→                      {trade.pnl >= 0 ? '+' : ''}₹{Math.round(trade.pnl).toLocaleString()}
+   504→                    </div>
+   505→                    <Badge variant="outline" className={cn('text-[10px] font-mono', trade.pnl >= 0 ? 'text-emerald-400 border-emerald-500/30' : 'text-red-400 border-red-500/30')}>
+   506→                      {trade.pnl >= 0 ? '+' : ''}{trade.pnlPercent?.toFixed(2)}%
+   507→                    </Badge>
+   508→                    {trade.journal && (
+   509→                      <Badge variant="outline" className="text-[10px] text-purple-400 border-purple-500/30">
+   510→                        Journal: {trade.journal.mood}
+   511→                      </Badge>
+   512→                    )}
+   513→                  </div>
+   514→                )}
+   515→
+   516→                {/* Expanded details */}
+   517→                {expandedId === trade.id && (
+   518→                  <div className="mt-3 border-t border-border pt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+   519→                    <div className="rounded bg-secondary/50 px-3 py-2">
+   520→                      <div className="text-muted-foreground">SL</div>
+   521→                      <div className="font-mono font-semibold text-red-400">₹{trade.stopLoss}</div>
+   522→                    </div>
+   523→                    <div className="rounded bg-secondary/50 px-3 py-2">
+   524→                      <div className="text-muted-foreground">Target</div>
+   525→                      <div className="font-mono font-semibold text-emerald-400">₹{trade.targetPrice}</div>
+   526→                    </div>
+   527→                    {trade.status === 'CLOSED' && (
+   528→                      <>
+   529→                        <div className="rounded bg-secondary/50 px-3 py-2">
+   530→                          <div className="text-muted-foreground">Exit Price</div>
+   531→                          <div className="font-mono font-semibold">₹{trade.exitPrice}</div>
+   532→                        </div>
+   533→                        <div className="rounded bg-secondary/50 px-3 py-2">
+   534→                          <div className="text-muted-foreground">Holding Days</div>
+   535→                          <div className="font-mono font-semibold">
+   536→                            {Math.round((new Date(trade.exitDate || '').getTime() - new Date(trade.entryDate).getTime()) / (1000 * 60 * 60 * 24))}d
+   537→                          </div>
+   538→                        </div>
+   539→                      </>
+   540→                    )}
+   541→                    {trade.status === 'OPEN' && (
+   542→                      <>
+   543→                        <div className="rounded bg-secondary/50 px-3 py-2">
+   544→                          <div className="text-muted-foreground">Capital at Risk</div>
+   545→                          <div className="font-mono font-semibold">₹{Math.round(Math.abs(trade.entryPrice - trade.stopLoss) * trade.qty).toLocaleString()}</div>
+   546→                        </div>
+   547→                        <div className="rounded bg-secondary/50 px-3 py-2">
+   548→                          <div className="text-muted-foreground">R:R</div>
+   549→                          <div className="font-mono font-semibold">{(Math.abs(trade.targetPrice - trade.entryPrice) / Math.abs(trade.entryPrice - trade.stopLoss)).toFixed(1)}x</div>
+   550→                        </div>
+   551→                      </>
+   552→                    )}
+   553→                  </div>
+   554→                )}
+   555→
+   556→                {/* Notes */}
+   557→                {trade.notes && expandedId !== trade.id && (
+   558→                  <p className="mt-2 text-xs text-muted-foreground truncate">{trade.notes}</p>
+   559→                )}
+   560→                {trade.notes && expandedId === trade.id && (
+   561→                  <p className="mt-2 text-xs text-muted-foreground">{trade.notes}</p>
+   562→                )}
+   563→              </CardContent>
+   564→            </Card>
+   565→          ))}
+   566→        </div>
+   567→      </ScrollArea>
+   568→
+   569→      {/* Trade Quality Checklist Dialog */}
+   570→      <TradeQualityChecklist
+   571→        open={checklistOpen}
+   572→        onClose={() => setChecklistOpen(false)}
+   573→        onConfirm={createTrade}
+   574→        checklistItems={buildChecklist()}
+   575→        symbol={form.symbol || 'TRADE'}
+   576→      />
+   577→    </div>
+   578→  );
+   579→}
