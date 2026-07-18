@@ -9,6 +9,7 @@ import { JournalTab } from '@/components/trading/journal-tab';
 import { AnalyticsTab } from '@/components/trading/analytics-tab';
 import { BacktestTab } from '@/components/trading/backtest-tab';
 import { AutoTradeTab } from '@/components/trading/auto-trade-tab';
+import { SettingsTab } from '@/components/trading/settings-tab';
 import { useTradeStore } from '@/store/trade-store';
 import type { ScreeningResult } from '@/lib/trading/screening-engine';
 
@@ -34,7 +35,7 @@ export default function Home() {
           {activeTab === 'journal' && <JournalTab prefillTrade={prefillTrade} onPrefillConsumed={consumePrefill} />}
           {activeTab === 'analytics' && <AnalyticsTab />}
           {activeTab === 'backtest' && <BacktestTab />}
-          {activeTab === 'settings' && <AutoTradeTab />}
+          {activeTab === 'settings' && <SettingsTab />}
         </div>
       </main>
     </div>

@@ -10,7 +10,7 @@ import {
   RefreshCw, ArrowRight, Activity, Bell,
 } from 'lucide-react';
 import {
-  PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+  PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LineChart, Line, Legend,
 } from 'recharts';
 import { cn } from '@/lib/utils';
 import { useTradeStore } from '@/store/trade-store';
@@ -39,22 +39,25 @@ export function DashboardTab() {
   const [quotes, setQuotes] = useState<WatchlistQuote[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
+  const [benchmark, setBenchmark] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [sumRes, mdRes, atRes, alRes] = await Promise.all([
+      const [sumRes, mdRes, atRes, alRes, bmRes] = await Promise.all([
         fetch('/api/portfolio/summary'),
         fetch('/api/market-data'),
         fetch('/api/auto-trade'),
         fetch('/api/portfolio/alerts'),
+        fetch('/api/portfolio/benchmark?days=60'),
       ]);
-      const [sum, md, at, al] = await Promise.all([sumRes.json(), mdRes.json(), atRes.json(), alRes.json()]);
+      const [sum, md, at, al, bm] = await Promise.all([sumRes.json(), mdRes.json(), atRes.json(), alRes.json(), bmRes.json()]);
       if (sum.success) setData(sum);
       if (md.success) setQuotes(md.quotes || []);
       if (at.success) setLogs(at.recentLogs || []);
       if (al.success) setAlerts((al.alerts || []).filter((a: any) => a.active && !a.triggered));
+      if (bm.success) setBenchmark(bm.benchmark);
     } catch (err) {
       console.error('Dashboard fetch error:', err);
     } finally {
@@ -146,6 +149,46 @@ export function DashboardTab() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Benchmark Mini-Chart: Portfolio vs Nifty */}
+      {benchmark && benchmark.chartData?.length > 0 && (
+        <Card className="border-border">
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold flex items-center gap-2">
+                <TrendingUp className="h-4 w-4 text-primary" />
+                vs Nifty 50
+              </h3>
+              <div className="flex gap-3 text-xs">
+                <span className={cn('font-mono', (benchmark.portfolioTotalReturn || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                  Portfolio: {benchmark.portfolioTotalReturn >= 0 ? '+' : ''}₹{(benchmark.portfolioTotalReturn || 0).toLocaleString()}
+                </span>
+                <span className={cn('font-mono', (benchmark.niftyTotalReturn || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                  Nifty: {benchmark.niftyTotalReturn >= 0 ? '+' : ''}{(benchmark.niftyTotalReturn || 0).toFixed(2)}%
+                </span>
+                {benchmark.alpha != null && (
+                  <Badge variant="outline" className={cn('text-[9px] h-4', (benchmark.alpha || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                    Alpha: {benchmark.alpha >= 0 ? '+' : ''}{benchmark.alpha}%
+                  </Badge>
+                )}
+              </div>
+            </div>
+            <div className="h-[120px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={benchmark.chartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                  <XAxis dataKey="date" tick={{ fontSize: 8, fill: '#71717a' }} interval={Math.floor(benchmark.chartData.length / 4)} />
+                  <YAxis tick={{ fontSize: 9, fill: '#71717a' }} />
+                  <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 10 }} />
+                  <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />
+                  <Line type="monotone" dataKey="portfolio" stroke="#6366f1" strokeWidth={2} name="Portfolio (₹)" dot={false} />
+                  <Line type="monotone" dataKey="nifty" stroke="#10b981" strokeWidth={1.5} name="Nifty 50 (%)" dot={false} strokeDasharray="4 2" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Two-column layout */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">

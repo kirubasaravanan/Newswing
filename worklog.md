@@ -1,24 +1,35 @@
 ---
-Task ID: 2
+Task ID: 1-8
 Agent: Main Agent
-Task: Add PMS improvements — full universe scan, risk metrics, benchmark, alerts, capital gains, rebalance, multi-portfolio
+Task: Implement 10 PMS improvements (all items)
 
 Work Log:
-- Updated screener API to support `scanMode: 'universe'` — scans ~230 F&O+midcap stocks instead of 30 watchlist
-- Added scanner UI toggle: "Watchlist (30)" vs "Full Universe (~230)" buttons
-- Created `/api/portfolio/risk-metrics` — Sharpe, Sortino, Max DD, Calmar, VaR 95%, CAGR, avg holding days
-- Created `/api/portfolio/benchmark` — portfolio vs Nifty 50 comparison chart with alpha/beta calculation
-- Created `/api/portfolio/alerts` — CRUD + check alerts against live Yahoo prices (ABOVE/BELOW conditions)
-- Created `/api/portfolio/capital-gains` — STCG (20%) / LTCG (12.5% with ₹1.25L exemption) tax report by FY
-- Created `/api/portfolio/rebalance` — sector allocation analysis with buy/sell suggestions
-- Created `/api/portfolios` — multi-portfolio support (create/list/delete portfolios)
-- Added Prisma models: Portfolio, PriceAlert
-- Enhanced Analytics tab with 6 sub-tabs: Overview, Risk Metrics, Benchmark, Alerts, Capital Gains, Rebalance
-- Added Active Alerts panel to Dashboard
-- Build passes with all 6 new API routes
+- Created /home/z/my-project/src/lib/trading/nse-universe.ts — comprehensive NSE stock list (~600+ stocks) covering Nifty 50, Nifty 100, F&O, Mid-cap, Small-cap
+- Rewrote /home/z/my-project/src/lib/trading/universe-scanner.ts to use new nse-universe.ts (backward compat maintained)
+- Added Prisma models: DividendRecord, SIPPlan, WatchlistFolder (with folderId on WatchlistStock, sipPlans on Portfolio)
+- Ran prisma db push — schema migrated successfully
+- Created /home/z/my-project/src/app/api/portfolio/sip/route.ts — GET/POST/DELETE for SIP plans
+- Created /home/z/my-project/src/app/api/portfolio/dividends/route.ts — GET/POST/DELETE for dividend records
+- Created /home/z/my-project/src/app/api/watchlist/folders/route.ts — GET/POST/PUT/DELETE for watchlist folders
+- Created /home/z/my-project/src/components/trading/settings-tab.tsx — full Settings tab with 6 sub-tabs: Capital, Portfolios, SIP Plans, Dividends, Watchlist Folders, Universe Stats
+- Updated /home/z/my-project/src/app/page.tsx — Settings tab now uses SettingsTab instead of AutoTradeTab
+- Updated /home/z/my-project/src/components/trading/analytics-tab.tsx — added SIP and Dividends sub-tabs with SIPTracker and DividendTracker components
+- Updated /home/z/my-project/src/components/trading/dashboard-tab.tsx — added benchmark mini-chart (Portfolio vs Nifty 50) with alpha display
+- Updated /home/z/my-project/src/components/trading/sidebar.tsx — added universe count badge on Scanner nav item
+- Build verified: all 25 routes compiled successfully, 0 errors
 
 Stage Summary:
-- Scanner now supports full NSE universe (~230 stocks) via toggle
-- 6 new PMS-grade features added
-- Analytics tab transformed from 1 view to 6-tab professional analytics dashboard
-- All data remains 100% real Yahoo Finance — zero mock
+- All 10 improvements implemented:
+  1. Full NSE Universe Scan — expanded from ~200 to 600+ stocks ✓
+  2. Benchmark Comparison — chart in Dashboard + full chart in Analytics ✓ (already existed, enhanced)
+  3. Risk Metrics Dashboard — Sharpe/Sortino/MaxDD/VaR/Calmar ✓ (already existed)
+  4. Price Alerts — create/check/delete ✓ (already existed)
+  5. Dividend & Corporate Action Tracking — new ✓
+  6. Multi-Portfolio Support — create/delete in Settings ✓ (API existed, UI new)
+  7. SIP/Systematic Investment Tracking — new ✓
+  8. Capital Gains Report — STCG/LTCG ✓ (already existed)
+  9. Watchlist Folders — create/move/delete ✓ (new)
+  10. Portfolio Rebalancing Tool ✓ (already existed)
+- New API routes: /api/portfolio/sip, /api/portfolio/dividends, /api/watchlist/folders
+- New Prisma models: DividendRecord, SIPPlan, WatchlistFolder
+- Settings tab completely redesigned with 6 sub-sections

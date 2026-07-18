@@ -23,9 +23,9 @@ export function Sidebar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [yahooOk, setYahooOk] = useState<boolean | null>(null);
   const [openCount, setOpenCount] = useState(0);
+  const [universeCount, setUniverseCount] = useState(0);
 
   useEffect(() => {
-    // Check Yahoo status + open position count
     const fetchData = async () => {
       try {
         const [statusRes, tradesRes] = await Promise.all([
@@ -36,6 +36,12 @@ export function Sidebar() {
         const trades = await tradesRes.json();
         if (status.success) setYahooOk(status.yahoo?.available ?? null);
         if (trades.success) setOpenCount((trades.trades || []).filter((t: any) => t.status === 'OPEN').length);
+        // Get universe count
+        try {
+          const { getUniverseStats } = await import('@/lib/trading/universe-scanner');
+          const stats = getUniverseStats();
+          setUniverseCount(stats.total);
+        } catch { /* skip */ }
       } catch { /* ignore */ }
     };
     fetchData();
@@ -64,6 +70,11 @@ export function Sidebar() {
             {item.id === 'holdings' && openCount > 0 && (
               <span className="ml-auto hidden h-5 min-w-5 items-center justify-center rounded-full bg-indigo-500/20 px-1.5 text-[10px] font-bold text-indigo-400 lg:flex">
                 {openCount}
+              </span>
+            )}
+            {item.id === 'scanner' && universeCount > 0 && (
+              <span className="ml-auto hidden h-5 min-w-5 items-center justify-center rounded-full bg-emerald-500/20 px-1.5 text-[10px] font-bold text-emerald-400 lg:flex">
+                {universeCount}
               </span>
             )}
           </button>

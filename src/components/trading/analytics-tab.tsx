@@ -420,6 +420,114 @@ function RebalancePanel() {
   );
 }
 
+// ── SIP Tracker (Analytics version) ────────────────────
+function SIPTracker() {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/portfolio/sip');
+        const d = await res.json();
+        if (d.success) setData(d);
+      } catch { /* ignore */ }
+      finally { setLoading(false); }
+    })();
+  }, []);
+  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+  if (!data || data.plans.length === 0) return <p className="text-center py-8 text-muted-foreground text-sm">No active SIP plans. Create one in Settings → SIP Plans.</p>;
+  return (
+    <div>
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Total Invested</div>
+          <div className="text-lg font-bold font-mono">₹{Math.round(data.totalInvested).toLocaleString()}</div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Current Value</div>
+          <div className={cn('text-lg font-bold font-mono', (data.totalCurrentValue - data.totalInvested) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+            ₹{Math.round(data.totalCurrentValue).toLocaleString()}
+          </div>
+        </div>
+      </div>
+      <ScrollArea className="max-h-[300px]">
+        <table className="w-full text-xs">
+          <thead><tr className="border-b border-border text-muted-foreground">
+            <th className="text-left py-1 font-medium">Symbol</th><th className="text-right py-1 font-medium">Amount</th>
+            <th className="text-right py-1 font-medium">Frequency</th><th className="text-right py-1 font-medium">Installments</th>
+            <th className="text-right py-1 font-medium">Avg Price</th><th className="text-right py-1 font-medium">Return</th>
+          </tr></thead>
+          <tbody>
+            {data.plans.map((p: any) => (
+              <tr key={p.id} className="border-b border-border/30">
+                <td className="py-1.5 font-semibold">{p.symbol}</td>
+                <td className="text-right py-1.5 font-mono">₹{p.amount.toLocaleString()}</td>
+                <td className="text-right py-1.5"><Badge variant="outline" className="text-[9px] h-4">{p.frequency}</Badge></td>
+                <td className="text-right py-1.5 font-mono">{p.installmentsCompleted}</td>
+                <td className="text-right py-1.5 font-mono">₹{p.avgPrice > 0 ? p.avgPrice.toFixed(1) : '—'}</td>
+                <td className={cn('text-right py-1.5 font-mono', p.returnPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                  {p.returnPct.toFixed(1)}%
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </ScrollArea>
+    </div>
+  );
+}
+
+// ── Dividend Tracker (Analytics version) ───────────────
+function DividendTracker() {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/portfolio/dividends');
+        const d = await res.json();
+        if (d.success) setData(d);
+      } catch { /* ignore */ }
+      finally { setLoading(false); }
+    })();
+  }, []);
+  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+  if (!data || data.dividends.length === 0) return <p className="text-center py-8 text-muted-foreground text-sm">No dividends recorded. Add them in Settings → Dividends.</p>;
+  const s = data.summary;
+  const byYearEntries = Object.entries(s.byYear).sort((a, b) => b[0].localeCompare(a[0]));
+  return (
+    <div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <div className="rounded-lg bg-emerald-500/10 p-3">
+          <div className="text-[10px] text-emerald-400 uppercase">Total Dividends</div>
+          <div className="text-lg font-bold font-mono text-emerald-400">₹{s.totalDividends.toLocaleString()}</div>
+        </div>
+        <div className="rounded-lg bg-secondary/50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase">Stocks</div>
+          <div className="text-lg font-bold font-mono">{s.uniqueStocks}</div>
+        </div>
+        {byYearEntries.slice(0, 2).map(([year, amount]) => (
+          <div key={year} className="rounded-lg bg-secondary/50 p-3">
+            <div className="text-[10px] text-muted-foreground uppercase">{year}</div>
+            <div className="text-lg font-bold font-mono text-emerald-400">₹{Math.round(amount as number).toLocaleString()}</div>
+          </div>
+        ))}
+      </div>
+      <h4 className="text-xs font-semibold mb-2">By Stock</h4>
+      <ScrollArea className="max-h-[200px]">
+        <div className="space-y-1 pr-2">
+          {Object.entries(s.bySymbol).slice(0, 15).map(([sym, amt]) => (
+            <div key={sym} className="flex items-center justify-between text-xs py-1.5 border-b border-border/30">
+              <span className="font-semibold">{sym}</span>
+              <span className="font-mono text-emerald-400">₹{Math.round(amt as number).toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      </ScrollArea>
+    </div>
+  );
+}
+
 // ── Main Analytics Tab ─────────────────────────────────
 export function AnalyticsTab() {
   const [trades, setTrades] = useState<any[]>([]);
@@ -502,6 +610,8 @@ export function AnalyticsTab() {
           <TabsTrigger value="alerts" className="text-xs">Alerts</TabsTrigger>
           <TabsTrigger value="tax" className="text-xs">Capital Gains</TabsTrigger>
           <TabsTrigger value="rebalance" className="text-xs">Rebalance</TabsTrigger>
+          <TabsTrigger value="sip" className="text-xs">SIP</TabsTrigger>
+          <TabsTrigger value="dividends" className="text-xs">Dividends</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview">
@@ -612,6 +722,8 @@ export function AnalyticsTab() {
         <TabsContent value="alerts"><Card className="border-border"><CardContent className="p-4"><AlertsPanel /></CardContent></Card></TabsContent>
         <TabsContent value="tax"><Card className="border-border"><CardContent className="p-4"><CapitalGainsReport /></CardContent></Card></TabsContent>
         <TabsContent value="rebalance"><Card className="border-border"><CardContent className="p-4"><RebalancePanel /></CardContent></Card></TabsContent>
+        <TabsContent value="sip"><Card className="border-border"><CardContent className="p-4"><SIPTracker /></CardContent></Card></TabsContent>
+        <TabsContent value="dividends"><Card className="border-border"><CardContent className="p-4"><DividendTracker /></CardContent></Card></TabsContent>
       </Tabs>
     </div>
   );
