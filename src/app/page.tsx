@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { Sidebar } from '@/components/trading/sidebar';
 import { ScreenerTab } from '@/components/trading/screener-tab';
 import { JournalTab } from '@/components/trading/journal-tab';
@@ -26,8 +26,8 @@ export default function Home() {
       <Sidebar />
       
       {/* Main Content */}
-      <main className="lg:pl-56">
-        <div className="mx-auto max-w-6xl px-4 py-6 lg:px-8 lg:py-8">
+      <main className="pl-16 lg:pl-56">
+        <div className="mx-auto max-w-6xl px-4 pt-16 pb-6 lg:px-8 lg:pt-8 lg:pb-8">
           {/* Top Bar */}
           <div className="mb-6 flex items-center justify-between">
             <div>

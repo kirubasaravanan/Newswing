@@ -15,9 +15,10 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { BookOpen, Plus, X, TrendingUp, TrendingDown, Minus,
-  Edit, Trash2, ChevronDown, ChevronUp, Brain } from 'lucide-react';
+  Edit, Trash2, ChevronDown, ChevronUp, Brain, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { ScreeningResult } from '@/lib/trading/screening-engine';
+import { toast } from 'sonner';
 
 interface Trade {
   id: string;
@@ -130,7 +131,11 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
       setAddOpen(false);
       setForm({ symbol: '', stockName: '', direction: 'LONG', entryDate: new Date().toISOString().split('T')[0], entryPrice: '', qty: '', stopLoss: '', targetPrice: '', notes: '', tags: '' });
       fetchTrades();
+      toast.success(`Paper trade logged: ${form.symbol} × ${form.qty}`, {
+        description: `Entry: ₹${form.entryPrice} | SL: ₹${form.stopLoss} | Target: ₹${form.targetPrice}`,
+      });
     } catch (err) {
+      toast.error('Failed to create trade');
       console.error('Create trade error:', err);
     }
   };
@@ -149,16 +154,22 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
       });
       setCloseTradeId(null);
       fetchTrades();
+      const t = trades.find(t => t.id === id);
+      toast.success(`Trade closed: ${t?.symbol}`, { description: `Exit: ₹${closeForm.exitPrice}` });
     } catch (err) {
+      toast.error('Failed to close trade');
       console.error('Close trade error:', err);
     }
   };
 
   const deleteTrade = async (id: string) => {
     try {
+      const t = trades.find(t => t.id === id);
       await fetch(`/api/trades?id=${id}`, { method: 'DELETE' });
       fetchTrades();
+      toast.info(`Deleted trade: ${t?.symbol}`);
     } catch (err) {
+      toast.error('Failed to delete trade');
       console.error('Delete error:', err);
     }
   };
@@ -179,7 +190,9 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
       });
       setJournalTradeId(null);
       fetchTrades();
+      toast.success(`Journal saved for trade`);
     } catch (err) {
+      toast.error('Failed to save journal');
       console.error('Journal error:', err);
     }
   };
@@ -192,18 +205,30 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h2 className="text-lg font-bold flex items-center gap-2">
           <BookOpen className="h-5 w-5 text-primary" />
           Paper Trade Journal
         </h2>
-        <Dialog open={addOpen} onOpenChange={setAddOpen}>
-          <DialogTrigger asChild>
-            <Button className="gap-2">
-              <Plus className="h-4 w-4" />
-              New Trade
-            </Button>
-          </DialogTrigger>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => {
+            window.open('/api/export', '_blank');
+            toast.info('Exporting trades to CSV...');
+          }}>
+            <Download className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Export CSV</span>
+          </Button>
+        </div>
+      </div>
+
+      {/* New Trade Dialog (outside header flex) */}
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogTrigger asChild>
+          <Button className="gap-2">
+            <Plus className="h-4 w-4" />
+            New Trade
+          </Button>
+        </DialogTrigger>
           <DialogContent className="max-w-md">
             <DialogHeader>
               <DialogTitle>Log Paper Trade</DialogTitle>
@@ -268,7 +293,6 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
             </DialogFooter>
           </DialogContent>
         </Dialog>
-      </div>
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

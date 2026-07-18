@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/select';
 import { BarChart3, Play, TrendingUp, TrendingDown, Trophy, AlertTriangle, Zap } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Area, AreaChart,
   BarChart, Bar, Cell, CartesianGrid, ReferenceLine,
@@ -48,8 +49,12 @@ export function BacktestTab() {
       if (data.success) {
         setResult({ trades: data.trades, equityCurve: data.equityCurve, stats: data.stats });
         fetchPastRuns();
+        toast.success(`Backtest complete: ${data.stats.totalTrades} trades`, {
+          description: `Win Rate: ${data.stats.winRate}% | PF: ${data.stats.profitFactor}x`,
+        });
       }
     } catch (err) {
+      toast.error('Backtest failed');
       console.error('Backtest error:', err);
     } finally {
       setRunning(false);
