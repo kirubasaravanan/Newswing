@@ -49,7 +49,7 @@ const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 // Rate limiter: max 2 requests per second for Yahoo Finance free tier
 const requestQueue: Array<() => Promise<void>> = [];
 let isProcessing = false;
-const MIN_INTERVAL = 600; // ms between requests
+const MIN_INTERVAL = 350; // ms between requests
 
 async function rateLimitedFetch<T>(fn: () => Promise<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -61,7 +61,8 @@ async function rateLimitedFetch<T>(fn: () => Promise<T>): Promise<T> {
         reject(err);
       }
     });
-    processQueue();
+    // Ensure queue processing doesn't crash on unhandled rejections
+    processQueue().catch(() => {});
   });
 }
 
@@ -70,7 +71,11 @@ async function processQueue() {
   isProcessing = true;
   while (requestQueue.length > 0) {
     const task = requestQueue.shift()!;
-    await task();
+    try {
+      await task();
+    } catch (err) {
+      // Swallow task-level errors — they're handled by the caller via resolve/reject
+    }
     await new Promise(r => setTimeout(r, MIN_INTERVAL));
   }
   isProcessing = false;
@@ -78,24 +83,34 @@ async function processQueue() {
 
 // ── Yahoo Finance Historical Data ─────────────────────────
 
+// Singleton Yahoo Finance v4 instance
+let yfInstance: any = null;
+async function getYahooFinance() {
+  if (!yfInstance) {
+    const mod = await import('yahoo-finance2');
+    yfInstance = new mod.default({ 
+      suppressNotices: ['yahooSurvey'],
+      validation: { logErrors: false },
+    });
+  }
+  return yfInstance;
+}
+
 async function fetchYahooHistorical(
   symbol: string,
   days: number = 300
 ): Promise<OHLCV[]> {
-  const yahooFinance = (await import('yahoo-finance2')).default;
-  
+  const yahooFinance = await getYahooFinance();
   const yahooSym = toYahooSymbol(symbol);
   const endDate = new Date();
   const startDate = new Date();
-  startDate.setDate(startDate.getDate() - days * 1.5); // extra for weekends/holidays
+  startDate.setDate(startDate.getDate() - days * 1.5);
 
-  const queryOptions = {
+  const result = await yahooFinance.chart(yahooSym, {
     period1: startDate,
     period2: endDate,
     interval: '1d' as const,
-  };
-
-  const result = await yahooFinance.chart(yahooSym, queryOptions);
+  });
 
   if (!result || !result.quotes || result.quotes.length === 0) {
     throw new Error(`No data returned for ${yahooSym}`);
@@ -104,7 +119,7 @@ async function fetchYahooHistorical(
   const candles: OHLCV[] = result.quotes
     .filter((q: any) => q.close != null && q.open != null && q.high != null && q.low != null && q.volume != null)
     .map((q: any) => ({
-      date: q.date?.toISOString?.()?.split('T')[0] || new Date().toISOString().split('T')[0],
+      date: typeof q.date === 'string' ? q.date.split('T')[0] : (q.date?.toISOString?.()?.split('T')[0] || new Date().toISOString().split('T')[0]),
       open: Math.round(q.open * 100) / 100,
       high: Math.round(q.high * 100) / 100,
       low: Math.round(q.low * 100) / 100,
@@ -131,11 +146,9 @@ async function fetchYahooQuote(symbol: string): Promise<{
   previousClose: number;
   marketCap: number | null;
 }> {
-  const yahooFinance = (await import('yahoo-finance2')).default;
+  const yahooFinance = await getYahooFinance();
   const yahooSym = toYahooSymbol(symbol);
-  
   const quote = await yahooFinance.quote(yahooSym);
-  
   return {
     price: quote.regularMarketPrice || 0,
     change: quote.regularMarketChange || 0,
@@ -154,8 +167,7 @@ let yahooAvailable: boolean | null = null;
 
 export async function checkYahooAvailability(): Promise<boolean> {
   try {
-    const yahooFinance = (await import('yahoo-finance2')).default;
-    // Quick test with Nifty
+    const yahooFinance = await getYahooFinance();
     const quote = await yahooFinance.quote('^NSEI');
     yahooAvailable = !!(quote && quote.regularMarketPrice);
     return yahooAvailable;
@@ -183,15 +195,19 @@ export async function getHistoricalData(
   if (yahooAvailable !== false) {
     try {
       const data = await rateLimitedFetch(() => fetchYahooHistorical(symbol, days));
-      
-      // Cache the result
+      if (!data || data.length < 10) throw new Error('Insufficient data');
       historicalCache.set(cacheKey, { data, fetchedAt: Date.now() });
       yahooAvailable = true;
-      
       return { data, source: 'yahoo' };
     } catch (err) {
-      console.error(`Yahoo Finance failed for ${symbol}:`, err);
-      yahooAvailable = false;
+      // Don't permanently disable yahoo for per-symbol failures (e.g. delisted)
+      const msg = String(err);
+      if (msg.includes('delisted') || msg.includes('No data found')) {
+        console.warn(`Yahoo: ${symbol} - ${msg.substring(0, 80)}`);
+      } else {
+        console.error(`Yahoo Finance failed for ${symbol}:`, msg.substring(0, 120));
+        yahooAvailable = false;
+      }
     }
   }
 

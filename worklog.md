@@ -55,4 +55,34 @@ Stage Summary:
 - Watchlist: 30 NSE stocks seeded, add/remove/search/sector-filter, reset to defaults
 - Trade Quality: 8 checks (5 critical, 3 warning), quality score, acknowledgment required
 - Live P&L: Auto-refresh, visual SL/TP progress bars, R-multiple tracking per position
-- Build passes with 0 errors, all 12 API routes registered
+- Build passes with 0 errors, all 12 API routes registered---
+Task ID: 7
+Agent: Main Agent
+Task: Real data integration + Universe scanner + Auto-trade engine
+
+Work Log:
+- Installed yahoo-finance2 v4.0.0 (requires `new YahooFinance()` constructor)
+- Created data-provider.ts with Yahoo Finance + mock fallback, rate limiting, caching
+- Created universe-scanner.ts with 150+ NSE F&O + mid-cap stocks and L1 pre-filter
+- Created 3 new API routes: /api/universe-scan, /api/auto-trade, /api/data-status
+- Updated 4 existing routes to use real data: screener, backtest, live-pnl, chart-data
+- Created TradingView chart widget component
+- Created UniverseScanTab component (two-stage pipeline UI)
+- Created AutoTradeTab component (wallet, rules, positions, activity log, TradingView)
+- Updated sidebar with 2 new tabs (Universe, Auto-Trade), updated store and page.tsx
+- Updated Prisma schema: added CapitalWallet, PositionLimit, AutoTradeLog, UniverseScan models
+- Added autoTraded/exitReason fields to PaperTrade model
+- Fixed yahoo-finance2 v4 API (singleton instance, suppressNotices, validation options)
+- Fixed rate limiter queue crash (added try/catch in processQueue, .catch() on processQueue())
+- Verified real data flow: Reliance ₹1327.2, Nifty ₹24334.3 from Yahoo Finance
+- Build passes with 0 errors, 14 API routes registered
+
+Stage Summary:
+- Real Yahoo Finance data confirmed working (NSE stocks + Nifty index)
+- Mock fallback gracefully handles delisted/bad symbols (e.g., TATAMOTORS)
+- Two-stage screening: L1 (6 lightweight checks) → L2 (full V-Swing 6-factor)
+- Auto-trade engine: scan universe → auto-enter → auto-exit (SL/TP/max holding/trail stop)
+- Position management: max ₹50K/stock, 3 buys/month, 25 day max hold, 8 max positions
+- Capital wallet: tracks deployed/available/realized P&L/unrealized P&L
+- TradingView widget embedded for interactive charting with real NSE data
+- Note: Server may need PM2/systemd for production stability (yahoo-finance2 connection cleanup)
