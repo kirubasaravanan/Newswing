@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { runBacktest, DEFAULT_WATCHLIST, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/trading/screening-engine';
-import { generateMockData, generateNiftyData } from '@/lib/trading/mock-data';
+import { runBacktest, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/trading/screening-engine';
+import { getHistoricalData } from '@/lib/trading/data-provider';
 import { db } from '@/lib/db';
 
 export async function POST(request: NextRequest) {
@@ -14,17 +14,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Symbol is required' }, { status: 400 });
     }
 
-    // Generate data
-    const niftyCandles = generateNiftyData(days + 50);
-    const candles = generateMockData(symbol, days + 50);
+    // Fetch real data
+    const [stockRes, niftyRes] = await Promise.all([
+      getHistoricalData(symbol, days + 50),
+      getHistoricalData('NIFTY50', days + 50),
+    ]);
+    const candles = stockRes.data;
+    const niftyCandles = niftyRes.data;
+    const dataSource = stockRes.source;
 
-    // Run backtest
     const result = runBacktest(symbol, candles, niftyCandles, config);
 
-    // Save to database
     const run = await db.backtestRun.create({
       data: {
-        name: `${symbol} Backtest - ${new Date().toLocaleDateString()}`,
+        name: `${symbol} Backtest - ${new Date().toLocaleDateString()} [${dataSource}]`,
         symbol,
         startDate: candles[candles.length - days]?.date ? new Date(candles[candles.length - days].date) : new Date(),
         endDate: new Date(candles[candles.length - 1].date),
@@ -45,15 +48,14 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Save individual trades
     for (const t of result.trades) {
       await db.backtestTrade.create({
         data: {
           run: { connect: { id: run.id } },
           symbol: t.symbol,
           entryDate: new Date(t.entryDate),
-          entryPrice: t.entryPrice,
           exitDate: new Date(t.exitDate),
+          entryPrice: t.entryPrice,
           exitPrice: t.exitPrice,
           qty: t.qty,
           pnl: t.pnl,
@@ -65,11 +67,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    return NextResponse.json({
-      success: true,
-      runId: run.id,
-      ...result,
-    });
+    return NextResponse.json({ success: true, runId: run.id, dataSource, ...result });
   } catch (error) {
     console.error('Backtest error:', error);
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
@@ -78,10 +76,7 @@ export async function POST(request: NextRequest) {
 
 export async function GET() {
   try {
-    const runs = await db.backtestRun.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 20,
-    });
+    const runs = await db.backtestRun.findMany({ orderBy: { createdAt: 'desc' }, take: 20 });
     return NextResponse.json({ success: true, runs });
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });

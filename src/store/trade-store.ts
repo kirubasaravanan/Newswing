@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type AppTab = 'screener' | 'journal' | 'backtest' | 'analytics' | 'sizing';
+export type AppTab = 'screener' | 'journal' | 'backtest' | 'analytics' | 'sizing' | 'universe' | 'autotrade';
 
 interface TradeStore {
   // Navigation

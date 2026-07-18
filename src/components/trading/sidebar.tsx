@@ -2,19 +2,16 @@
 
 import { useTradeStore, type AppTab } from '@/store/trade-store';
 import {
-  Radar,
-  BookOpen,
-  BarChart3,
-  LineChart,
-  Calculator,
-  Menu,
-  X,
+  Radar, BookOpen, BarChart3, LineChart, Calculator,
+  Menu, X, Globe, Bot,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
 
-const NAV_ITEMS: { id: AppTab; label: string; icon: React.ElementType }[] = [
+const NAV_ITEMS: { id: AppTab; label: string; icon: React.ElementType; badge?: boolean }[] = [
   { id: 'screener', label: 'Screener', icon: Radar },
+  { id: 'universe', label: 'Universe', icon: Globe },
+  { id: 'autotrade', label: 'Auto-Trade', icon: Bot },
   { id: 'journal', label: 'Journal', icon: BookOpen },
   { id: 'backtest', label: 'Backtest', icon: BarChart3 },
   { id: 'analytics', label: 'Analytics', icon: LineChart },
@@ -64,7 +61,6 @@ export function Sidebar() {
 
   return (
     <>
-      {/* Mobile hamburger */}
       <button
         onClick={() => setMobileOpen(!mobileOpen)}
         className="fixed top-4 left-4 z-50 flex h-9 w-9 items-center justify-center rounded-lg bg-secondary text-foreground lg:hidden"
@@ -72,7 +68,6 @@ export function Sidebar() {
         {mobileOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
       </button>
 
-      {/* Mobile overlay */}
       {mobileOpen && (
         <div
           className="fixed inset-0 z-30 bg-black/60 lg:hidden"
@@ -80,12 +75,10 @@ export function Sidebar() {
         />
       )}
 
-      {/* Sidebar */}
       <aside className={cn(
         'fixed left-0 top-0 z-40 flex h-screen w-16 flex-col items-center border-r border-border bg-sidebar py-4 lg:w-56 lg:items-stretch lg:px-3 lg:py-6 transition-transform lg:translate-x-0',
         mobileOpen ? 'translate-x-0' : '-translate-x-full'
       )}>
-        {/* Logo */}
         <div className="mb-8 flex items-center gap-2 px-2">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold text-sm lg:h-10 lg:w-10">
             VS
@@ -98,7 +91,6 @@ export function Sidebar() {
 
         {navContent}
 
-        {/* Status */}
         <div className="mt-auto px-2">
           <div className={cn(
             'flex items-center gap-2 rounded-lg px-3 py-2 text-xs',

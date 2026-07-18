@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import { Sidebar } from '@/components/trading/sidebar';
 import { ScreenerTab } from '@/components/trading/screener-tab';
+import { UniverseScanTab } from '@/components/trading/universe-scan-tab';
+import { AutoTradeTab } from '@/components/trading/auto-trade-tab';
 import { JournalTab } from '@/components/trading/journal-tab';
 import { BacktestTab } from '@/components/trading/backtest-tab';
 import { AnalyticsTab } from '@/components/trading/analytics-tab';
@@ -25,7 +27,6 @@ export default function Home() {
     <div className="min-h-screen bg-background">
       <Sidebar />
       
-      {/* Main Content */}
       <main className="pl-16 lg:pl-56">
         <div className="mx-auto max-w-6xl px-4 pt-16 pb-6 lg:px-8 lg:pt-8 lg:pb-8">
           {/* Top Bar */}
@@ -46,6 +47,8 @@ export default function Home() {
 
           {/* Tab Content */}
           {activeTab === 'screener' && <ScreenerTab onAddPaperTrade={handleAddPaperTrade} />}
+          {activeTab === 'universe' && <UniverseScanTab />}
+          {activeTab === 'autotrade' && <AutoTradeTab />}
           {activeTab === 'journal' && <JournalTab prefillTrade={prefillTrade} onPrefillConsumed={consumePrefill} />}
           {activeTab === 'backtest' && <BacktestTab />}
           {activeTab === 'analytics' && <AnalyticsTab />}
