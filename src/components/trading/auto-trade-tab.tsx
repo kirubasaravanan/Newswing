@@ -215,7 +215,7 @@ export function AutoTradeTab() {
           {dataProvider && (
             <Badge variant="outline" className="text-[10px] h-5 gap-1">
               {dataProvider.yahooAvailable ? <Wifi className="h-2.5 w-2.5 text-emerald-400" /> : <WifiOff className="h-2.5 w-2.5 text-amber-400" />}
-              {dataProvider.source === 'yahoo' ? 'Real Data' : 'Mock'}
+              {dataProvider.source === 'yahoo' ? 'Yahoo Finance' : 'Error'}
             </Badge>
           )}
         </div>

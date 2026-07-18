@@ -1,16 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { getAllProfiles } from '@/lib/trading/mock-data';
+import { DEFAULT_STOCKS } from '@/lib/trading/default-stocks';
 
 // GET all watchlist stocks
 export async function GET() {
   try {
     const watchlist = await db.watchlistStock.findMany({ orderBy: { symbol: 'asc' } });
     if (watchlist.length === 0) {
-      const profiles = getAllProfiles();
-      for (const p of profiles) {
+      // Seed with default NSE stocks (metadata only — prices come from Yahoo)
+      for (const s of DEFAULT_STOCKS) {
         await db.watchlistStock.create({
-          data: { symbol: p.symbol, name: p.name, sector: p.sector },
+          data: { symbol: s.symbol, name: s.name, sector: s.sector },
         });
       }
       const seeded = await db.watchlistStock.findMany({ orderBy: { symbol: 'asc' } });

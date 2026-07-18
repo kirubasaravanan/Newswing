@@ -6,8 +6,8 @@ import './globals.css';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'V-Swing Trading Desk v65.5',
-  description: 'NSE Swing Trading Scanner, Journal & Backtesting Platform',
+  title: 'Portfolio Manager — Private System',
+  description: 'Private portfolio management with real-time NSE data, analytics, and trade journal',
 };
 
 export default function RootLayout({

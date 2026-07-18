@@ -1,13 +1,12 @@
 /**
  * Data Provider Layer
- * Provides real market data via Yahoo Finance REST API (direct fetch)
- * with mock fallback.
+ * Provides REAL market data via Yahoo Finance REST API (direct fetch).
+ * NO mock/fallback — all data comes from Yahoo Finance.
  *
  * Data paths:
  *   - Historical OHLCV → Yahoo Finance chart API (up to 10 years daily)
- *   - Current/LTP price → Yahoo Finance quote API
+ *   - Current/LTP price → Yahoo Finance chart API metadata (v7 quote is dead)
  *   - Chart display → TradingView Widget (client-side embed)
- *   - Fallback → Mock data generator (if API fails)
  *
  * NOTE: We use direct fetch() to Yahoo Finance instead of the yahoo-finance2
  * npm package, which causes native crashes in the Next.js server context.
@@ -25,7 +24,6 @@ const SYMBOL_MAP: Record<string, string> = {
   // NSE symbols that differ from Yahoo Finance symbols
   'BAJAJAUTO': 'BAJAJ-AUTO.NS',
   'M&M': 'M&M.NS',
-  'MOTHERSON': 'MOTHERSONI.NS',
   'SRF': 'SRFLTD.NS',
   'LTI': 'LTIM.NS',
   'TATACONSUM': 'TATACONSUM.NS',
@@ -58,7 +56,7 @@ export function fromYahooSymbol(yahooSymbol: string): string {
 
 // ── Data Source Config ────────────────────────────────────
 
-export type DataSource = 'yahoo' | 'mock' | 'auto';
+export type DataSource = 'yahoo' | 'error';
 
 export interface DataProviderStatus {
   source: DataSource;
@@ -253,15 +251,21 @@ async function fetchYahooQuote(symbol: string): Promise<{
 
 // ── Main Provider Functions ───────────────────────────────
 
-let yahooAvailable: boolean | null = null;
+// Per-symbol failure tracking — avoids poisoning the entire session
+// when one symbol fails (delisted, wrong ticker, etc.)
+const symbolFailures = new Map<string, number>(); // symbol → consecutive failure count
+const MAX_SYMBOL_FAILURES = 2;
+
+// Global Yahoo health (checked periodically, not per-symbol)
+let yahooHealthy: boolean | null = null;
 
 export async function checkYahooAvailability(): Promise<boolean> {
   try {
     const quote = await fetchYahooQuote('NIFTY50');
-    yahooAvailable = !!(quote && quote.price > 0);
-    return yahooAvailable;
+    yahooHealthy = !!(quote && quote.price > 0);
+    return yahooHealthy;
   } catch {
-    yahooAvailable = false;
+    yahooHealthy = false;
     return false;
   }
 }
@@ -280,29 +284,31 @@ export async function getHistoricalData(
     }
   }
 
-  // Try Yahoo Finance
-  if (yahooAvailable !== false) {
-    try {
-      const data = await rateLimitedFetch(() => fetchYahooHistorical(symbol, days));
-      if (!data || data.length < 10) throw new Error('Insufficient data');
-      historicalCache.set(cacheKey, { data, fetchedAt: Date.now() });
-      yahooAvailable = true;
-      return { data, source: 'yahoo' };
-    } catch (err) {
-      const msg = String(err);
-      if (msg.includes('delisted') || msg.includes('No data found') || msg.includes('Not Found')) {
-        console.warn(`Yahoo: ${symbol} - ${msg.substring(0, 80)}`);
-      } else {
-        console.error(`Yahoo Finance failed for ${symbol}:`, msg.substring(0, 120));
-        yahooAvailable = false;
-      }
-    }
+  // Skip symbols that have failed repeatedly (likely delisted/wrong ticker)
+  const failures = symbolFailures.get(symbol) || 0;
+  if (failures >= MAX_SYMBOL_FAILURES) {
+    throw new Error(`Symbol ${symbol} failed ${failures} times — skipped. Use forceRefresh or check the ticker.`);
   }
 
-  // Fallback to mock
-  const { generateMockData } = await import('./mock-data');
-  const mockData = generateMockData(symbol, days);
-  return { data: mockData, source: 'mock' };
+  try {
+    const data = await rateLimitedFetch(() => fetchYahooHistorical(symbol, days));
+    if (!data || data.length < 10) throw new Error('Insufficient data');
+    historicalCache.set(cacheKey, { data, fetchedAt: Date.now() });
+    symbolFailures.delete(symbol); // Reset on success
+    yahooHealthy = true;
+    return { data, source: 'yahoo' };
+  } catch (err) {
+    const msg = String(err);
+    const currentFails = (symbolFailures.get(symbol) || 0) + 1;
+    symbolFailures.set(symbol, currentFails);
+    
+    // Only set global unhealthy for non-symbol-specific errors
+    if (!msg.includes('delisted') && !msg.includes('Not Found') && !msg.includes('HTTP 404') && !msg.includes('skipped')) {
+      console.error(`Yahoo Finance failed for ${symbol}:`, msg.substring(0, 120));
+    }
+    
+    throw new Error(`Failed to fetch ${symbol}: ${msg.substring(0, 100)}`);
+  }
 }
 
 export async function getCurrentPrice(symbol: string): Promise<{
@@ -310,38 +316,32 @@ export async function getCurrentPrice(symbol: string): Promise<{
   source: DataSource;
   quote?: Awaited<ReturnType<typeof fetchYahooQuote>>;
 }> {
-  if (yahooAvailable !== false) {
-    try {
-      const quote = await rateLimitedFetch(() => fetchYahooQuote(symbol));
-      if (quote.price > 0) {
-        yahooAvailable = true;
-        return { price: quote.price, source: 'yahoo', quote };
-      }
-    } catch (err) {
-      console.error(`Yahoo quote failed for ${symbol}:`, err);
-      yahooAvailable = false;
+  try {
+    const quote = await rateLimitedFetch(() => fetchYahooQuote(symbol));
+    if (quote.price > 0) {
+      yahooHealthy = true;
+      return { price: quote.price, source: 'yahoo', quote };
     }
+    throw new Error(`Zero price for ${symbol}`);
+  } catch (err) {
+    console.error(`Yahoo quote failed for ${symbol}:`, err);
+    throw err;
   }
-
-  // Fallback: generate mock "current" data
-  const { generateMockData } = await import('./mock-data');
-  const data = generateMockData(symbol, 10, new Date());
-  const mockPrice = data.length > 0 ? data[data.length - 1].close : 0;
-  return { price: mockPrice, source: 'mock' };
 }
 
 export function getDataProviderStatus(): DataProviderStatus {
   return {
-    source: yahooAvailable ? 'yahoo' : 'mock',
+    source: yahooHealthy ? 'yahoo' : 'error',
     lastChecked: new Date().toISOString(),
-    yahooAvailable: yahooAvailable ?? false,
+    yahooAvailable: yahooHealthy ?? false,
     symbolsCached: historicalCache.size,
   };
 }
 
 export function clearCache(): void {
   historicalCache.clear();
-  yahooAvailable = null;
+  yahooHealthy = null;
+  symbolFailures.clear();
 }
 
 export { fromYahooSymbol };

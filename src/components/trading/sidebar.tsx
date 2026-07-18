@@ -2,25 +2,46 @@
 
 import { useTradeStore, type AppTab } from '@/store/trade-store';
 import {
-  Radar, BookOpen, BarChart3, LineChart, Calculator,
-  Menu, X, Globe, Bot,
+  LayoutDashboard, Briefcase, Radar, BookOpen, BarChart3, LineChart, Settings,
+  Menu, X, Wifi, WifiOff,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
-const NAV_ITEMS: { id: AppTab; label: string; icon: React.ElementType; badge?: boolean }[] = [
-  { id: 'screener', label: 'Screener', icon: Radar },
-  { id: 'universe', label: 'Universe', icon: Globe },
-  { id: 'autotrade', label: 'Auto-Trade', icon: Bot },
+const NAV_ITEMS: { id: AppTab; label: string; icon: React.ElementType }[] = [
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'holdings', label: 'Holdings', icon: Briefcase },
+  { id: 'scanner', label: 'Scanner', icon: Radar },
   { id: 'journal', label: 'Journal', icon: BookOpen },
-  { id: 'backtest', label: 'Backtest', icon: BarChart3 },
   { id: 'analytics', label: 'Analytics', icon: LineChart },
-  { id: 'sizing', label: 'Sizing', icon: Calculator },
+  { id: 'backtest', label: 'Backtest', icon: BarChart3 },
+  { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
 export function Sidebar() {
-  const { activeTab, setActiveTab, screeningResults, isScreening } = useTradeStore();
+  const { activeTab, setActiveTab } = useTradeStore();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [yahooOk, setYahooOk] = useState<boolean | null>(null);
+  const [openCount, setOpenCount] = useState(0);
+
+  useEffect(() => {
+    // Check Yahoo status + open position count
+    const fetchData = async () => {
+      try {
+        const [statusRes, tradesRes] = await Promise.all([
+          fetch('/api/data-status'),
+          fetch('/api/trades'),
+        ]);
+        const status = await statusRes.json();
+        const trades = await tradesRes.json();
+        if (status.success) setYahooOk(status.yahoo?.available ?? null);
+        if (trades.success) setOpenCount((trades.trades || []).filter((t: any) => t.status === 'OPEN').length);
+      } catch { /* ignore */ }
+    };
+    fetchData();
+    const iv = setInterval(fetchData, 60000);
+    return () => clearInterval(iv);
+  }, []);
 
   const navContent = (
     <nav className="flex flex-1 flex-col gap-1">
@@ -30,27 +51,19 @@ export function Sidebar() {
         return (
           <button
             key={item.id}
-            onClick={() => {
-              setActiveTab(item.id);
-              setMobileOpen(false);
-            }}
+            onClick={() => { setActiveTab(item.id); setMobileOpen(false); }}
             className={cn(
               'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all',
               isActive
-                ? 'bg-primary/15 text-primary'
+                ? 'bg-indigo-500/15 text-indigo-400'
                 : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
             )}
           >
             <Icon className="h-4 w-4 shrink-0" />
             <span className="hidden lg:inline">{item.label}</span>
-            {item.id === 'screener' && screeningResults.length > 0 && (
-              <span className={cn(
-                'ml-auto hidden h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-bold lg:flex',
-                screeningResults.some(r => r.score === 6)
-                  ? 'bg-emerald-500/20 text-emerald-400'
-                  : 'bg-amber-500/20 text-amber-400'
-              )}>
-                {screeningResults.length}
+            {item.id === 'holdings' && openCount > 0 && (
+              <span className="ml-auto hidden h-5 min-w-5 items-center justify-center rounded-full bg-indigo-500/20 px-1.5 text-[10px] font-bold text-indigo-400 lg:flex">
+                {openCount}
               </span>
             )}
           </button>
@@ -69,10 +82,7 @@ export function Sidebar() {
       </button>
 
       {mobileOpen && (
-        <div
-          className="fixed inset-0 z-30 bg-black/60 lg:hidden"
-          onClick={() => setMobileOpen(false)}
-        />
+        <div className="fixed inset-0 z-30 bg-black/60 lg:hidden" onClick={() => setMobileOpen(false)} />
       )}
 
       <aside className={cn(
@@ -80,12 +90,12 @@ export function Sidebar() {
         mobileOpen ? 'translate-x-0' : '-translate-x-full'
       )}>
         <div className="mb-8 flex items-center gap-2 px-2">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold text-sm lg:h-10 lg:w-10">
-            VS
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-600 text-white font-bold text-sm lg:h-10 lg:w-10">
+            PM
           </div>
           <div className="hidden lg:block">
-            <div className="text-sm font-bold tracking-tight">V-Swing</div>
-            <div className="text-[10px] text-muted-foreground">v65.5 Desk</div>
+            <div className="text-sm font-bold tracking-tight">Portfolio Manager</div>
+            <div className="text-[10px] text-muted-foreground">Private System</div>
           </div>
         </div>
 
@@ -94,15 +104,10 @@ export function Sidebar() {
         <div className="mt-auto px-2">
           <div className={cn(
             'flex items-center gap-2 rounded-lg px-3 py-2 text-xs',
-            isScreening ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'
+            yahooOk === true ? 'text-emerald-400' : yahooOk === false ? 'text-red-400' : 'text-muted-foreground'
           )}>
-            <div className={cn(
-              'h-2 w-2 rounded-full',
-              isScreening ? 'animate-pulse bg-amber-400' : 'bg-emerald-400'
-            )} />
-            <span className="hidden lg:inline">
-              {isScreening ? 'Scanning...' : 'System Ready'}
-            </span>
+            {yahooOk === true ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+            <span className="hidden lg:inline">{yahooOk === true ? 'Yahoo Finance' : yahooOk === false ? 'Offline' : 'Checking...'}</span>
           </div>
         </div>
       </aside>
