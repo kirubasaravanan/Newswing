@@ -55,23 +55,21 @@ export async function GET(request: Request) {
       niftyClose: c.close,
     }));
 
-    // Beta calculation
-    let covXY = 0, varX = 0, meanX = 0, meanY = 0;
+    let beta: number | null = null;
     const n = Math.min(niftyReturns.length - 1, portfolioCumulative.length - 2);
     if (n > 10) {
       const xSlice = niftyReturns.slice(1, n + 1);
       const ySlice = portfolioCumulative.slice(2, n + 2).map(v => v - (portfolioCumulative[1] || 0));
+      let covXY = 0, varX = 0;
       const mx = xSlice.reduce((a, b) => a + b, 0) / xSlice.length;
       const my = ySlice.reduce((a, b) => a + b, 0) / ySlice.length;
       for (let i = 0; i < xSlice.length; i++) {
         covXY += (xSlice[i] - mx) * (ySlice[i] - my);
         varX += (xSlice[i] - mx) ** 2;
       }
-      const beta = varX > 0 ? Math.round((covXY / varX) * 100) / 100 : 1;
-      varX = 0;
+      beta = varX > 0 ? Math.round((covXY / varX) * 100) / 100 : null;
     }
 
-    const beta = varX > 0 ? Math.round((covXY / varX) * 100) / 100 : null;
     const niftyTotalReturn = niftyCumulative[niftyCumulative.length - 1] || 0;
     const portfolioTotalReturn = portfolioCumulative[portfolioCumulative.length - 1] || 0;
 

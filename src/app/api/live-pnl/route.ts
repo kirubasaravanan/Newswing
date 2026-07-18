@@ -25,7 +25,7 @@ export async function GET() {
       if (!currentPrice) {
         // No live price available — return position without fake P&L
         return {
-          id: trade.id, symbol: trade.symbol, direction, entryPrice: trade.entryPrice,
+          id: trade.id, symbol: trade.symbol, direction: trade.direction || 'LONG', entryPrice: trade.entryPrice,
           currentPrice: 0, qty: trade.qty, stopLoss: trade.stopLoss, targetPrice: trade.targetPrice,
           pnl: 0, pnlPercent: 0, priceUnavailable: true,
           maxLoss: Math.abs(trade.entryPrice - trade.stopLoss) * trade.qty,

@@ -7,7 +7,8 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   TrendingUp, TrendingDown, Briefcase, Wallet, PieChart as PieIcon,
-  RefreshCw, ArrowRight, Activity, Bell,
+  RefreshCw, ArrowRight, Activity, Bell, Shield, AlertTriangle,
+  Clock, Zap, Target, Flame, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LineChart, Line, Legend,
@@ -33,6 +34,10 @@ interface WatchlistQuote {
   price: number; change: number; changePercent: number;
 }
 
+interface SchedulerInfo {
+  enabled: boolean; todayEntries: number; todayExits: number; todayPnl: number; scanCount: number;
+}
+
 export function DashboardTab() {
   const { setActiveTab } = useTradeStore();
   const [data, setData] = useState<SummaryData | null>(null);
@@ -41,23 +46,53 @@ export function DashboardTab() {
   const [logs, setLogs] = useState<any[]>([]);
   const [benchmark, setBenchmark] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [autoStatus, setAutoStatus] = useState<any>(null);
+  const [showDailyReturns, setShowDailyReturns] = useState(false);
+  const [riskMetrics, setRiskMetrics] = useState<any>(null);
+  const [periodReturns, setPeriodReturns] = useState<any>(null);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [sumRes, mdRes, atRes, alRes, bmRes] = await Promise.all([
+      const [sumRes, mdRes, atRes, alRes, bmRes, rmRes] = await Promise.all([
         fetch('/api/portfolio/summary'),
         fetch('/api/market-data'),
         fetch('/api/auto-trade'),
         fetch('/api/portfolio/alerts'),
         fetch('/api/portfolio/benchmark?days=60'),
+        fetch('/api/portfolio/risk-metrics'),
       ]);
-      const [sum, md, at, al, bm] = await Promise.all([sumRes.json(), mdRes.json(), atRes.json(), alRes.json(), bmRes.json()]);
+      const [sum, md, at, al, bm, rm] = await Promise.all([sumRes.json(), mdRes.json(), atRes.json(), alRes.json(), bmRes.json(), rmRes.json()]);
       if (sum.success) setData(sum);
       if (md.success) setQuotes(md.quotes || []);
-      if (at.success) setLogs(at.recentLogs || []);
+      if (at.success) {
+        setLogs(at.recentLogs || []);
+        setAutoStatus(at.scheduler || null);
+      }
       if (al.success) setAlerts((al.alerts || []).filter((a: any) => a.active && !a.triggered));
       if (bm.success) setBenchmark(bm.benchmark);
+      if (rm.success) setRiskMetrics(rm);
+
+      // Calculate period returns from closed trades
+      if (sum.success) {
+        const tradesRes = await fetch('/api/trades');
+        const trades = await tradesRes.json();
+        if (trades.success) {
+          const closed = (trades.trades || []).filter((t: any) => t.status === 'CLOSED' && t.exitDate && t.pnl != null);
+          const now = new Date();
+          const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+          const weekAgo = today - 7 * 86400000;
+          const monthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()).getTime();
+          let dailyPnl = 0, weeklyPnl = 0, monthlyPnl = 0;
+          for (const t of closed) {
+            const exitTime = new Date(t.exitDate).getTime();
+            if (exitTime >= today) dailyPnl += t.pnl;
+            if (exitTime >= weekAgo) weeklyPnl += t.pnl;
+            if (exitTime >= monthAgo) monthlyPnl += t.pnl;
+          }
+          setPeriodReturns({ dailyPnl, weeklyPnl, monthlyPnl });
+        }
+      }
     } catch (err) {
       console.error('Dashboard fetch error:', err);
     } finally {
@@ -66,6 +101,12 @@ export function DashboardTab() {
   }, []);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Auto-refresh every 30 seconds for PMS live feel
+  useEffect(() => {
+    const iv = setInterval(fetchAll, 30000);
+    return () => clearInterval(iv);
+  }, [fetchAll]);
 
   if (loading) {
     return (
@@ -81,11 +122,41 @@ export function DashboardTab() {
   const s = data?.summary;
   const positions = data?.positions || [];
   const sectors = data?.sectorAllocation || [];
-  const portfolioValue = s ? (s.wallet?.totalCapital || 200000) + s.totalPnl : 200000;
+  const wallet = s?.wallet;
+  const portfolioValue = s ? (wallet?.totalCapital || 200000) : 200000;
+  const totalPnl = s?.totalPnl || 0;
+  const pr = periodReturns || { dailyPnl: 0, weeklyPnl: 0, monthlyPnl: 0 };
+
+  // Portfolio heat (utilization)
+  const utilization = wallet ? ((wallet.deployed / wallet.totalCapital) * 100) : 0;
+  const heatColor = utilization > 80 ? 'text-red-400' : utilization > 60 ? 'text-amber-400' : 'text-emerald-400';
+  const heatBg = utilization > 80 ? 'bg-red-500/10 border-red-500/20' : utilization > 60 ? 'bg-amber-500/10 border-amber-500/20' : 'bg-emerald-500/10 border-emerald-500/20';
+
+  // Max drawdown from risk metrics
+  const maxDD = riskMetrics?.maxDrawdown || 0;
+
+  // XIRR approximation (simplified)
+  const xirr = portfolioValue > 0 && wallet ? (((portfolioValue - wallet.totalCapital + wallet.realizedPnl) / wallet.totalCapital) * 100) / Math.max(1, (s?.totalTrades || 0) / 12) : 0;
 
   return (
-    <div className="space-y-5">
-      {/* Summary KPI Cards */}
+    <div className="space-y-4">
+      {/* Market Status Banner */}
+      {autoStatus?.marketHours === false && (
+        <Card className="border-amber-500/30 bg-amber-500/5">
+          <CardContent className="p-3 flex items-center gap-3">
+            <Clock className="h-4 w-4 text-amber-400 shrink-0" />
+            <div className="flex-1">
+              <span className="text-xs font-medium text-amber-400">Market Closed</span>
+              <span className="text-xs text-muted-foreground ml-2">Automated scanning will resume during market hours (9:15 AM - 3:30 PM IST)</span>
+            </div>
+            {autoStatus?.timeToClose != null && autoStatus.marketHours && (
+              <Badge variant="outline" className="text-[10px] h-5">{autoStatus.timeToClose}m to close</Badge>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* PMS KPI Cards — Row 1: Core Portfolio Metrics */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Card className="border-border">
           <CardContent className="p-4">
@@ -94,11 +165,9 @@ export function DashboardTab() {
               <span className="text-[10px] uppercase tracking-wider">Portfolio Value</span>
             </div>
             <div className="text-2xl font-bold font-mono">₹{Math.round(portfolioValue).toLocaleString()}</div>
-            {s && s.totalPositions > 0 && (
-              <div className={cn('text-xs mt-1', s.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                Unreal: {s.unrealizedPnl >= 0 ? '+' : ''}₹{Math.round(s.unrealizedPnl).toLocaleString()}
-              </div>
-            )}
+            <div className="text-[10px] text-muted-foreground mt-1">
+              Capital: ₹{(wallet?.totalCapital || 200000).toLocaleString()}
+            </div>
           </CardContent>
         </Card>
 
@@ -108,28 +177,11 @@ export function DashboardTab() {
               <TrendingUp className="h-3.5 w-3.5" />
               <span className="text-[10px] uppercase tracking-wider">Total P&L</span>
             </div>
-            <div className={cn('text-2xl font-bold font-mono', s && s.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-              {s ? `${s.totalPnl >= 0 ? '+' : ''}₹${Math.round(s.totalPnl).toLocaleString()}` : '₹0'}
+            <div className={cn('text-2xl font-bold font-mono', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+              {totalPnl >= 0 ? '+' : ''}₹{Math.round(totalPnl).toLocaleString()}
             </div>
-            {s && (
-              <div className={cn('text-xs mt-1', s.returnPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                {s.returnPct >= 0 ? '+' : ''}{s.returnPct.toFixed(2)}% return
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="border-border">
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 text-muted-foreground mb-1">
-              <Briefcase className="h-3.5 w-3.5" />
-              <span className="text-[10px] uppercase tracking-wider">Invested</span>
-            </div>
-            <div className="text-2xl font-bold font-mono">
-              ₹{s ? Math.round(s.totalInvested).toLocaleString() : '0'}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {s?.totalPositions || 0} open position{s && s.totalPositions !== 1 ? 's' : ''}
+            <div className={cn('text-xs mt-1', s?.returnPct >= 0 ? 'text-emerald-400/70' : 'text-red-400/70')}>
+              {s ? `${s.returnPct >= 0 ? '+' : ''}${s.returnPct.toFixed(2)}% overall` : ''}
             </div>
           </CardContent>
         </Card>
@@ -137,14 +189,86 @@ export function DashboardTab() {
         <Card className="border-border">
           <CardContent className="p-4">
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
-              <Activity className="h-3.5 w-3.5" />
+              <Target className="h-3.5 w-3.5" />
               <span className="text-[10px] uppercase tracking-wider">Win Rate</span>
             </div>
             <div className="text-2xl font-bold font-mono text-indigo-400">
               {s ? `${s.winRate.toFixed(1)}%` : '--'}
             </div>
-            <div className="text-xs text-muted-foreground mt-1">
+            <div className="text-[10px] text-muted-foreground mt-1">
               {s?.totalTrades || 0} closed trades
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 text-muted-foreground mb-1">
+              <Flame className="h-3.5 w-3.5" />
+              <span className="text-[10px] uppercase tracking-wider">Max Drawdown</span>
+            </div>
+            <div className="text-2xl font-bold font-mono text-red-400">
+              {maxDD > 0 ? `-${maxDD.toFixed(2)}%` : '--'}
+            </div>
+            <div className="text-[10px] text-muted-foreground mt-1">
+              {riskMetrics?.sharpe ? `Sharpe: ${riskMetrics.sharpe.toFixed(2)}` : 'Need more trades'}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* PMS KPI Cards — Row 2: Period Returns + Utilization */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        <Card className={cn('border', heatBg)}>
+          <CardContent className="p-3">
+            <div className="text-[10px] text-muted-foreground uppercase">Capital Deployed</div>
+            <div className={cn('text-lg font-bold font-mono mt-0.5', heatColor)}>
+              {utilization.toFixed(1)}%
+            </div>
+            <div className="text-[10px] text-muted-foreground">
+              ₹{(wallet?.deployed || 0).toLocaleString()} of ₹{(wallet?.totalCapital || 0).toLocaleString()}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border">
+          <CardContent className="p-3">
+            <div className="text-[10px] text-muted-foreground uppercase">Today</div>
+            <div className={cn('text-lg font-bold font-mono mt-0.5', pr.dailyPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+              {pr.dailyPnl >= 0 ? '+' : ''}₹{Math.round(pr.dailyPnl).toLocaleString()}
+            </div>
+            <div className="text-[10px] text-muted-foreground">
+              {autoStatus ? `${autoStatus.todayEntries} entries, ${autoStatus.todayExits} exits` : ''}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border">
+          <CardContent className="p-3">
+            <div className="text-[10px] text-muted-foreground uppercase">This Week</div>
+            <div className={cn('text-lg font-bold font-mono mt-0.5', pr.weeklyPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+              {pr.weeklyPnl >= 0 ? '+' : ''}₹{Math.round(pr.weeklyPnl).toLocaleString()}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border">
+          <CardContent className="p-3">
+            <div className="text-[10px] text-muted-foreground uppercase">This Month</div>
+            <div className={cn('text-lg font-bold font-mono mt-0.5', pr.monthlyPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+              {pr.monthlyPnl >= 0 ? '+' : ''}₹{Math.round(pr.monthlyPnl).toLocaleString()}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border">
+          <CardContent className="p-3">
+            <div className="text-[10px] text-muted-foreground uppercase">Realized P&L</div>
+            <div className={cn('text-lg font-bold font-mono mt-0.5', (s?.realizedPnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+              {(s?.realizedPnl || 0) >= 0 ? '+' : ''}₹{Math.round(s?.realizedPnl || 0).toLocaleString()}
+            </div>
+            <div className="text-[10px] text-muted-foreground">
+              Unreal: {s ? `${s.unrealizedPnl >= 0 ? '+' : ''}₹${Math.round(s.unrealizedPnl).toLocaleString()}` : ''}
             </div>
           </CardContent>
         </Card>
@@ -181,8 +305,8 @@ export function DashboardTab() {
                   <YAxis tick={{ fontSize: 9, fill: '#71717a' }} />
                   <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 10 }} />
                   <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />
-                  <Line type="monotone" dataKey="portfolio" stroke="#6366f1" strokeWidth={2} name="Portfolio (₹)" dot={false} />
-                  <Line type="monotone" dataKey="nifty" stroke="#10b981" strokeWidth={1.5} name="Nifty 50 (%)" dot={false} strokeDasharray="4 2" />
+                  <Line type="monotone" dataKey="portfolio" stroke="#6366f1" strokeWidth={2} name="Portfolio" dot={false} />
+                  <Line type="monotone" dataKey="nifty" stroke="#10b981" strokeWidth={1.5} name="Nifty 50" dot={false} strokeDasharray="4 2" />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -194,50 +318,82 @@ export function DashboardTab() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
         {/* Left: Positions + Watchlist */}
         <div className="lg:col-span-3 space-y-4">
-          {/* Open Positions Quick View */}
+          {/* Open Positions with Health Indicators */}
           <Card className="border-border">
             <CardContent className="p-4">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold flex items-center gap-2">
-                  <TrendingUp className="h-4 w-4 text-primary" />
+                  <Briefcase className="h-4 w-4 text-primary" />
                   Open Positions ({positions.length})
                 </h3>
-                {positions.length > 0 && (
-                  <Button variant="ghost" size="sm" onClick={() => setActiveTab('holdings')} className="h-7 text-xs gap-1">
-                    View All <ArrowRight className="h-3 w-3" />
+                <div className="flex items-center gap-2">
+                  {positions.length > 0 && (
+                    <Button variant="ghost" size="sm" onClick={() => setActiveTab('holdings')} className="h-7 text-xs gap-1">
+                      View All <ArrowRight className="h-3 w-3" />
+                    </Button>
+                  )}
+                  <Button variant="ghost" size="sm" onClick={fetchAll} className="h-7 text-xs gap-1">
+                    <RefreshCw className="h-3 w-3" />
                   </Button>
-                )}
+                </div>
               </div>
               {positions.length === 0 ? (
-                <p className="text-xs text-muted-foreground text-center py-6">
-                  No open positions. Go to Scanner to find opportunities.
-                </p>
+                <div className="text-center py-8">
+                  <p className="text-xs text-muted-foreground">No open positions.</p>
+                  <Button variant="outline" size="sm" onClick={() => setActiveTab('auto-trade')} className="mt-3 h-8 text-xs gap-1.5">
+                    <Zap className="h-3 w-3" /> Run Auto-Trade Scan
+                  </Button>
+                </div>
               ) : (
-                <ScrollArea className="max-h-[280px]">
+                <ScrollArea className="max-h-[300px]">
                   <div className="space-y-2 pr-2">
-                    {positions.slice(0, 8).map(pos => (
-                      <div key={pos.id} className="flex items-center justify-between rounded-lg bg-secondary/50 px-3 py-2.5">
-                        <div className="flex items-center gap-2.5">
-                          <div>
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-semibold text-sm">{pos.symbol}</span>
-                              {pos.autoTraded && <Badge variant="outline" className="text-[9px] h-4 px-1">AUTO</Badge>}
+                    {positions.slice(0, 10).map(pos => {
+                      const risk = pos.entryPrice - pos.stopLoss;
+                      const rMult = risk > 0 && pos.currentPrice > 0 ? (pos.currentPrice - pos.entryPrice) / risk : 0;
+                      const slDist = risk > 0 ? ((pos.currentPrice - pos.stopLoss) / risk) : 99;
+                      const isNearSL = slDist < 0.3;
+                      const days = pos.holdingDays || Math.round((Date.now() - new Date(pos.entryDate).getTime()) / 86400000);
+                      return (
+                        <div key={pos.id} className={cn(
+                          'flex items-center justify-between rounded-lg px-3 py-2.5 transition',
+                          isNearSL ? 'bg-red-500/10 border border-red-500/20' : 'bg-secondary/50'
+                        )}>
+                          <div className="flex items-center gap-2.5">
+                            <div className={cn(
+                              'h-1 w-1 rounded-full shrink-0',
+                              isNearSL ? 'bg-red-400' : rMult >= 1 ? 'bg-emerald-400' : 'bg-muted-foreground'
+                            )} />
+                            <div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-semibold text-sm">{pos.symbol}</span>
+                                {pos.autoTraded && <Badge variant="outline" className="text-[9px] h-4 px-1">AUTO</Badge>}
+                                {isNearSL && <AlertTriangle className="h-3 w-3 text-red-400" />}
+                              </div>
+                              <div className="text-[10px] text-muted-foreground">
+                                {pos.qty} @ ₹{pos.entryPrice} → ₹{pos.currentPrice > 0 ? pos.currentPrice : '...'}
+                                <span className="ml-2">SL: ₹{pos.stopLoss} TP: ₹{pos.targetPrice}</span>
+                                <span className="ml-2 text-muted-foreground/60">{days}d</span>
+                              </div>
                             </div>
-                            <div className="text-[10px] text-muted-foreground">
-                              {pos.qty} @ ₹{pos.entryPrice} → ₹{pos.currentPrice > 0 ? pos.currentPrice : '...'}
+                          </div>
+                          <div className="text-right">
+                            <div className={cn('text-sm font-bold font-mono', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                              {pos.pnl >= 0 ? '+' : ''}₹{Math.round(pos.pnl).toLocaleString()}
+                            </div>
+                            <div className="flex items-center gap-1.5 justify-end">
+                              <span className={cn('text-[10px]', pos.pnlPercent >= 0 ? 'text-emerald-400/70' : 'text-red-400/70')}>
+                                {pos.pnlPercent >= 0 ? '+' : ''}{pos.pnlPercent.toFixed(2)}%
+                              </span>
+                              {rMult !== 0 && (
+                                <Badge variant="outline" className={cn('text-[9px] h-4 px-1', rMult >= 1 ? 'text-emerald-400' : rMult < 0 ? 'text-red-400' : 'text-muted-foreground')}>
+                                  {rMult.toFixed(1)}R
+                                </Badge>
+                              )}
                             </div>
                           </div>
                         </div>
-                        <div className="text-right">
-                          <div className={cn('text-sm font-bold font-mono', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                            {pos.pnl >= 0 ? '+' : ''}₹{Math.round(pos.pnl).toLocaleString()}
-                          </div>
-                          <div className={cn('text-[10px]', pos.pnlPercent >= 0 ? 'text-emerald-400/70' : 'text-red-400/70')}>
-                            {pos.pnlPercent >= 0 ? '+' : ''}{pos.pnlPercent.toFixed(2)}%
-                          </div>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </ScrollArea>
               )}
@@ -254,7 +410,7 @@ export function DashboardTab() {
               {quotes.length === 0 ? (
                 <p className="text-xs text-muted-foreground text-center py-4">Loading market data...</p>
               ) : (
-                <ScrollArea className="max-h-[260px]">
+                <ScrollArea className="max-h-[240px]">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-border/50 text-muted-foreground">
@@ -285,7 +441,7 @@ export function DashboardTab() {
           </Card>
         </div>
 
-        {/* Right: Allocation + Activity */}
+        {/* Right: Allocation + Activity + Alerts */}
         <div className="lg:col-span-2 space-y-4">
           {/* Sector Allocation Pie */}
           <Card className="border-border">
@@ -324,6 +480,40 @@ export function DashboardTab() {
             </CardContent>
           </Card>
 
+          {/* Auto-Trade Status Mini Card */}
+          <Card className={cn('border', autoStatus?.enabled ? 'border-emerald-500/30' : 'border-border')}>
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-primary" />
+                  Engine Status
+                </h3>
+                <Badge variant="outline" className={cn('text-[10px] h-5 gap-1', autoStatus?.enabled ? 'text-emerald-400 border-emerald-500/30' : 'text-muted-foreground')}>
+                  <span className={cn('h-1.5 w-1.5 rounded-full', autoStatus?.enabled ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+                  {autoStatus?.enabled ? 'Armed' : 'Manual'}
+                </Badge>
+              </div>
+              {autoStatus && (
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded bg-secondary/50 p-2">
+                    <div className="text-[10px] text-muted-foreground">Scans</div>
+                    <div className="text-sm font-bold font-mono">{autoStatus.scanCount}</div>
+                  </div>
+                  <div className="rounded bg-secondary/50 p-2">
+                    <div className="text-[10px] text-muted-foreground">Today Entries</div>
+                    <div className="text-sm font-bold font-mono text-emerald-400">{autoStatus.todayEntries}</div>
+                  </div>
+                  <div className="rounded bg-secondary/50 p-2">
+                    <div className="text-[10px] text-muted-foreground">Today P&L</div>
+                    <div className={cn('text-sm font-bold font-mono', autoStatus.todayPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      {autoStatus.todayPnl >= 0 ? '+' : ''}₹{Math.round(autoStatus.todayPnl).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Recent Activity */}
           <Card className="border-border">
             <CardContent className="p-4">
@@ -334,16 +524,17 @@ export function DashboardTab() {
               {logs.length === 0 ? (
                 <p className="text-xs text-muted-foreground text-center py-6">No recent activity.</p>
               ) : (
-                <ScrollArea className="max-h-[220px]">
+                <ScrollArea className="max-h-[200px]">
                   <div className="space-y-1.5 pr-2">
-                    {logs.slice(0, 15).map(log => {
+                    {logs.slice(0, 12).map(log => {
                       const isEntry = log.action.includes('ENTRY');
                       const isExit = log.action.includes('EXIT');
+                      const isPartial = log.action === 'PARTIAL_BOOK';
                       return (
                         <div key={log.id} className="flex items-center gap-2 text-xs py-1.5 border-b border-border/30 last:border-0">
                           <div className={cn(
                             'h-1.5 w-1.5 rounded-full shrink-0',
-                            isEntry ? 'bg-emerald-400' : isExit ? 'bg-red-400' : 'bg-muted-foreground'
+                            isEntry ? 'bg-emerald-400' : isPartial ? 'bg-amber-400' : isExit ? 'bg-red-400' : 'bg-muted-foreground'
                           )} />
                           <span className="font-semibold shrink-0">{log.symbol}</span>
                           <Badge variant="outline" className="text-[9px] h-4 px-1 shrink-0">
@@ -361,18 +552,17 @@ export function DashboardTab() {
               )}
             </CardContent>
           </Card>
+
           {/* Active Alerts */}
-          <Card className="border-border">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold flex items-center gap-2">
-                  <Bell className="h-4 w-4 text-amber-400" />
-                  Active Alerts ({alerts.length})
-                </h3>
-              </div>
-              {alerts.length === 0 ? (
-                <p className="text-xs text-muted-foreground text-center py-4">No active alerts. Set alerts in Analytics tab.</p>
-              ) : (
+          {alerts.length > 0 && (
+            <Card className="border-border">
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <Bell className="h-4 w-4 text-amber-400" />
+                    Active Alerts ({alerts.length})
+                  </h3>
+                </div>
                 <div className="space-y-1.5">
                   {alerts.slice(0, 5).map(a => (
                     <div key={a.id} className="flex items-center gap-2 text-xs py-1.5 border-b border-border/30 last:border-0">
@@ -383,9 +573,9 @@ export function DashboardTab() {
                   ))}
                   {alerts.length > 5 && <p className="text-[10px] text-muted-foreground">+{alerts.length - 5} more</p>}
                 </div>
-              )}
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          )}
         </div>
       </div>
     </div>

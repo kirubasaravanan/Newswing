@@ -33,3 +33,56 @@ Stage Summary:
 - New API routes: /api/portfolio/sip, /api/portfolio/dividends, /api/watchlist/folders
 - New Prisma models: DividendRecord, SIPPlan, WatchlistFolder
 - Settings tab completely redesigned with 6 sub-sections
+
+---
+Task ID: 9
+Agent: Main Agent
+Task: PMS Logic & Automation Overhaul — think like a PMS manager
+
+Work Log:
+- Fixed 3 critical bugs:
+  - live-pnl/route.ts: `direction` used before declaration → changed to `trade.direction || 'LONG'`
+  - benchmark/route.ts: double `const beta` declaration → moved beta into if-block, eliminated varX leak
+  - db.ts: Removed `log: ['query']` from PrismaClient (was logging every SQL in production)
+- Rewrote auto-trade/route.ts with full PMS automation engine:
+  - Market hours detection (9:15 AM - 3:30 PM IST, weekend skip)
+  - Scheduler state machine (enable/disable, scan/exit intervals, daily counters)
+  - Proper trailing stop logic (starts at N R-multiple, trails to M R level)
+  - Partial booking system (books X% at N R-multiple profit, tracks via tags)
+  - Re-entry cooldown (configurable days after exit per symbol)
+  - Sector concentration cap (max % per sector check before entry)
+  - Time-based exit (auto-close before market close if position not profitable enough)
+  - Scheduler tick endpoint (called by client-side interval)
+  - L1→L2 scan pipeline now returns stats (totalScanned, l1Passed, l2Signals)
+- Rebranded sidebar.tsx:
+  - "PM" → Shield icon + "PMS Manager" / "Private Portfolio System"
+  - Added "Auto Trade" nav (Bot icon) with armed indicator (green pulse)
+  - Scanner stays separate, now shows universe count badge
+  - Footer shows Yahoo status + "Auto-Mode Active" indicator when armed
+  - Faster refresh (30s instead of 60s)
+- Updated trade-store.ts: Added 'auto-trade' to AppTab union type
+- Updated page.tsx: Added AutoTradeTab rendering for 'auto-trade' tab
+- Rewrote dashboard-tab.tsx as PMS command center:
+  - Market closed banner with scheduler status
+  - Row 1 KPIs: Portfolio Value, Total P&L, Win Rate, Max Drawdown (from risk-metrics API)
+  - Row 2 KPIs: Capital Deployed (heat map), Today/Week/Month P&L, Realized P&L
+  - Positions with R-multiple badges and SL proximity warnings (red highlight + icon)
+  - Engine Status mini card showing scan count, today entries/exits, today P&L
+  - 30-second auto-refresh for live PMS feel
+- Rewrote auto-trade-tab.tsx with 5-tab layout:
+  - Engine Tab: Wallet, Today's Summary, Position Health Warnings
+  - Scheduler Tab: Auto-mode toggle with market hours, scan/exit interval config, timeline
+  - Positions Tab: Auto-positions with aging bars, partial-booked badges, SL/TP/R:R display
+  - Audit Log Tab: Full execution log with expandable details, signal JSON, color-coded actions
+  - Rules Tab: 12 configurable rules (sizing + exit management) in 2-column layout
+  - Client-side scheduler tick (1-min interval when armed + market open)
+- Build verified: `next build` compiled 25 routes, 0 errors
+- Production server running on port 3000
+
+Stage Summary:
+- System transformed from manual trading desk to automated PMS
+- Full paper trade automation: scan → entry → trail → partial book → exit
+- PMS-style risk controls: sector caps, per-stock limits, cooldown, time exits
+- Real-time monitoring: 30s refresh, R-multiple tracking, SL proximity alerts
+- Complete audit trail: every action logged with signal details
+- Zero mock data, all Yahoo Finance live

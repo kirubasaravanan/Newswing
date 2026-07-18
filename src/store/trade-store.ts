@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type AppTab = 'dashboard' | 'holdings' | 'scanner' | 'journal' | 'analytics' | 'backtest' | 'settings';
+export type AppTab = 'dashboard' | 'holdings' | 'auto-trade' | 'scanner' | 'journal' | 'analytics' | 'backtest' | 'settings';
 
 interface TradeStore {
   activeTab: AppTab;

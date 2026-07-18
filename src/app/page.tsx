@@ -31,6 +31,7 @@ export default function Home() {
         <div className="mx-auto max-w-7xl px-4 pt-16 pb-6 lg:px-8 lg:pt-8 lg:pb-8">
           {activeTab === 'dashboard' && <DashboardTab />}
           {activeTab === 'holdings' && <HoldingsTab />}
+          {activeTab === 'auto-trade' && <AutoTradeTab />}
           {activeTab === 'scanner' && <ScreenerTab onAddPaperTrade={handleAddPaperTrade} />}
           {activeTab === 'journal' && <JournalTab prefillTrade={prefillTrade} onPrefillConsumed={consumePrefill} />}
           {activeTab === 'analytics' && <AnalyticsTab />}
