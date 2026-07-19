@@ -51,47 +51,62 @@ export function DashboardTab() {
   const [riskMetrics, setRiskMetrics] = useState<any>(null);
   const [periodReturns, setPeriodReturns] = useState<any>(null);
 
+  const safeJson = async (res: Response) => {
+    try { return await res.json(); } catch { return null; }
+  };
+
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
       const [sumRes, mdRes, atRes, alRes, bmRes, rmRes] = await Promise.all([
-        fetch('/api/portfolio/summary'),
-        fetch('/api/market-data'),
-        fetch('/api/auto-trade'),
-        fetch('/api/portfolio/alerts'),
-        fetch('/api/portfolio/benchmark?days=60'),
-        fetch('/api/portfolio/risk-metrics'),
+        fetch('/api/portfolio/summary').catch(() => null),
+        fetch('/api/market-data').catch(() => null),
+        fetch('/api/auto-trade').catch(() => null),
+        fetch('/api/portfolio/alerts').catch(() => null),
+        fetch('/api/portfolio/benchmark?days=60').catch(() => null),
+        fetch('/api/portfolio/risk-metrics').catch(() => null),
       ]);
-      const [sum, md, at, al, bm, rm] = await Promise.all([sumRes.json(), mdRes.json(), atRes.json(), alRes.json(), bmRes.json(), rmRes.json()]);
-      if (sum.success) setData(sum);
-      if (md.success) setQuotes(md.quotes || []);
-      if (at.success) {
+      const [sum, md, at, al, bm, rm] = await Promise.all([
+        sumRes ? safeJson(sumRes) : null,
+        mdRes ? safeJson(mdRes) : null,
+        atRes ? safeJson(atRes) : null,
+        alRes ? safeJson(alRes) : null,
+        bmRes ? safeJson(bmRes) : null,
+        rmRes ? safeJson(rmRes) : null,
+      ]);
+      if (sum?.success) setData(sum);
+      if (md?.success) setQuotes(md.quotes || []);
+      if (at?.success) {
         setLogs(at.recentLogs || []);
         setAutoStatus(at.scheduler || null);
       }
-      if (al.success) setAlerts((al.alerts || []).filter((a: any) => a.active && !a.triggered));
-      if (bm.success) setBenchmark(bm.benchmark);
-      if (rm.success) setRiskMetrics(rm);
+      if (al?.success) setAlerts((al.alerts || []).filter((a: any) => a.active && !a.triggered));
+      if (bm?.success) setBenchmark(bm.benchmark);
+      if (rm?.success) setRiskMetrics(rm);
 
       // Calculate period returns from closed trades
-      if (sum.success) {
-        const tradesRes = await fetch('/api/trades');
-        const trades = await tradesRes.json();
-        if (trades.success) {
-          const closed = (trades.trades || []).filter((t: any) => t.status === 'CLOSED' && t.exitDate && t.pnl != null);
-          const now = new Date();
-          const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-          const weekAgo = today - 7 * 86400000;
-          const monthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()).getTime();
-          let dailyPnl = 0, weeklyPnl = 0, monthlyPnl = 0;
-          for (const t of closed) {
-            const exitTime = new Date(t.exitDate).getTime();
-            if (exitTime >= today) dailyPnl += t.pnl;
-            if (exitTime >= weekAgo) weeklyPnl += t.pnl;
-            if (exitTime >= monthAgo) monthlyPnl += t.pnl;
+      if (sum?.success) {
+        try {
+          const tradesRes = await fetch('/api/trades').catch(() => null);
+          if (tradesRes) {
+            const trades = await safeJson(tradesRes);
+            if (trades?.success) {
+              const closed = (trades.trades || []).filter((t: any) => t.status === 'CLOSED' && t.exitDate && t.pnl != null);
+              const now = new Date();
+              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+              const weekAgo = today - 7 * 86400000;
+              const monthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()).getTime();
+              let dailyPnl = 0, weeklyPnl = 0, monthlyPnl = 0;
+              for (const t of closed) {
+                const exitTime = new Date(t.exitDate).getTime();
+                if (exitTime >= today) dailyPnl += t.pnl;
+                if (exitTime >= weekAgo) weeklyPnl += t.pnl;
+                if (exitTime >= monthAgo) monthlyPnl += t.pnl;
+              }
+              setPeriodReturns({ dailyPnl, weeklyPnl, monthlyPnl });
+            }
           }
-          setPeriodReturns({ dailyPnl, weeklyPnl, monthlyPnl });
-        }
+        } catch { /* ignore trades fetch failure */ }
       }
     } catch (err) {
       console.error('Dashboard fetch error:', err);
