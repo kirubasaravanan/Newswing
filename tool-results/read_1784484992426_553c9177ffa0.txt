@@ -1,0 +1,953 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→import { useState, useEffect, useCallback, useRef } from 'react';
+     4→     4→import { Button } from '@/components/ui/button';
+     5→     5→import { Card, CardContent } from '@/components/ui/card';
+     6→     6→import { Input } from '@/components/ui/input';
+     7→     7→import { Label } from '@/components/ui/label';
+     8→     8→import { Badge } from '@/components/ui/badge';
+     9→     9→import { ScrollArea } from '@/components/ui/scroll-area';
+    10→    10→import { Switch } from '@/components/ui/switch';
+    11→    11→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    12→    12→import {
+    13→    13→  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogClose,
+    14→    14→} from '@/components/ui/dialog';
+    15→    15→import {
+    16→    16→  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+    17→    17→} from '@/components/ui/select';
+    18→    18→import {
+    19→    19→  Bot, Play, Wallet, Settings, TrendingUp, TrendingDown, Clock,
+    20→    20→  ArrowRightLeft, Shield, AlertTriangle, CheckCircle2, XCircle,
+    21→    21→  Wifi, WifiOff, Loader2, Plus, Minus, RefreshCw, Zap, Timer,
+    22→    22→  ChevronDown, ChevronUp, Eye, FileText, Activity, ShieldAlert,
+    23→    23→  Thermometer, Flame, RotateCcw, BarChart3, Target, Skull,
+    24→    24→} from 'lucide-react';
+    25→    25→import { cn } from '@/lib/utils';
+    26→    26→import { toast } from 'sonner';
+    27→    27→import { useTradeStore } from '@/store/trade-store';
+    28→    28→import { TradingViewChart } from './tradingview-chart';
+    29→    29→
+    30→    30→// ── Types ───────────────────────────────────────────────
+    31→    31→interface WalletData {
+    32→    32→  id: string; totalCapital: number; deployed: number; available: number;
+    33→    33→  realizedPnl: number; unrealizedPnl: number;
+    34→    34→}
+    35→    35→
+    36→    36→interface PositionRules {
+    37→    37→  maxPerStock: number; maxBuysPerMonth: number; maxHoldingDays: number;
+    38→    38→  maxTotalPositions: number; riskPerTradePct: number;
+    39→    39→  trailingStopR: number; trailToR: number; partialBookR: number; partialBookPct: number;
+    40→    40→  cooldownDays: number; maxSectorPct: number; timeExitMins: number;
+    41→    41→  // v2
+    42→    42→  maxDrawdownPct: number; dailyLossLimit: number; niftyRegimeFilter: boolean;
+    43→    43→  atrTrailMultiplier: number; adaptiveSizing: boolean; streakPenaltyPct: number;
+    44→    44→}
+    45→    45→
+    46→    46→interface SchedulerState {
+    47→    47→  enabled: boolean; scanIntervalMin: number; exitIntervalMin: number;
+    48→    48→  lastScanAt: string | null; lastExitAt: string | null;
+    49→    49→  todayEntries: number; todayExits: number; todayPnl: number; scanCount: number;
+    50→    50→  // v2
+    51→    51→  circuitBreaker: boolean; circuitBreakerReason: string;
+    52→    52→  niftyRegime: string; consecutiveLosses: number; lastAdaptiveFactor: number;
+    53→    53→}
+    54→    54→
+    55→    55→interface AutoTradeLog {
+    56→    56→  id: string; action: string; symbol: string; executed: boolean;
+    57→    57→  reason: string; createdAt: string; signal?: string;
+    58→    58→}
+    59→    59→
+    60→    60→interface OpenPosition {
+    61→    61→  id: string; symbol: string; stockName: string | null;
+    62→    62→  entryPrice: number; qty: number; stopLoss: number; targetPrice: number;
+    63→    63→  entryDate: string; autoTraded: boolean; tags?: string;
+    64→    64→}
+    65→    65→
+    66→    66→interface DrawdownData {
+    67→    67→  drawdownPct: number; peakCapital: number; currentCapital: number;
+    68→    68→}
+    69→    69→
+    70→    70→export function AutoTradeTab() {
+    71→    71→  const { config } = useTradeStore();
+    72→    72→  const [wallet, setWallet] = useState<WalletData | null>(null);
+    73→    73→  const [rules, setRules] = useState<PositionRules>({
+    74→    74→    maxPerStock: 50000, maxBuysPerMonth: 3, maxHoldingDays: 25,
+    75→    75→    maxTotalPositions: 8, riskPerTradePct: 1.0,
+    76→    76→    trailingStopR: 1.5, trailToR: 0.5, partialBookR: 2.0, partialBookPct: 30,
+    77→    77→    cooldownDays: 3, maxSectorPct: 35, timeExitMins: 30,
+    78→    78→    maxDrawdownPct: 8, dailyLossLimit: 5000, niftyRegimeFilter: true,
+    79→    79→    atrTrailMultiplier: 2.0, adaptiveSizing: true, streakPenaltyPct: 20,
+    80→    80→  });
+    81→    81→  const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
+    82→    82→  const [logs, setLogs] = useState<AutoTradeLog[]>([]);
+    83→    83→  const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
+    84→    84→  const [marketHours, setMarketHours] = useState(false);
+    85→    85→  const [timeToClose, setTimeToClose] = useState(0);
+    86→    86→  const [scanning, setScanning] = useState(false);
+    87→    87→  const [checkingExits, setCheckingExits] = useState(false);
+    88→    88→  const [editingWallet, setEditingWallet] = useState(false);
+    89→    89→  const [walletInput, setWalletInput] = useState('200000');
+    90→    90→  const [editingRules, setEditingRules] = useState(false);
+    91→    91→  const [ruleEdits, setRuleEdits] = useState<PositionRules & { scanIntervalMin?: number; exitIntervalMin?: number }>({ ...rules });
+    92→    92→  const [chartSymbol, setChartSymbol] = useState<string | null>(null);
+    93→    93→  const [exitWarnings, setExitWarnings] = useState<any[]>([]);
+    94→    94→  const [selectedLog, setSelectedLog] = useState<AutoTradeLog | null>(null);
+    95→    95→  const [showAllLogs, setShowAllLogs] = useState(false);
+    96→    96→  const [drawdown, setDrawdown] = useState<DrawdownData | null>(null);
+    97→    97→
+    98→    98→  // ── Data Fetching ─────────────────────────────────────
+    99→    99→  const fetchStatus = useCallback(async () => {
+   100→   100→    try {
+   101→   101→      const res = await fetch('/api/auto-trade');
+   102→   102→      const data = await res.json();
+   103→   103→      if (data.success) {
+   104→   104→        setWallet(data.wallet);
+   105→   105→        setRules(data.rules);
+   106→   106→        setOpenPositions(data.openTrades);
+   107→   107→        setLogs(data.recentLogs || []);
+   108→   108→        setScheduler(data.scheduler);
+   109→   109→        setMarketHours(data.marketHours);
+   110→   110→        setTimeToClose(data.timeToClose);
+   111→   111→        if (data.drawdown) setDrawdown(data.drawdown);
+   112→   112→      }
+   113→   113→    } catch (err) { console.error('Fetch status error:', err); }
+   114→   114→  }, []);
+   115→   115→
+   116→   116→  useEffect(() => {
+   117→   117→    fetchStatus();
+   118→   118→    const interval = setInterval(fetchStatus, 30000);
+   119→   119→    return () => clearInterval(interval);
+   120→   120→  }, [fetchStatus]);
+   121→   121→
+   122→   122→  // ── Scheduler Tick ─────────────────────────────────────
+   123→   123→  const schedulerTickRef = useRef<NodeJS.Timeout | null>(null);
+   124→   124→  useEffect(() => {
+   125→   125→    if (scheduler?.enabled && marketHours && !scheduler?.circuitBreaker) {
+   126→   126→      schedulerTickRef.current = setInterval(async () => {
+   127→   127→        try {
+   128→   128→          await fetch('/api/auto-trade', {
+   129→   129→            method: 'POST', headers: { 'Content-Type': 'application/json' },
+   130→   130→            body: JSON.stringify({ action: 'scheduler_tick' }),
+   131→   131→          });
+   132→   132→          fetchStatus();
+   133→   133→        } catch { /* ignore */ }
+   134→   134→      }, 60000);
+   135→   135→    }
+   136→   136→    return () => { if (schedulerTickRef.current) clearInterval(schedulerTickRef.current); };
+   137→   137→  }, [scheduler?.enabled, marketHours, scheduler?.circuitBreaker, fetchStatus]);
+   138→   138→
+   139→   139→  // ── Actions ───────────────────────────────────────────
+   140→   140→  const handleScanAndTrade = async () => {
+   141→   141→    setScanning(true);
+   142→   142→    try {
+   143→   143→      const res = await fetch('/api/auto-trade', {
+   144→   144→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   145→   145→        body: JSON.stringify({ action: 'scan_and_trade', config }),
+   146→   146→      });
+   147→   147→      const data = await res.json();
+   148→   148→      if (data.success) {
+   149→   149→        const extra = data.circuitBreaker ? ' [CIRCUIT BREAKER]' :
+   150→   150→          data.niftyRegime === 'BEARISH' ? ' [BEARISH REGIME]' : '';
+   151→   151→        toast.success(`Scan Complete${extra}`, {
+   152→   152→          description: `${data.totalScanned} scanned | ${data.l1Passed} L1 | ${data.l2Signals} entries | ${data.skipped.length} skipped`,
+   153→   153→        });
+   154→   154→        if (data.adaptiveFactor && data.adaptiveFactor < 1) {
+   155→   155→          toast.info('Adaptive Sizing Active', {
+   156→   156→            description: `Factor: ${(data.adaptiveFactor * 100).toFixed(0)}% (${data.consecutiveLosses} consecutive losses)`,
+   157→   157→          });
+   158→   158→        }
+   159→   159→        fetchStatus();
+   160→   160→      } else {
+   161→   161→        toast.error('Auto-trade failed', { description: data.error });
+   162→   162→      }
+   163→   163→    } catch { toast.error('Auto-trade failed'); }
+   164→   164→    finally { setScanning(false); }
+   165→   165→  };
+   166→   166→
+   167→   167→  const handleCheckExits = async () => {
+   168→   168→    setCheckingExits(true);
+   169→   169→    try {
+   170→   170→      const res = await fetch('/api/auto-trade', {
+   171→   171→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   172→   172→        body: JSON.stringify({ action: 'check_exits' }),
+   173→   173→      });
+   174→   174→      const data = await res.json();
+   175→   175→      if (data.success) {
+   176→   176→        if (data.exits.length > 0) {
+   177→   177→          toast.success(`Exit Check: ${data.exits.length} closed`, {
+   178→   178→            description: data.exits.map((e: any) => `${e.symbol} (${e.exitReason})`).join(', '),
+   179→   179→          });
+   180→   180→        }
+   181→   181→        if (data.partialBooks?.length > 0) {
+   182→   182→          toast.info(`Partial Book: ${data.partialBooks.length} positions`, {
+   183→   183→            description: data.partialBooks.map((p: any) => `${p.symbol}: ${p.bookedQty}qty at ${p.rMultiple}R`).join(', '),
+   184→   184→          });
+   185→   185→        }
+   186→   186→        if (data.exits.length === 0 && (!data.partialBooks || data.partialBooks.length === 0)) {
+   187→   187→          toast.info('No exits triggered', { description: `${data.holding?.length || 0} positions holding` });
+   188→   188→        }
+   189→   189→        if (data.warnings?.length > 0) setExitWarnings(data.warnings);
+   190→   190→        fetchStatus();
+   191→   191→      }
+   192→   192→    } catch { toast.error('Exit check failed'); }
+   193→   193→    finally { setCheckingExits(false); }
+   194→   194→  };
+   195→   195→
+   196→   196→  const handleSchedulerToggle = async (enabled: boolean) => {
+   197→   197→    try {
+   198→   198→      const res = await fetch('/api/auto-trade', {
+   199→   199→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   200→   200→        body: JSON.stringify({
+   201→   201→          action: 'scheduler_toggle', enabled,
+   202→   202→          scanIntervalMin: ruleEdits.scanIntervalMin || 30,
+   203→   203→          exitIntervalMin: ruleEdits.exitIntervalMin || 5,
+   204→   204→        }),
+   205→   205→      });
+   206→   206→      const data = await res.json();
+   207→   207→      if (data.success) {
+   208→   208→        setScheduler(data.scheduler);
+   209→   209→        toast.success(enabled ? 'Auto-Mode Armed' : 'Auto-Mode Disarmed');
+   210→   210→        fetchStatus();
+   211→   211→      }
+   212→   212→    } catch { toast.error('Scheduler toggle failed'); }
+   213→   213→  };
+   214→   214→
+   215→   215→  const handleResetCircuitBreaker = async () => {
+   216→   216→    try {
+   217→   217→      const res = await fetch('/api/auto-trade', {
+   218→   218→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   219→   219→        body: JSON.stringify({ action: 'reset_circuit_breaker' }),
+   220→   220→      });
+   221→   221→      const data = await res.json();
+   222→   222→      if (data.success) {
+   223→   223→        setScheduler(data.scheduler);
+   224→   224→        toast.success('Circuit Breaker Reset');
+   225→   225→      }
+   226→   226→    } catch { toast.error('Reset failed'); }
+   227→   227→  };
+   228→   228→
+   229→   229→  const saveWallet = async () => {
+   230→   230→    try {
+   231→   231→      const res = await fetch('/api/auto-trade', {
+   232→   232→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   233→   233→        body: JSON.stringify({ action: 'update_wallet', totalCapital: parseFloat(walletInput) }),
+   234→   234→      });
+   235→   235→      const data = await res.json();
+   236→   236→      if (data.success) { setWallet(data.wallet); setEditingWallet(false); toast.success('Wallet updated'); }
+   237→   237→    } catch { toast.error('Failed to update wallet'); }
+   238→   238→  };
+   239→   239→
+   240→   240→  const saveRules = async () => {
+   241→   241→    try {
+   242→   242→      // Separate scheduler settings from rules
+   243→   243→      const { scanIntervalMin, exitIntervalMin, ...rulesOnly } = ruleEdits;
+   244→   244→      const res = await fetch('/api/auto-trade', {
+   245→   245→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   246→   246→        body: JSON.stringify({ action: 'update_rules', rules: rulesOnly }),
+   247→   247→      });
+   248→   248→      const data = await res.json();
+   249→   249→      if (data.success) { setRules(data.rules); setEditingRules(false); toast.success('Rules updated'); }
+   250→   250→    } catch { toast.error('Failed to update rules'); }
+   251→   251→  };
+   252→   252→
+   253→   253→  const totalPnl = (wallet?.realizedPnl || 0) + (wallet?.unrealizedPnl || 0);
+   254→   254→  const pnlPct = wallet?.initialCapital ? (totalPnl / wallet.initialCapital) * 100 : 0;
+   255→   255→
+   256→   256→  return (
+   257→   257→    <div className="space-y-4">
+   258→   258→      {/* ── Top Bar ─────────────────────────────────────── */}
+   259→   259→      <div className="flex items-center justify-between flex-wrap gap-3">
+   260→   260→        <div className="flex items-center gap-3">
+   261→   261→          <h2 className="text-lg font-bold flex items-center gap-2">
+   262→   262→            <Bot className="h-5 w-5 text-primary" />
+   263→   263→            Auto-Trade Engine
+   264→   264→            <Badge variant="outline" className="text-[9px] h-4 text-muted-foreground">v2</Badge>
+   265→   265→          </h2>
+   266→   266→          {/* Market Status */}
+   267→   267→          <div className={cn(
+   268→   268→            'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
+   269→   269→            marketHours ? 'bg-emerald-500/10 text-emerald-400' : 'bg-muted text-muted-foreground'
+   270→   270→          )}>
+   271→   271→            <div className={cn('h-1.5 w-1.5 rounded-full', marketHours ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+   272→   272→            {marketHours ? `${timeToClose}m to close` : 'Market Closed'}
+   273→   273→          </div>
+   274→   274→          {/* Circuit Breaker */}
+   275→   275→          {scheduler?.circuitBreaker && (
+   276→   276→            <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs bg-red-500/15 text-red-400 border border-red-500/20">
+   277→   277→              <ShieldAlert className="h-3 w-3" />
+   278→   278→              CIRCUIT BREAKER
+   279→   279→              <Button variant="ghost" size="sm" onClick={handleResetCircuitBreaker} className="h-4 w-4 p-0 ml-1 text-red-400 hover:text-red-300">
+   280→   280→                <RotateCcw className="h-2.5 w-2.5" />
+   281→   281→              </Button>
+   282→   282→            </div>
+   283→   283→          )}
+   284→   284→          {/* Nifty Regime */}
+   285→   285→          <div className={cn(
+   286→   286→            'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
+   287→   287→            scheduler?.niftyRegime === 'BULLISH' ? 'bg-emerald-500/10 text-emerald-400' :
+   288→   288→            scheduler?.niftyRegime === 'BEARISH' ? 'bg-red-500/10 text-red-400' : 'bg-muted text-muted-foreground'
+   289→   289→          )}>
+   290→   290→            <TrendingUp className={cn('h-3 w-3', scheduler?.niftyRegime === 'BEARISH' && 'rotate-180')} />
+   291→   291→            {scheduler?.niftyRegime || 'UNKNOWN'}
+   292→   292→          </div>
+   293→   293→          {/* Auto-Mode */}
+   294→   294→          <div className={cn(
+   295→   295→            'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
+   296→   296→            scheduler?.enabled ? 'bg-indigo-500/10 text-indigo-400' : 'bg-muted text-muted-foreground'
+   297→   297→          )}>
+   298→   298→            <Shield className="h-3 w-3" />
+   299→   299→            {scheduler?.enabled ? 'Armed' : 'Manual'}
+   300→   300→          </div>
+   301→   301→        </div>
+   302→   302→        <div className="flex items-center gap-2">
+   303→   303→          <Button variant="outline" size="sm" onClick={handleCheckExits}
+   304→   304→            disabled={checkingExits || openPositions.length === 0}
+   305→   305→            className="h-8 gap-1.5 text-xs">
+   306→   306→            {checkingExits ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRightLeft className="h-3 w-3" />}
+   307→   307→            Check Exits
+   308→   308→          </Button>
+   309→   309→          <Button onClick={handleScanAndTrade} disabled={scanning || !marketHours || !!scheduler?.circuitBreaker}
+   310→   310→            className={cn('gap-1.5', scheduler?.enabled ? 'bg-emerald-600 hover:bg-emerald-700' : '')}
+   311→   311→            size="sm">
+   312→   312→            {scanning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+   313→   313→            {scanning ? 'Scanning...' : 'Scan & Trade'}
+   314→   314→          </Button>
+   315→   315→        </div>
+   316→   316→      </div>
+   317→   317→
+   318→   318→      <Tabs defaultValue="engine" className="space-y-4">
+   319→   319→        <TabsList className="bg-secondary/50">
+   320→   320→          <TabsTrigger value="engine" className="text-xs gap-1.5"><Bot className="h-3 w-3" /> Engine</TabsTrigger>
+   321→   321→          <TabsTrigger value="scheduler" className="text-xs gap-1.5"><Timer className="h-3 w-3" /> Scheduler</TabsTrigger>
+   322→   322→          <TabsTrigger value="positions" className="text-xs gap-1.5"><TrendingUp className="h-3 w-3" /> Positions</TabsTrigger>
+   323→   323→          <TabsTrigger value="audit" className="text-xs gap-1.5"><FileText className="h-3 w-3" /> Audit</TabsTrigger>
+   324→   324→          <TabsTrigger value="rules" className="text-xs gap-1.5"><Settings className="h-3 w-3" /> Rules</TabsTrigger>
+   325→   325→        </TabsList>
+   326→   326→
+   327→   327→        {/* ═══ ENGINE TAB ═════════════════════════════════ */}
+   328→   328→        <TabsContent value="engine" className="space-y-4">
+   329→   329→          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+   330→   330→            {/* Wallet Card */}
+   331→   331→            <Card className="lg:col-span-2 border-border">
+   332→   332→              <CardContent className="p-4">
+   333→   333→                <div className="flex items-center justify-between mb-4">
+   334→   334→                  <h3 className="text-sm font-semibold flex items-center gap-2">
+   335→   335→                    <Wallet className="h-4 w-4 text-primary" /> Capital Wallet
+   336→   336→                  </h3>
+   337→   337→                  {!editingWallet ? (
+   338→   338→                    <Button variant="ghost" size="sm" onClick={() => { setWalletInput(String(wallet?.totalCapital || 200000)); setEditingWallet(true); }} className="h-7 text-xs">Edit</Button>
+   339→   339→                  ) : (
+   340→   340→                    <div className="flex items-center gap-2">
+   341→   341→                      <Input value={walletInput} onChange={e => setWalletInput(e.target.value)} className="h-7 w-32 text-xs" />
+   342→   342→                      <Button size="sm" onClick={saveWallet} className="h-7 text-xs">Save</Button>
+   343→   343→                      <Button size="sm" variant="ghost" onClick={() => setEditingWallet(false)} className="h-7 text-xs">Cancel</Button>
+   344→   344→                    </div>
+   345→   345→                  )}
+   346→   346→                </div>
+   347→   347→                {wallet && (
+   348→   348→                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+   349→   349→                    <div className="rounded-lg bg-secondary/50 p-3">
+   350→   350→                      <div className="text-[10px] text-muted-foreground uppercase">Total Capital</div>
+   351→   351→                      <div className="text-lg font-bold font-mono mt-0.5">₹{wallet.totalCapital.toLocaleString()}</div>
+   352→   352→                    </div>
+   353→   353→                    <div className="rounded-lg bg-blue-500/10 p-3">
+   354→   354→                      <div className="text-[10px] text-blue-400 uppercase">Deployed</div>
+   355→   355→                      <div className="text-lg font-bold font-mono mt-0.5 text-blue-400">₹{wallet.deployed.toLocaleString()}</div>
+   356→   356→                      <div className="text-[10px] text-muted-foreground">{wallet.totalCapital > 0 ? ((wallet.deployed / wallet.totalCapital) * 100).toFixed(1) : 0}%</div>
+   357→   357→                    </div>
+   358→   358→                    <div className="rounded-lg bg-emerald-500/10 p-3">
+   359→   359→                      <div className="text-[10px] text-emerald-400 uppercase">Available</div>
+   360→   360→                      <div className="text-lg font-bold font-mono mt-0.5 text-emerald-400">₹{wallet.available.toLocaleString()}</div>
+   361→   361→                    </div>
+   362→   362→                    <div className={cn('rounded-lg p-3', totalPnl >= 0 ? 'bg-emerald-500/10' : 'bg-red-500/10')}>
+   363→   363→                      <div className={cn('text-[10px] uppercase', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>Total P&L</div>
+   364→   364→                      <div className={cn('text-lg font-bold font-mono mt-0.5', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   365→   365→                        {totalPnl >= 0 ? '+' : ''}₹{totalPnl.toLocaleString()}
+   366→   366→                      </div>
+   367→   367→                      <div className="text-[10px] text-muted-foreground">R: {wallet.realizedPnl.toLocaleString()} | U: {wallet.unrealizedPnl.toLocaleString()}</div>
+   368→   368→                    </div>
+   369→   369→                    {/* v2: Drawdown Card */}
+   370→   370→                    <div className={cn('rounded-lg p-3', (drawdown?.drawdownPct || 0) >= rules.maxDrawdownPct * 0.7 ? 'bg-red-500/10' : 'bg-orange-500/10')}>
+   371→   371→                      <div className="text-[10px] text-orange-400 uppercase flex items-center gap-1">
+   372→   372→                        <Skull className="h-3 w-3" /> Drawdown
+   373→   373→                      </div>
+   374→   374→                      <div className={cn('text-lg font-bold font-mono mt-0.5',
+   375→   375→                        (drawdown?.drawdownPct || 0) >= rules.maxDrawdownPct ? 'text-red-400' : 'text-orange-400'
+   376→   376→                      )}>
+   377→   377→                        {(drawdown?.drawdownPct || 0).toFixed(2)}%
+   378→   378→                      </div>
+   379→   379→                      <div className="text-[10px] text-muted-foreground">Limit: {rules.maxDrawdownPct}%</div>
+   380→   380→                    </div>
+   381→   381→                  </div>
+   382→   382→                )}
+   383→   383→              </CardContent>
+   384→   384→            </Card>
+   385→   385→
+   386→   386→            {/* Today's Summary + Engine State */}
+   387→   387→            <div className="space-y-4">
+   388→   388→              <Card className="border-border">
+   389→   389→                <CardContent className="p-4">
+   390→   390→                  <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+   391→   391→                    <Activity className="h-4 w-4 text-primary" /> Today
+   392→   392→                  </h3>
+   393→   393→                  {scheduler && (
+   394→   394→                    <div className="space-y-2">
+   395→   395→                      <div className="flex justify-between text-xs">
+   396→   396→                        <span className="text-muted-foreground">Scans</span>
+   397→   397→                        <span className="font-mono font-bold">{scheduler.scanCount}</span>
+   398→   398→                      </div>
+   399→   399→                      <div className="flex justify-between text-xs">
+   400→   400→                        <span className="text-muted-foreground">Entries</span>
+   401→   401→                        <span className="font-mono font-bold text-emerald-400">{scheduler.todayEntries}</span>
+   402→   402→                      </div>
+   403→   403→                      <div className="flex justify-between text-xs">
+   404→   404→                        <span className="text-muted-foreground">Exits</span>
+   405→   405→                        <span className="font-mono font-bold text-red-400">{scheduler.todayExits}</span>
+   406→   406→                      </div>
+   407→   407→                      <div className="flex justify-between text-xs pt-2 border-t border-border/50">
+   408→   408→                        <span className="text-muted-foreground">Today P&L</span>
+   409→   409→                        <span className={cn('font-mono font-bold', scheduler.todayPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   410→   410→                          {scheduler.todayPnl >= 0 ? '+' : ''}₹{Math.round(scheduler.todayPnl).toLocaleString()}
+   411→   411→                        </span>
+   412→   412→                      </div>
+   413→   413→                      <div className="flex justify-between text-xs">
+   414→   414→                        <span className="text-muted-foreground">Daily Limit</span>
+   415→   415→                        <span className={cn('font-mono',
+   416→   416→                          scheduler.todayPnl < 0 && Math.abs(scheduler.todayPnl) >= rules.dailyLossLimit * 0.8 ? 'text-red-400 font-bold' : 'text-muted-foreground'
+   417→   417→                        )}>
+   418→   418→                          ₹{rules.dailyLossLimit.toLocaleString()}
+   419→   419→                        </span>
+   420→   420→                      </div>
+   421→   421→                    </div>
+   422→   422→                  )}
+   423→   423→                </CardContent>
+   424→   424→              </Card>
+   425→   425→
+   426→   426→              {/* v2: Engine State Card */}
+   427→   427→              <Card className="border-border">
+   428→   428→                <CardContent className="p-4">
+   429→   429→                  <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+   430→   430→                    <Thermometer className="h-4 w-4 text-primary" /> Engine State
+   431→   431→                  </h3>
+   432→   432→                  <div className="space-y-2">
+   433→   433→                    {/* Nifty Regime */}
+   434→   434→                    <div className="flex items-center justify-between text-xs">
+   435→   435→                      <span className="text-muted-foreground">Nifty Regime</span>
+   436→   436→                      <Badge variant="outline" className={cn('text-[10px] h-5',
+   437→   437→                        scheduler?.niftyRegime === 'BULLISH' ? 'text-emerald-400 border-emerald-500/30' :
+   438→   438→                        scheduler?.niftyRegime === 'BEARISH' ? 'text-red-400 border-red-500/30' : 'text-muted-foreground'
+   439→   439→                      )}>
+   440→   440→                        {scheduler?.niftyRegime || 'UNKNOWN'}
+   441→   441→                      </Badge>
+   442→   442→                    </div>
+   443→   443→                    {/* Adaptive Factor */}
+   444→   444→                    <div className="flex items-center justify-between text-xs">
+   445→   445→                      <span className="text-muted-foreground">Size Factor</span>
+   446→   446→                      <div className="flex items-center gap-2">
+   447→   447→                        <div className="w-16 h-1.5 rounded-full bg-secondary overflow-hidden">
+   448→   448→                          <div className={cn('h-full rounded-full transition-all',
+   449→   449→                            (scheduler?.lastAdaptiveFactor || 1) >= 0.8 ? 'bg-emerald-400' :
+   450→   450→                            (scheduler?.lastAdaptiveFactor || 1) >= 0.5 ? 'bg-amber-400' : 'bg-red-400'
+   451→   451→                          )} style={{ width: `${((scheduler?.lastAdaptiveFactor || 1) * 100)}%` }} />
+   452→   452→                        </div>
+   453→   453→                        <span className={cn('font-mono w-8 text-right',
+   454→   454→                          (scheduler?.lastAdaptiveFactor || 1) < 1 ? 'text-amber-400' : ''
+   455→   455→                        )}>{((scheduler?.lastAdaptiveFactor || 1) * 100).toFixed(0)}%</span>
+   456→   456→                      </div>
+   457→   457→                    </div>
+   458→   458→                    {/* Consecutive Losses */}
+   459→   459→                    <div className="flex items-center justify-between text-xs">
+   460→   460→                      <span className="text-muted-foreground flex items-center gap-1">
+   461→   461→                        <Flame className="h-3 w-3" /> Loss Streak
+   462→   462→                      </span>
+   463→   463→                      <span className={cn('font-mono font-bold',
+   464→   464→                        (scheduler?.consecutiveLosses || 0) >= 3 ? 'text-red-400' :
+   465→   465→                        (scheduler?.consecutiveLosses || 0) >= 1 ? 'text-amber-400' : 'text-emerald-400'
+   466→   466→                      )}>{scheduler?.consecutiveLosses || 0}</span>
+   467→   467→                    </div>
+   468→   468→                    {/* Circuit Breaker */}
+   469→   469→                    {scheduler?.circuitBreaker && (
+   470→   470→                      <div className="mt-2 rounded-lg bg-red-500/10 p-2 border border-red-500/20">
+   471→   471→                        <div className="text-[10px] text-red-400 font-bold uppercase flex items-center gap-1">
+   472→   472→                          <ShieldAlert className="h-3 w-3" /> Circuit Breaker Active
+   473→   473→                        </div>
+   474→   474→                        <div className="text-[10px] text-muted-foreground mt-0.5">
+   475→   475→                          {scheduler.circuitBreakerReason}
+   476→   476→                        </div>
+   477→   477→                        <Button variant="outline" size="sm" onClick={handleResetCircuitBreaker}
+   478→   478→                          className="mt-1.5 h-6 text-[10px] gap-1 text-red-400 border-red-500/30 hover:bg-red-500/10">
+   479→   479→                          <RotateCcw className="h-2.5 w-2.5" /> Reset
+   480→   480→                        </Button>
+   481→   481→                      </div>
+   482→   482→                    )}
+   483→   483→                  </div>
+   484→   484→                </CardContent>
+   485→   485→              </Card>
+   486→   486→            </div>
+   487→   487→          </div>
+   488→   488→
+   489→   489→          {/* Position Health Warnings */}
+   490→   490→          {exitWarnings.length > 0 && (
+   491→   491→            <Card className={cn('border-amber-500/30 bg-amber-500/5',
+   492→   492→              exitWarnings.some((w: any) => w.healthUrgency === 'CRITICAL') ? 'border-red-500/30 bg-red-500/5' : ''
+   493→   493→            )}>
+   494→   494→              <CardContent className="p-4">
+   495→   495→                <h3 className="text-sm font-semibold flex items-center gap-2 mb-2">
+   496→   496→                  <AlertTriangle className="h-4 w-4 text-amber-400" />
+   497→   497→                  Position Warnings ({exitWarnings.length})
+   498→   498→                </h3>
+   499→   499→                <div className="space-y-1.5">
+   500→   500→                  {exitWarnings.map((w: any, i: number) => (
+   501→   501→                    <div key={i} className={cn(
+   502→   502→                      'flex items-center gap-2 text-xs px-3 py-2 rounded-lg',
+   503→   503→                      w.healthUrgency === 'CRITICAL' ? 'bg-red-500/10' : 'bg-amber-500/10'
+   504→   504→                    )}>
+   505→   505→                      <Badge variant="outline" className={cn('text-[9px] h-4',
+   506→   506→                        w.healthUrgency === 'CRITICAL' ? 'text-red-400 border-red-500/30' : 'text-amber-400 border-amber-500/30'
+   507→   507→                      )}>{w.healthUrgency === 'CRITICAL' ? 'CRITICAL' : 'WARNING'}</Badge>
+   508→   508→                      <span className="font-semibold">{w.symbol}</span>
+   509→   509→                      {/* Health Score Bar */}
+   510→   510→                      <div className="flex items-center gap-1.5 flex-1">
+   511→   511→                        <div className="flex-1 max-w-[80px] h-1.5 rounded-full bg-secondary overflow-hidden">
+   512→   512→                          <div className={cn('h-full rounded-full transition-all',
+   513→   513→                            w.healthScore >= 70 ? 'bg-emerald-400' :
+   514→   514→                            w.healthScore >= 40 ? 'bg-amber-400' : 'bg-red-400'
+   515→   515→                          )} style={{ width: `${w.healthScore}%` }} />
+   516→   516→                        </div>
+   517→   517→                        <span className="font-mono text-[10px] text-muted-foreground">{w.healthScore}/100</span>
+   518→   518→                      </div>
+   519→   519→                      <span className="text-muted-foreground truncate max-w-[200px]">{w.message}</span>
+   520→   520→                      <span className={cn('ml-auto font-mono shrink-0', (w.pnlPercent || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   521→   521→                        {w.pnlPercent >= 0 ? '+' : ''}{w.pnlPercent?.toFixed(2)}%
+   522→   522→                      </span>
+   523→   523→                    </div>
+   524→   524→                  ))}
+   525→   525→                </div>
+   526→   526→              </CardContent>
+   527→   527→            </Card>
+   528→   528→          )}
+   529→   529→        </TabsContent>
+   530→   530→
+   531→   531→        {/* ═══ SCHEDULER TAB ══════════════════════════════ */}
+   532→   532→        <TabsContent value="scheduler" className="space-y-4">
+   533→   533→          <Card className="border-border">
+   534→   534→            <CardContent className="p-4">
+   535→   535→              <div className="flex items-center justify-between mb-4">
+   536→   536→                <div>
+   537→   537→                  <h3 className="text-sm font-semibold flex items-center gap-2">
+   538→   538→                    <Timer className="h-4 w-4 text-primary" /> Automation Scheduler
+   539→   539→                  </h3>
+   540→   540→                  <p className="text-[10px] text-muted-foreground mt-1">
+   541→   541→                    V-Swing universe scan + PMS risk-managed exits during 9:15 AM - 3:30 PM IST
+   542→   542→                  </p>
+   543→   543→                </div>
+   544→   544→                <div className="flex items-center gap-3">
+   545→   545→                  <span className={cn('text-xs', marketHours ? 'text-emerald-400' : 'text-muted-foreground')}>
+   546→   546→                    {marketHours ? 'OPEN' : 'CLOSED'}
+   547→   547→                  </span>
+   548→   548→                  <Switch
+   549→   549→                    checked={scheduler?.enabled || false}
+   550→   550→                    onCheckedChange={handleSchedulerToggle}
+   551→   551→                    disabled={!!scheduler?.circuitBreaker}
+   552→   552→                  />
+   553→   553→                </div>
+   554→   554→              </div>
+   555→   555→
+   556→   556→              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+   557→   557→                <div className="rounded-lg bg-secondary/50 p-4 space-y-3">
+   558→   558→                  <h4 className="text-xs font-semibold flex items-center gap-2">
+   559→   559→                    <Zap className="h-3 w-3 text-emerald-400" /> Entry Scan
+   560→   560→                  </h4>
+   561→   561→                  <div className="flex items-center justify-between text-xs">
+   562→   562→                    <Label className="text-muted-foreground">Interval (min)</Label>
+   563→   563→                    <Input type="number" value={ruleEdits.scanIntervalMin || 30}
+   564→   564→                      onChange={e => setRuleEdits({ ...ruleEdits, scanIntervalMin: parseInt(e.target.value) || 30 })}
+   565→   565→                      className="h-7 w-20 text-xs text-right" />
+   566→   566→                  </div>
+   567→   567→                  <div className="text-[10px] text-muted-foreground space-y-1">
+   568→   568→                    <p>Full universe L1→L2 scan with regime filter, circuit breaker, and adaptive sizing.</p>
+   569→   569→                    {scheduler?.circuitBreaker && (
+   570→   570→                      <p className="text-red-400 font-semibold">BLOCKED by circuit breaker</p>
+   571→   571→                    )}
+   572→   572→                    {scheduler?.niftyRegime === 'BEARISH' && rules.niftyRegimeFilter && (
+   573→   573→                      <p className="text-amber-400">BLOCKED by bearish regime filter</p>
+   574→   574→                    )}
+   575→   575→                  </div>
+   576→   576→                </div>
+   577→   577→                <div className="rounded-lg bg-secondary/50 p-4 space-y-3">
+   578→   578→                  <h4 className="text-xs font-semibold flex items-center gap-2">
+   579→   579→                    <ArrowRightLeft className="h-3 w-3 text-red-400" /> Exit Check
+   580→   580→                  </h4>
+   581→   581→                  <div className="flex items-center justify-between text-xs">
+   582→   582→                    <Label className="text-muted-foreground">Interval (min)</Label>
+   583→   583→                    <Input type="number" value={ruleEdits.exitIntervalMin || 5}
+   584→   584→                      onChange={e => setRuleEdits({ ...ruleEdits, exitIntervalMin: parseInt(e.target.value) || 5 })}
+   585→   585→                      className="h-7 w-20 text-xs text-right" />
+   586→   586→                  </div>
+   587→   587→                  <p className="text-[10px] text-muted-foreground">
+   588→   588→                    SL/TP, {rules.atrTrailMultiplier > 0 ? 'ATR-based' : 'R-based'} trailing stop, stale loser exit, time exit, partial booking.
+   589→   589→                  </p>
+   590→   590→                </div>
+   591→   591→              </div>
+   592→   592→
+   593→   593→              {/* Timeline */}
+   594→   594→              {scheduler && (
+   595→   595→                <div className="mt-4 rounded-lg bg-secondary/30 p-3">
+   596→   596→                  <h4 className="text-[10px] text-muted-foreground uppercase mb-2">Timeline</h4>
+   597→   597→                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+   598→   598→                    <div>
+   599→   599→                      <span className="text-muted-foreground">Last Scan</span>
+   600→   600→                      <div className="font-mono text-[11px]">{scheduler.lastScanAt ? new Date(scheduler.lastScanAt).toLocaleTimeString() : '--'}</div>
+   601→   601→                    </div>
+   602→   602→                    <div>
+   603→   603→                      <span className="text-muted-foreground">Last Exit</span>
+   604→   604→                      <div className="font-mono text-[11px]">{scheduler.lastExitAt ? new Date(scheduler.lastExitAt).toLocaleTimeString() : '--'}</div>
+   605→   605→                    </div>
+   606→   606→                    <div>
+   607→   607→                      <span className="text-muted-foreground">Status</span>
+   608→   608→                      <div className={cn('font-mono text-[11px]',
+   609→   609→                        scheduler.circuitBreaker ? 'text-red-400' : scheduler.enabled ? 'text-emerald-400' : 'text-muted-foreground'
+   610→   610→                      )}>
+   611→   611→                        {scheduler.circuitBreaker ? 'HALTED' : scheduler.enabled ? 'ARMED' : 'DISARMED'}
+   612→   612→                      </div>
+   613→   613→                    </div>
+   614→   614→                    <div>
+   615→   615→                      <span className="text-muted-foreground">Regime</span>
+   616→   616→                      <div className={cn('font-mono text-[11px]',
+   617→   617→                        scheduler.niftyRegime === 'BULLISH' ? 'text-emerald-400' :
+   618→   618→                        scheduler.niftyRegime === 'BEARISH' ? 'text-red-400' : 'text-muted-foreground'
+   619→   619→                      )}>{scheduler.niftyRegime}</div>
+   620→   620→                    </div>
+   621→   621→                    <div>
+   622→   622→                      <span className="text-muted-foreground">Market</span>
+   623→   623→                      <div className={cn('font-mono text-[11px]', marketHours ? 'text-emerald-400' : 'text-red-400')}>
+   624→   624→                        {marketHours ? 'OPEN' : 'CLOSED'}
+   625→   625→                      </div>
+   626→   626→                    </div>
+   627→   627→                  </div>
+   628→   628→                </div>
+   629→   629→              )}
+   630→   630→            </CardContent>
+   631→   631→          </Card>
+   632→   632→        </TabsContent>
+   633→   633→
+   634→   634→        {/* ═══ POSITIONS TAB ══════════════════════════════ */}
+   635→   635→        <TabsContent value="positions" className="space-y-4">
+   636→   636→          <Card className="border-border">
+   637→   637→            <CardContent className="p-4">
+   638→   638→              <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+   639→   639→                <TrendingUp className="h-4 w-4" /> Open Auto-Positions ({openPositions.length})
+   640→   640→              </h3>
+   641→   641→              {openPositions.length === 0 ? (
+   642→   642→                <div className="text-center py-8">
+   643→   643→                  <p className="text-xs text-muted-foreground">No open positions. Run Scan & Trade to find entries.</p>
+   644→   644→                </div>
+   645→   645→              ) : (
+   646→   646→                <ScrollArea className="max-h-[400px]">
+   647→   647→                  <div className="space-y-2 pr-2">
+   648→   648→                    {openPositions.map(pos => {
+   649→   649→                      const days = Math.floor((Date.now() - new Date(pos.entryDate).getTime()) / 86400000);
+   650→   650→                      const risk = pos.entryPrice - pos.stopLoss;
+   651→   651→                      const agePct = rules.maxHoldingDays > 0 ? (days / rules.maxHoldingDays) * 100 : 0;
+   652→   652→                      const isPartial = pos.tags?.includes('partial-booked');
+   653→   653→                      const rMultiple = risk > 0 ? ((pos.entryPrice - pos.entryPrice) / risk) : 0; // Will be calculated live
+   654→   654→                      return (
+   655→   655→                        <div key={pos.id}
+   656→   656→                          className={cn(
+   657→   657→                            'rounded-lg p-3 cursor-pointer hover:bg-secondary/80 transition',
+   658→   658→                            agePct >= 80 ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-secondary/50'
+   659→   659→                          )}
+   660→   660→                          onClick={() => setChartSymbol(pos.symbol)}>
+   661→   661→                          <div className="flex items-center justify-between">
+   662→   662→                            <div className="flex items-center gap-2">
+   663→   663→                              <span className="font-semibold text-sm">{pos.symbol}</span>
+   664→   664→                              <Badge variant="outline" className="text-[10px] h-4">AUTO</Badge>
+   665→   665→                              {isPartial && <Badge variant="outline" className="text-[10px] h-4 text-amber-400 border-amber-500/30">PARTIAL</Badge>}
+   666→   666→                            </div>
+   667→   667→                            <div className="flex items-center gap-2">
+   668→   668→                              <span className={cn('text-[10px]', agePct >= 80 ? 'text-amber-400 font-bold' : 'text-muted-foreground')}>
+   669→   669→                                {days}/{rules.maxHoldingDays}d
+   670→   670→                              </span>
+   671→   671→                              <span className="text-xs font-mono">₹{pos.entryPrice}</span>
+   672→   672→                              <span className="text-[10px] text-muted-foreground">x{pos.qty}</span>
+   673→   673→                            </div>
+   674→   674→                          </div>
+   675→   675→                          <div className="mt-2 flex items-center gap-4 text-[10px]">
+   676→   676→                            <span className="text-red-400">SL: ₹{pos.stopLoss}</span>
+   677→   677→                            <span className="text-emerald-400">TP: ₹{pos.targetPrice}</span>
+   678→   678→                            <span className="text-muted-foreground">
+   679→   679→                              Risk: ₹{risk > 0 ? (risk * pos.qty).toLocaleString() : 'N/A'}
+   680→   680→                            </span>
+   681→   681→                            <span className="text-muted-foreground">
+   682→   682→                              {risk > 0 ? `R:R ${(Math.abs(pos.targetPrice - pos.entryPrice) / risk).toFixed(1)}x` : ''}
+   683→   683→                            </span>
+   684→   684→                            {/* v2: Show which factors are in tags */}
+   685→   685→                            {pos.tags && (
+   686→   686→                              <div className="flex gap-1 ml-auto">
+   687→   687→                                {pos.tags.split(',').filter(t => ['aplus', 'b'].includes(t)).map(t => (
+   688→   688→                                  <Badge key={t} variant="outline" className={cn('text-[9px] h-4',
+   689→   689→                                    t === 'aplus' ? 'text-emerald-400 border-emerald-500/30' : 'text-blue-400 border-blue-500/30'
+   690→   690→                                  )}>{t.toUpperCase()}</Badge>
+   691→   691→                                ))}
+   692→   692→                              </div>
+   693→   693→                            )}
+   694→   694→                          </div>
+   695→   695→                          {/* Aging bar */}
+   696→   696→                          {agePct >= 50 && (
+   697→   697→                            <div className="mt-2 h-1 rounded-full bg-secondary overflow-hidden">
+   698→   698→                              <div className={cn('h-full rounded-full transition-all', agePct >= 80 ? 'bg-amber-400' : 'bg-blue-400')}
+   699→   699→                                style={{ width: `${Math.min(100, agePct)}%` }} />
+   700→   700→                            </div>
+   701→   701→                          )}
+   702→   702→                        </div>
+   703→   703→                      );
+   704→   704→                    })}
+   705→   705→                  </div>
+   706→   706→                </ScrollArea>
+   707→   707→              )}
+   708→   708→            </CardContent>
+   709→   709→          </Card>
+   710→   710→
+   711→   711→          {chartSymbol && (
+   712→   712→            <Card className="border-border">
+   713→   713→              <CardContent className="p-4">
+   714→   714→                <div className="flex items-center justify-between mb-3">
+   715→   715→                  <h3 className="text-sm font-semibold">{chartSymbol} — TradingView</h3>
+   716→   716→                  <Button variant="ghost" size="sm" onClick={() => setChartSymbol(null)} className="h-7 text-xs">Close</Button>
+   717→   717→                </div>
+   718→   718→                <TradingViewChart symbol={chartSymbol} height={450} />
+   719→   719→              </CardContent>
+   720→   720→            </Card>
+   721→   721→          )}
+   722→   722→        </TabsContent>
+   723→   723→
+   724→   724→        {/* ═══ AUDIT LOG TAB ══════════════════════════════ */}
+   725→   725→        <TabsContent value="audit" className="space-y-4">
+   726→   726→          <Card className="border-border">
+   727→   727→            <CardContent className="p-4">
+   728→   728→              <div className="flex items-center justify-between mb-3">
+   729→   729→                <h3 className="text-sm font-semibold flex items-center gap-2">
+   730→   730→                  <FileText className="h-4 w-4 text-primary" /> Execution Audit Log
+   731→   731→                </h3>
+   732→   732→                <div className="flex items-center gap-2">
+   733→   733→                  <Button variant="ghost" size="sm" onClick={() => setShowAllLogs(!showAllLogs)} className="h-7 text-xs gap-1">
+   734→   734→                    {showAllLogs ? 'Recent' : 'All'}
+   735→   735→                  </Button>
+   736→   736→                  <Button variant="ghost" size="sm" onClick={fetchStatus} className="h-7 text-xs gap-1">
+   737→   737→                    <RefreshCw className="h-3 w-3" /> Refresh
+   738→   738→                  </Button>
+   739→   739→                </div>
+   740→   740→              </div>
+   741→   741→              <ScrollArea className="max-h-[500px]">
+   742→   742→                <div className="space-y-1 pr-2">
+   743→   743→                  {(showAllLogs ? logs : logs.slice(0, 30)).map((log) => {
+   744→   744→                    const isEntry = log.action.includes('ENTRY');
+   745→   745→                    const isExit = log.action.includes('EXIT');
+   746→   746→                    const isPartial = log.action === 'PARTIAL_BOOK';
+   747→   747→                    return (
+   748→   748→                      <div key={log.id}
+   749→   749→                        className="flex items-start gap-2 text-xs py-2 px-2 rounded-lg hover:bg-secondary/30 cursor-pointer border-b border-border/30 last:border-0"
+   750→   750→                        onClick={() => setSelectedLog(log)}>
+   751→   751→                        <div className="mt-0.5 shrink-0">
+   752→   752→                          {isEntry ? <Plus className="h-3 w-3 text-emerald-400" /> :
+   753→   753→                           isPartial ? <Minus className="h-3 w-3 text-amber-400" /> :
+   754→   754→                           isExit ? <XCircle className="h-3 w-3 text-red-400" /> :
+   755→   755→                           <RefreshCw className="h-3 w-3 text-muted-foreground" />}
+   756→   756→                        </div>
+   757→   757→                        <div className="flex-1 min-w-0">
+   758→   758→                          <div className="flex items-center gap-1.5">
+   759→   759→                            <span className="font-semibold">{log.symbol}</span>
+   760→   760→                            <Badge variant="outline" className={cn('text-[9px] h-3.5 px-1',
+   761→   761→                              isEntry ? 'text-emerald-400' : isPartial ? 'text-amber-400' : isExit ? 'text-red-400' : 'text-muted-foreground'
+   762→   762→                            )}>
+   763→   763→                              {log.action.replace('AUTO_', '')}
+   764→   764→                            </Badge>
+   765→   765→                            {log.executed ? <CheckCircle2 className="h-3 w-3 text-emerald-400/50" /> : <XCircle className="h-3 w-3 text-red-400/50" />}
+   766→   766→                          </div>
+   767→   767→                          <p className="text-muted-foreground truncate">{log.reason}</p>
+   768→   768→                        </div>
+   769→   769→                        <span className="text-muted-foreground shrink-0 text-[10px]">
+   770→   770→                          {new Date(log.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+   771→   771→                        </span>
+   772→   772→                      </div>
+   773→   773→                    );
+   774→   774→                  })}
+   775→   775→                </div>
+   776→   776→              </ScrollArea>
+   777→   777→            </CardContent>
+   778→   778→          </Card>
+   779→   779→        </TabsContent>
+   780→   780→
+   781→   781→        {/* ═══ RULES TAB ══════════════════════════════════ */}
+   782→   782→        <TabsContent value="rules" className="space-y-4">
+   783→   783→          <Card className="border-border">
+   784→   784→            <CardContent className="p-4">
+   785→   785→              <div className="flex items-center justify-between mb-4">
+   786→   786→                <h3 className="text-sm font-semibold flex items-center gap-2">
+   787→   787→                  <Settings className="h-4 w-4" /> Position & Risk Rules
+   788→   788→                </h3>
+   789→   789→                {!editingRules ? (
+   790→   790→                  <Button variant="ghost" size="sm" onClick={() => { setRuleEdits({ ...rules }); setEditingRules(true); }} className="h-7 text-xs">Edit</Button>
+   791→   791→                ) : (
+   792→   792→                  <div className="flex gap-2">
+   793→   793→                    <Button size="sm" onClick={saveRules} className="h-7 text-xs">Save</Button>
+   794→   794→                    <Button size="sm" variant="ghost" onClick={() => setEditingRules(false)} className="h-7 text-xs">Cancel</Button>
+   795→   795→                  </div>
+   796→   796→                )}
+   797→   797→              </div>
+   798→   798→
+   799→   799→              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+   800→   800→                {/* Position Sizing */}
+   801→   801→                <div className="space-y-2">
+   802→   802→                  <h4 className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Position Sizing</h4>
+   803→   803→                  {editingRules ? [
+   804→   804→                    { key: 'maxPerStock', label: 'Max/Stock (₹)', type: 'number' as const },
+   805→   805→                    { key: 'maxTotalPositions', label: 'Max Positions', type: 'number' as const },
+   806→   806→                    { key: 'riskPerTradePct', label: 'Risk/Trade (%)', type: 'number' as const },
+   807→   807→                    { key: 'maxBuysPerMonth', label: 'Buys/Month/Stock', type: 'number' as const },
+   808→   808→                    { key: 'maxSectorPct', label: 'Sector Cap (%)', type: 'number' as const },
+   809→   809→                  ].map(f => (
+   810→   810→                    <div key={f.key} className="flex items-center justify-between text-xs">
+   811→   811→                      <Label className="text-muted-foreground">{f.label}</Label>
+   812→   812→                      <Input type={f.type} value={(ruleEdits as any)[f.key]}
+   813→   813→                        onChange={e => setRuleEdits({ ...ruleEdits, [f.key]: f.type === 'number' ? (parseFloat(e.target.value) || 0) : e.target.value })}
+   814→   814→                        className="h-7 w-24 text-xs text-right" />
+   815→   815→                    </div>
+   816→   816→                  )) : [
+   817→   817→                    { l: 'Max/Stock', v: `₹${rules.maxPerStock.toLocaleString()}` },
+   818→   818→                    { l: 'Max Positions', v: String(rules.maxTotalPositions) },
+   819→   819→                    { l: 'Risk/Trade', v: `${rules.riskPerTradePct}%` },
+   820→   820→                    { l: 'Buys/Month', v: String(rules.maxBuysPerMonth) },
+   821→   821→                    { l: 'Sector Cap', v: `${rules.maxSectorPct}%` },
+   822→   822→                  ].map(r => (
+   823→   823→                    <div key={r.l} className="flex justify-between text-xs">
+   824→   824→                      <span className="text-muted-foreground">{r.l}</span><span className="font-mono">{r.v}</span>
+   825→   825→                    </div>
+   826→   826→                  ))}
+   827→   827→                </div>
+   828→   828→
+   829→   829→                {/* Exit Management */}
+   830→   830→                <div className="space-y-2">
+   831→   831→                  <h4 className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Exit Management</h4>
+   832→   832→                  {editingRules ? [
+   833→   833→                    { key: 'maxHoldingDays', label: 'Max Holding (d)' },
+   834→   834→                    { key: 'trailingStopR', label: 'Trail Start (R)' },
+   835→   835→                    { key: 'trailToR', label: 'Trail To (R)' },
+   836→   836→                    { key: 'atrTrailMultiplier', label: 'ATR Trail Mult' },
+   837→   837→                    { key: 'partialBookR', label: 'Partial At (R)' },
+   838→   838→                    { key: 'partialBookPct', label: 'Partial Book %' },
+   839→   839→                    { key: 'cooldownDays', label: 'Cooldown (d)' },
+   840→   840→                    { key: 'timeExitMins', label: 'Time Exit (min)' },
+   841→   841→                  ].map(f => (
+   842→   842→                    <div key={f.key} className="flex items-center justify-between text-xs">
+   843→   843→                      <Label className="text-muted-foreground">{f.label}</Label>
+   844→   844→                      <Input type="number" value={(ruleEdits as any)[f.key]}
+   845→   845→                        onChange={e => setRuleEdits({ ...ruleEdits, [f.key]: parseFloat(e.target.value) || 0 })}
+   846→   846→                        className="h-7 w-24 text-xs text-right" />
+   847→   847→                    </div>
+   848→   848→                  )) : [
+   849→   849→                    { l: 'Max Holding', v: `${rules.maxHoldingDays}d` },
+   850→   850→                    { l: 'Trail Start', v: `${rules.trailingStopR}R` },
+   851→   851→                    { l: 'Trail To', v: `${rules.trailToR}R` },
+   852→   852→                    { l: 'ATR Trail', v: `${rules.atrTrailMultiplier}x ATR` },
+   853→   853→                    { l: 'Partial', v: `${rules.partialBookPct}% @ ${rules.partialBookR}R` },
+   854→   854→                    { l: 'Cooldown', v: `${rules.cooldownDays}d` },
+   855→   855→                    { l: 'Time Exit', v: `${rules.timeExitMins}m` },
+   856→   856→                  ].map(r => (
+   857→   857→                    <div key={r.l} className="flex justify-between text-xs">
+   858→   858→                      <span className="text-muted-foreground">{r.l}</span><span className="font-mono">{r.v}</span>
+   859→   859→                    </div>
+   860→   860→                  ))}
+   861→   861→                </div>
+   862→   862→
+   863→   863→                {/* v2: Risk Controls */}
+   864→   864→                <div className="space-y-2">
+   865→   865→                  <h4 className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold flex items-center gap-1">
+   866→   866→                    <ShieldAlert className="h-3 w-3" /> v2 Risk Controls
+   867→   867→                  </h4>
+   868→   868→                  {editingRules ? [
+   869→   869→                    { key: 'maxDrawdownPct', label: 'Max Drawdown (%)', type: 'number' as const },
+   870→   870→                    { key: 'dailyLossLimit', label: 'Daily Loss (₹)', type: 'number' as const },
+   871→   871→                    { key: 'niftyRegimeFilter', label: 'Nifty Regime', type: 'toggle' as const },
+   872→   872→                    { key: 'adaptiveSizing', label: 'Adaptive Sizing', type: 'toggle' as const },
+   873→   873→                    { key: 'streakPenaltyPct', label: 'Streak Penalty (%)', type: 'number' as const },
+   874→   874→                  ].map(f => (
+   875→   875→                    <div key={f.key} className="flex items-center justify-between text-xs">
+   876→   876→                      <Label className="text-muted-foreground">{f.label}</Label>
+   877→   877→                      {f.type === 'toggle' ? (
+   878→   878→                        <Switch checked={(ruleEdits as any)[f.key] as boolean}
+   879→   879→                          onCheckedChange={v => setRuleEdits({ ...ruleEdits, [f.key]: v })} className="scale-75" />
+   880→   880→                      ) : (
+   881→   881→                        <Input type="number" value={(ruleEdits as any)[f.key]}
+   882→   882→                          onChange={e => setRuleEdits({ ...ruleEdits, [f.key]: parseFloat(e.target.value) || 0 })}
+   883→   883→                          className="h-7 w-24 text-xs text-right" />
+   884→   884→                      )}
+   885→   885→                    </div>
+   886→   886→                  )) : [
+   887→   887→                    { l: 'Max DD', v: `${rules.maxDrawdownPct}%`, warn: (drawdown?.drawdownPct || 0) >= rules.maxDrawdownPct * 0.7 },
+   888→   888→                    { l: 'Daily Limit', v: `₹${rules.dailyLossLimit.toLocaleString()}` },
+   889→   889→                    { l: 'Regime Filter', v: rules.niftyRegimeFilter ? 'ON' : 'OFF', active: rules.niftyRegimeFilter },
+   890→   890→                    { l: 'Adaptive', v: rules.adaptiveSizing ? 'ON' : 'OFF', active: rules.adaptiveSizing },
+   891→   891→                    { l: 'Streak Penalty', v: `${rules.streakPenaltyPct}%/loss` },
+   892→   892→                  ].map(r => (
+   893→   893→                    <div key={r.l} className="flex justify-between text-xs">
+   894→   894→                      <span className="text-muted-foreground">{r.l}</span>
+   895→   895→                      <span className={cn('font-mono', r.warn ? 'text-red-400 font-bold' : r.active ? 'text-emerald-400' : '')}>{r.v}</span>
+   896→   896→                    </div>
+   897→   897→                  ))}
+   898→   898→                </div>
+   899→   899→              </div>
+   900→   900→            </CardContent>
+   901→   901→          </Card>
+   902→   902→        </TabsContent>
+   903→   903→      </Tabs>
+   904→   904→
+   905→   905→      {/* Log Detail Dialog */}
+   906→   906→      <Dialog open={!!selectedLog} onOpenChange={() => setSelectedLog(null)}>
+   907→   907→        <DialogContent className="sm:max-w-lg">
+   908→   908→          <DialogHeader>
+   909→   909→            <DialogTitle className="flex items-center gap-2">
+   910→   910→              <FileText className="h-4 w-4" />
+   911→   911→              {selectedLog?.symbol} — {selectedLog?.action.replace('AUTO_', '')}
+   912→   912→            </DialogTitle>
+   913→   913→          </DialogHeader>
+   914→   914→          {selectedLog && (
+   915→   915→            <div className="space-y-3 text-xs">
+   916→   916→              <div className="grid grid-cols-2 gap-2">
+   917→   917→                <div className="rounded bg-secondary/50 p-2">
+   918→   918→                  <div className="text-[10px] text-muted-foreground">Action</div>
+   919→   919→                  <div className="font-mono">{selectedLog.action}</div>
+   920→   920→                </div>
+   921→   921→                <div className="rounded bg-secondary/50 p-2">
+   922→   922→                  <div className="text-[10px] text-muted-foreground">Executed</div>
+   923→   923→                  <div className={selectedLog.executed ? 'text-emerald-400' : 'text-red-400'}>
+   924→   924→                    {selectedLog.executed ? 'Yes' : 'No'}
+   925→   925→                  </div>
+   926→   926→                </div>
+   927→   927→                <div className="rounded bg-secondary/50 p-2 col-span-2">
+   928→   928→                  <div className="text-[10px] text-muted-foreground">Time</div>
+   929→   929→                  <div className="font-mono">{new Date(selectedLog.createdAt).toLocaleString()}</div>
+   930→   930→                </div>
+   931→   931→              </div>
+   932→   932→              <div className="rounded bg-secondary/50 p-2">
+   933→   933→                <div className="text-[10px] text-muted-foreground mb-1">Reason</div>
+   934→   934→                <div className="text-[11px]">{selectedLog.reason}</div>
+   935→   935→              </div>
+   936→   936→              {selectedLog.signal && (
+   937→   937→                <div className="rounded bg-secondary/50 p-2">
+   938→   938→                  <div className="text-[10px] text-muted-foreground mb-1">Signal Details</div>
+   939→   939→                  <pre className="text-[10px] text-muted-foreground overflow-auto max-h-[200px] whitespace-pre-wrap">
+   940→   940→                    {(() => { try { return JSON.stringify(JSON.parse(selectedLog.signal), null, 2); } catch { return selectedLog.signal; } })()}
+   941→   941→                  </pre>
+   942→   942→                </div>
+   943→   943→              )}
+   944→   944→            </div>
+   945→   945→          )}
+   946→   946→          <DialogFooter>
+   947→   947→            <DialogClose asChild><Button variant="ghost" size="sm">Close</Button></DialogClose>
+   948→   948→          </DialogFooter>
+   949→   949→        </DialogContent>
+   950→   950→      </Dialog>
+   951→   951→    </div>
+   952→   952→  );
+   953→   953→}

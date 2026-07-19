@@ -1,0 +1,598 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→import { useState, useEffect, useCallback } from 'react';
+     4→     4→import { Card, CardContent } from '@/components/ui/card';
+     5→     5→import { Button } from '@/components/ui/button';
+     6→     6→import { Badge } from '@/components/ui/badge';
+     7→     7→import { ScrollArea } from '@/components/ui/scroll-area';
+     8→     8→import {
+     9→     9→  TrendingUp, TrendingDown, Briefcase, Wallet, PieChart as PieIcon,
+    10→    10→  RefreshCw, ArrowRight, Activity, Bell, Shield, AlertTriangle,
+    11→    11→  Clock, Zap, Target, Flame, ChevronDown, ChevronUp,
+    12→    12→} from 'lucide-react';
+    13→    13→import {
+    14→    14→  PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LineChart, Line, Legend,
+    15→    15→} from 'recharts';
+    16→    16→import { cn } from '@/lib/utils';
+    17→    17→import { useTradeStore } from '@/store/trade-store';
+    18→    18→
+    19→    19→const SECTOR_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899', '#8b5cf6', '#14b8a6', '#f97316', '#64748b'];
+    20→    20→
+    21→    21→interface SummaryData {
+    22→    22→  summary: {
+    23→    23→    totalPositions: number; totalInvested: number; totalCurrentValue: number;
+    24→    24→    unrealizedPnl: number; realizedPnl: number; totalPnl: number;
+    25→    25→    returnPct: number; winRate: number; totalTrades: number;
+    26→    26→    wallet: any;
+    27→    27→  };
+    28→    28→  positions: any[];
+    29→    29→  sectorAllocation: { sector: string; value: number; pct: number }[];
+    30→    30→}
+    31→    31→
+    32→    32→interface WatchlistQuote {
+    33→    33→  symbol: string; name: string; sector: string | null;
+    34→    34→  price: number; change: number; changePercent: number;
+    35→    35→}
+    36→    36→
+    37→    37→interface SchedulerInfo {
+    38→    38→  enabled: boolean; todayEntries: number; todayExits: number; todayPnl: number; scanCount: number;
+    39→    39→}
+    40→    40→
+    41→    41→export function DashboardTab() {
+    42→    42→  const { setActiveTab } = useTradeStore();
+    43→    43→  const [data, setData] = useState<SummaryData | null>(null);
+    44→    44→  const [quotes, setQuotes] = useState<WatchlistQuote[]>([]);
+    45→    45→  const [alerts, setAlerts] = useState<any[]>([]);
+    46→    46→  const [logs, setLogs] = useState<any[]>([]);
+    47→    47→  const [benchmark, setBenchmark] = useState<any>(null);
+    48→    48→  const [loading, setLoading] = useState(true);
+    49→    49→  const [autoStatus, setAutoStatus] = useState<any>(null);
+    50→    50→  const [showDailyReturns, setShowDailyReturns] = useState(false);
+    51→    51→  const [riskMetrics, setRiskMetrics] = useState<any>(null);
+    52→    52→  const [periodReturns, setPeriodReturns] = useState<any>(null);
+    53→    53→
+    54→    54→  const safeJson = async (res: Response) => {
+    55→    55→    try { return await res.json(); } catch { return null; }
+    56→    56→  };
+    57→    57→
+    58→    58→  const fetchAll = useCallback(async () => {
+    59→    59→    setLoading(true);
+    60→    60→    try {
+    61→    61→      const [sumRes, mdRes, atRes, alRes, bmRes, rmRes] = await Promise.all([
+    62→    62→        fetch('/api/portfolio/summary').catch(() => null),
+    63→    63→        fetch('/api/market-data').catch(() => null),
+    64→    64→        fetch('/api/auto-trade').catch(() => null),
+    65→    65→        fetch('/api/portfolio/alerts').catch(() => null),
+    66→    66→        fetch('/api/portfolio/benchmark?days=60').catch(() => null),
+    67→    67→        fetch('/api/portfolio/risk-metrics').catch(() => null),
+    68→    68→      ]);
+    69→    69→      const [sum, md, at, al, bm, rm] = await Promise.all([
+    70→    70→        sumRes ? safeJson(sumRes) : null,
+    71→    71→        mdRes ? safeJson(mdRes) : null,
+    72→    72→        atRes ? safeJson(atRes) : null,
+    73→    73→        alRes ? safeJson(alRes) : null,
+    74→    74→        bmRes ? safeJson(bmRes) : null,
+    75→    75→        rmRes ? safeJson(rmRes) : null,
+    76→    76→      ]);
+    77→    77→      if (sum?.success) setData(sum);
+    78→    78→      if (md?.success) setQuotes(md.quotes || []);
+    79→    79→      if (at?.success) {
+    80→    80→        setLogs(at.recentLogs || []);
+    81→    81→        setAutoStatus(at.scheduler || null);
+    82→    82→      }
+    83→    83→      if (al?.success) setAlerts((al.alerts || []).filter((a: any) => a.active && !a.triggered));
+    84→    84→      if (bm?.success) setBenchmark(bm.benchmark);
+    85→    85→      if (rm?.success) setRiskMetrics(rm);
+    86→    86→
+    87→    87→      // Calculate period returns from closed trades
+    88→    88→      if (sum?.success) {
+    89→    89→        try {
+    90→    90→          const tradesRes = await fetch('/api/trades').catch(() => null);
+    91→    91→          if (tradesRes) {
+    92→    92→            const trades = await safeJson(tradesRes);
+    93→    93→            if (trades?.success) {
+    94→    94→              const closed = (trades.trades || []).filter((t: any) => t.status === 'CLOSED' && t.exitDate && t.pnl != null);
+    95→    95→              const now = new Date();
+    96→    96→              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    97→    97→              const weekAgo = today - 7 * 86400000;
+    98→    98→              const monthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()).getTime();
+    99→    99→              let dailyPnl = 0, weeklyPnl = 0, monthlyPnl = 0;
+   100→   100→              for (const t of closed) {
+   101→   101→                const exitTime = new Date(t.exitDate).getTime();
+   102→   102→                if (exitTime >= today) dailyPnl += t.pnl;
+   103→   103→                if (exitTime >= weekAgo) weeklyPnl += t.pnl;
+   104→   104→                if (exitTime >= monthAgo) monthlyPnl += t.pnl;
+   105→   105→              }
+   106→   106→              setPeriodReturns({ dailyPnl, weeklyPnl, monthlyPnl });
+   107→   107→            }
+   108→   108→          }
+   109→   109→        } catch { /* ignore trades fetch failure */ }
+   110→   110→      }
+   111→   111→    } catch (err) {
+   112→   112→      console.error('Dashboard fetch error:', err);
+   113→   113→    } finally {
+   114→   114→      setLoading(false);
+   115→   115→    }
+   116→   116→  }, []);
+   117→   117→
+   118→   118→  useEffect(() => { fetchAll(); }, [fetchAll]);
+   119→   119→
+   120→   120→  // Auto-refresh every 30 seconds for PMS live feel
+   121→   121→  useEffect(() => {
+   122→   122→    const iv = setInterval(fetchAll, 30000);
+   123→   123→    return () => clearInterval(iv);
+   124→   124→  }, [fetchAll]);
+   125→   125→
+   126→   126→  if (loading) {
+   127→   127→    return (
+   128→   128→      <div className="flex items-center justify-center py-20">
+   129→   129→        <div className="text-center text-muted-foreground">
+   130→   130→          <RefreshCw className="h-6 w-6 mx-auto mb-2 animate-spin" />
+   131→   131→          <p className="text-sm">Loading portfolio...</p>
+   132→   132→        </div>
+   133→   133→      </div>
+   134→   134→    );
+   135→   135→  }
+   136→   136→
+   137→   137→  const s = data?.summary;
+   138→   138→  const positions = data?.positions || [];
+   139→   139→  const sectors = data?.sectorAllocation || [];
+   140→   140→  const wallet = s?.wallet;
+   141→   141→  const portfolioValue = s ? (wallet?.totalCapital || 200000) : 200000;
+   142→   142→  const totalPnl = s?.totalPnl || 0;
+   143→   143→  const pr = periodReturns || { dailyPnl: 0, weeklyPnl: 0, monthlyPnl: 0 };
+   144→   144→
+   145→   145→  // Portfolio heat (utilization)
+   146→   146→  const utilization = wallet ? ((wallet.deployed / wallet.totalCapital) * 100) : 0;
+   147→   147→  const heatColor = utilization > 80 ? 'text-red-400' : utilization > 60 ? 'text-amber-400' : 'text-emerald-400';
+   148→   148→  const heatBg = utilization > 80 ? 'bg-red-500/10 border-red-500/20' : utilization > 60 ? 'bg-amber-500/10 border-amber-500/20' : 'bg-emerald-500/10 border-emerald-500/20';
+   149→   149→
+   150→   150→  // Max drawdown from risk metrics
+   151→   151→  const maxDD = riskMetrics?.maxDrawdown || 0;
+   152→   152→
+   153→   153→  // XIRR approximation (simplified)
+   154→   154→  const xirr = portfolioValue > 0 && wallet ? (((portfolioValue - wallet.totalCapital + wallet.realizedPnl) / wallet.totalCapital) * 100) / Math.max(1, (s?.totalTrades || 0) / 12) : 0;
+   155→   155→
+   156→   156→  return (
+   157→   157→    <div className="space-y-4">
+   158→   158→      {/* Market Status Banner */}
+   159→   159→      {autoStatus?.marketHours === false && (
+   160→   160→        <Card className="border-amber-500/30 bg-amber-500/5">
+   161→   161→          <CardContent className="p-3 flex items-center gap-3">
+   162→   162→            <Clock className="h-4 w-4 text-amber-400 shrink-0" />
+   163→   163→            <div className="flex-1">
+   164→   164→              <span className="text-xs font-medium text-amber-400">Market Closed</span>
+   165→   165→              <span className="text-xs text-muted-foreground ml-2">Automated scanning will resume during market hours (9:15 AM - 3:30 PM IST)</span>
+   166→   166→            </div>
+   167→   167→            {autoStatus?.timeToClose != null && autoStatus.marketHours && (
+   168→   168→              <Badge variant="outline" className="text-[10px] h-5">{autoStatus.timeToClose}m to close</Badge>
+   169→   169→            )}
+   170→   170→          </CardContent>
+   171→   171→        </Card>
+   172→   172→      )}
+   173→   173→
+   174→   174→      {/* PMS KPI Cards — Row 1: Core Portfolio Metrics */}
+   175→   175→      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+   176→   176→        <Card className="border-border">
+   177→   177→          <CardContent className="p-4">
+   178→   178→            <div className="flex items-center gap-2 text-muted-foreground mb-1">
+   179→   179→              <Wallet className="h-3.5 w-3.5" />
+   180→   180→              <span className="text-[10px] uppercase tracking-wider">Portfolio Value</span>
+   181→   181→            </div>
+   182→   182→            <div className="text-2xl font-bold font-mono">₹{Math.round(portfolioValue).toLocaleString()}</div>
+   183→   183→            <div className="text-[10px] text-muted-foreground mt-1">
+   184→   184→              Capital: ₹{(wallet?.totalCapital || 200000).toLocaleString()}
+   185→   185→            </div>
+   186→   186→          </CardContent>
+   187→   187→        </Card>
+   188→   188→
+   189→   189→        <Card className="border-border">
+   190→   190→          <CardContent className="p-4">
+   191→   191→            <div className="flex items-center gap-2 text-muted-foreground mb-1">
+   192→   192→              <TrendingUp className="h-3.5 w-3.5" />
+   193→   193→              <span className="text-[10px] uppercase tracking-wider">Total P&L</span>
+   194→   194→            </div>
+   195→   195→            <div className={cn('text-2xl font-bold font-mono', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   196→   196→              {totalPnl >= 0 ? '+' : ''}₹{Math.round(totalPnl).toLocaleString()}
+   197→   197→            </div>
+   198→   198→            <div className={cn('text-xs mt-1', s?.returnPct >= 0 ? 'text-emerald-400/70' : 'text-red-400/70')}>
+   199→   199→              {s ? `${s.returnPct >= 0 ? '+' : ''}${s.returnPct.toFixed(2)}% overall` : ''}
+   200→   200→            </div>
+   201→   201→          </CardContent>
+   202→   202→        </Card>
+   203→   203→
+   204→   204→        <Card className="border-border">
+   205→   205→          <CardContent className="p-4">
+   206→   206→            <div className="flex items-center gap-2 text-muted-foreground mb-1">
+   207→   207→              <Target className="h-3.5 w-3.5" />
+   208→   208→              <span className="text-[10px] uppercase tracking-wider">Win Rate</span>
+   209→   209→            </div>
+   210→   210→            <div className="text-2xl font-bold font-mono text-indigo-400">
+   211→   211→              {s ? `${s.winRate.toFixed(1)}%` : '--'}
+   212→   212→            </div>
+   213→   213→            <div className="text-[10px] text-muted-foreground mt-1">
+   214→   214→              {s?.totalTrades || 0} closed trades
+   215→   215→            </div>
+   216→   216→          </CardContent>
+   217→   217→        </Card>
+   218→   218→
+   219→   219→        <Card className="border-border">
+   220→   220→          <CardContent className="p-4">
+   221→   221→            <div className="flex items-center gap-2 text-muted-foreground mb-1">
+   222→   222→              <Flame className="h-3.5 w-3.5" />
+   223→   223→              <span className="text-[10px] uppercase tracking-wider">Max Drawdown</span>
+   224→   224→            </div>
+   225→   225→            <div className="text-2xl font-bold font-mono text-red-400">
+   226→   226→              {maxDD > 0 ? `-${maxDD.toFixed(2)}%` : '--'}
+   227→   227→            </div>
+   228→   228→            <div className="text-[10px] text-muted-foreground mt-1">
+   229→   229→              {riskMetrics?.sharpe ? `Sharpe: ${riskMetrics.sharpe.toFixed(2)}` : 'Need more trades'}
+   230→   230→            </div>
+   231→   231→          </CardContent>
+   232→   232→        </Card>
+   233→   233→      </div>
+   234→   234→
+   235→   235→      {/* PMS KPI Cards — Row 2: Period Returns + Utilization */}
+   236→   236→      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+   237→   237→        <Card className={cn('border', heatBg)}>
+   238→   238→          <CardContent className="p-3">
+   239→   239→            <div className="text-[10px] text-muted-foreground uppercase">Capital Deployed</div>
+   240→   240→            <div className={cn('text-lg font-bold font-mono mt-0.5', heatColor)}>
+   241→   241→              {utilization.toFixed(1)}%
+   242→   242→            </div>
+   243→   243→            <div className="text-[10px] text-muted-foreground">
+   244→   244→              ₹{(wallet?.deployed || 0).toLocaleString()} of ₹{(wallet?.totalCapital || 0).toLocaleString()}
+   245→   245→            </div>
+   246→   246→          </CardContent>
+   247→   247→        </Card>
+   248→   248→
+   249→   249→        <Card className="border-border">
+   250→   250→          <CardContent className="p-3">
+   251→   251→            <div className="text-[10px] text-muted-foreground uppercase">Today</div>
+   252→   252→            <div className={cn('text-lg font-bold font-mono mt-0.5', pr.dailyPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   253→   253→              {pr.dailyPnl >= 0 ? '+' : ''}₹{Math.round(pr.dailyPnl).toLocaleString()}
+   254→   254→            </div>
+   255→   255→            <div className="text-[10px] text-muted-foreground">
+   256→   256→              {autoStatus ? `${autoStatus.todayEntries} entries, ${autoStatus.todayExits} exits` : ''}
+   257→   257→            </div>
+   258→   258→          </CardContent>
+   259→   259→        </Card>
+   260→   260→
+   261→   261→        <Card className="border-border">
+   262→   262→          <CardContent className="p-3">
+   263→   263→            <div className="text-[10px] text-muted-foreground uppercase">This Week</div>
+   264→   264→            <div className={cn('text-lg font-bold font-mono mt-0.5', pr.weeklyPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   265→   265→              {pr.weeklyPnl >= 0 ? '+' : ''}₹{Math.round(pr.weeklyPnl).toLocaleString()}
+   266→   266→            </div>
+   267→   267→          </CardContent>
+   268→   268→        </Card>
+   269→   269→
+   270→   270→        <Card className="border-border">
+   271→   271→          <CardContent className="p-3">
+   272→   272→            <div className="text-[10px] text-muted-foreground uppercase">This Month</div>
+   273→   273→            <div className={cn('text-lg font-bold font-mono mt-0.5', pr.monthlyPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   274→   274→              {pr.monthlyPnl >= 0 ? '+' : ''}₹{Math.round(pr.monthlyPnl).toLocaleString()}
+   275→   275→            </div>
+   276→   276→          </CardContent>
+   277→   277→        </Card>
+   278→   278→
+   279→   279→        <Card className="border-border">
+   280→   280→          <CardContent className="p-3">
+   281→   281→            <div className="text-[10px] text-muted-foreground uppercase">Realized P&L</div>
+   282→   282→            <div className={cn('text-lg font-bold font-mono mt-0.5', (s?.realizedPnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   283→   283→              {(s?.realizedPnl || 0) >= 0 ? '+' : ''}₹{Math.round(s?.realizedPnl || 0).toLocaleString()}
+   284→   284→            </div>
+   285→   285→            <div className="text-[10px] text-muted-foreground">
+   286→   286→              Unreal: {s ? `${s.unrealizedPnl >= 0 ? '+' : ''}₹${Math.round(s.unrealizedPnl).toLocaleString()}` : ''}
+   287→   287→            </div>
+   288→   288→          </CardContent>
+   289→   289→        </Card>
+   290→   290→      </div>
+   291→   291→
+   292→   292→      {/* Benchmark Mini-Chart: Portfolio vs Nifty */}
+   293→   293→      {benchmark && benchmark.chartData?.length > 0 && (
+   294→   294→        <Card className="border-border">
+   295→   295→          <CardContent className="p-4">
+   296→   296→            <div className="flex items-center justify-between mb-2">
+   297→   297→              <h3 className="text-sm font-semibold flex items-center gap-2">
+   298→   298→                <TrendingUp className="h-4 w-4 text-primary" />
+   299→   299→                vs Nifty 50
+   300→   300→              </h3>
+   301→   301→              <div className="flex gap-3 text-xs">
+   302→   302→                <span className={cn('font-mono', (benchmark.portfolioTotalReturn || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   303→   303→                  Portfolio: {benchmark.portfolioTotalReturn >= 0 ? '+' : ''}₹{(benchmark.portfolioTotalReturn || 0).toLocaleString()}
+   304→   304→                </span>
+   305→   305→                <span className={cn('font-mono', (benchmark.niftyTotalReturn || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   306→   306→                  Nifty: {benchmark.niftyTotalReturn >= 0 ? '+' : ''}{(benchmark.niftyTotalReturn || 0).toFixed(2)}%
+   307→   307→                </span>
+   308→   308→                {benchmark.alpha != null && (
+   309→   309→                  <Badge variant="outline" className={cn('text-[9px] h-4', (benchmark.alpha || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   310→   310→                    Alpha: {benchmark.alpha >= 0 ? '+' : ''}{benchmark.alpha}%
+   311→   311→                  </Badge>
+   312→   312→                )}
+   313→   313→              </div>
+   314→   314→            </div>
+   315→   315→            <div className="h-[120px]">
+   316→   316→              <ResponsiveContainer width="100%" height="100%">
+   317→   317→                <LineChart data={benchmark.chartData}>
+   318→   318→                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+   319→   319→                  <XAxis dataKey="date" tick={{ fontSize: 8, fill: '#71717a' }} interval={Math.floor(benchmark.chartData.length / 4)} />
+   320→   320→                  <YAxis tick={{ fontSize: 9, fill: '#71717a' }} />
+   321→   321→                  <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 10 }} />
+   322→   322→                  <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />
+   323→   323→                  <Line type="monotone" dataKey="portfolio" stroke="#6366f1" strokeWidth={2} name="Portfolio" dot={false} />
+   324→   324→                  <Line type="monotone" dataKey="nifty" stroke="#10b981" strokeWidth={1.5} name="Nifty 50" dot={false} strokeDasharray="4 2" />
+   325→   325→                </LineChart>
+   326→   326→              </ResponsiveContainer>
+   327→   327→            </div>
+   328→   328→          </CardContent>
+   329→   329→        </Card>
+   330→   330→      )}
+   331→   331→
+   332→   332→      {/* Two-column layout */}
+   333→   333→      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+   334→   334→        {/* Left: Positions + Watchlist */}
+   335→   335→        <div className="lg:col-span-3 space-y-4">
+   336→   336→          {/* Open Positions with Health Indicators */}
+   337→   337→          <Card className="border-border">
+   338→   338→            <CardContent className="p-4">
+   339→   339→              <div className="flex items-center justify-between mb-3">
+   340→   340→                <h3 className="text-sm font-semibold flex items-center gap-2">
+   341→   341→                  <Briefcase className="h-4 w-4 text-primary" />
+   342→   342→                  Open Positions ({positions.length})
+   343→   343→                </h3>
+   344→   344→                <div className="flex items-center gap-2">
+   345→   345→                  {positions.length > 0 && (
+   346→   346→                    <Button variant="ghost" size="sm" onClick={() => setActiveTab('holdings')} className="h-7 text-xs gap-1">
+   347→   347→                      View All <ArrowRight className="h-3 w-3" />
+   348→   348→                    </Button>
+   349→   349→                  )}
+   350→   350→                  <Button variant="ghost" size="sm" onClick={fetchAll} className="h-7 text-xs gap-1">
+   351→   351→                    <RefreshCw className="h-3 w-3" />
+   352→   352→                  </Button>
+   353→   353→                </div>
+   354→   354→              </div>
+   355→   355→              {positions.length === 0 ? (
+   356→   356→                <div className="text-center py-8">
+   357→   357→                  <p className="text-xs text-muted-foreground">No open positions.</p>
+   358→   358→                  <Button variant="outline" size="sm" onClick={() => setActiveTab('auto-trade')} className="mt-3 h-8 text-xs gap-1.5">
+   359→   359→                    <Zap className="h-3 w-3" /> Run Auto-Trade Scan
+   360→   360→                  </Button>
+   361→   361→                </div>
+   362→   362→              ) : (
+   363→   363→                <ScrollArea className="max-h-[300px]">
+   364→   364→                  <div className="space-y-2 pr-2">
+   365→   365→                    {positions.slice(0, 10).map(pos => {
+   366→   366→                      const risk = pos.entryPrice - pos.stopLoss;
+   367→   367→                      const rMult = risk > 0 && pos.currentPrice > 0 ? (pos.currentPrice - pos.entryPrice) / risk : 0;
+   368→   368→                      const slDist = risk > 0 ? ((pos.currentPrice - pos.stopLoss) / risk) : 99;
+   369→   369→                      const isNearSL = slDist < 0.3;
+   370→   370→                      const days = pos.holdingDays || Math.round((Date.now() - new Date(pos.entryDate).getTime()) / 86400000);
+   371→   371→                      return (
+   372→   372→                        <div key={pos.id} className={cn(
+   373→   373→                          'flex items-center justify-between rounded-lg px-3 py-2.5 transition',
+   374→   374→                          isNearSL ? 'bg-red-500/10 border border-red-500/20' : 'bg-secondary/50'
+   375→   375→                        )}>
+   376→   376→                          <div className="flex items-center gap-2.5">
+   377→   377→                            <div className={cn(
+   378→   378→                              'h-1 w-1 rounded-full shrink-0',
+   379→   379→                              isNearSL ? 'bg-red-400' : rMult >= 1 ? 'bg-emerald-400' : 'bg-muted-foreground'
+   380→   380→                            )} />
+   381→   381→                            <div>
+   382→   382→                              <div className="flex items-center gap-1.5">
+   383→   383→                                <span className="font-semibold text-sm">{pos.symbol}</span>
+   384→   384→                                {pos.autoTraded && <Badge variant="outline" className="text-[9px] h-4 px-1">AUTO</Badge>}
+   385→   385→                                {isNearSL && <AlertTriangle className="h-3 w-3 text-red-400" />}
+   386→   386→                              </div>
+   387→   387→                              <div className="text-[10px] text-muted-foreground">
+   388→   388→                                {pos.qty} @ ₹{pos.entryPrice} → ₹{pos.currentPrice > 0 ? pos.currentPrice : '...'}
+   389→   389→                                <span className="ml-2">SL: ₹{pos.stopLoss} TP: ₹{pos.targetPrice}</span>
+   390→   390→                                <span className="ml-2 text-muted-foreground/60">{days}d</span>
+   391→   391→                              </div>
+   392→   392→                            </div>
+   393→   393→                          </div>
+   394→   394→                          <div className="text-right">
+   395→   395→                            <div className={cn('text-sm font-bold font-mono', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   396→   396→                              {pos.pnl >= 0 ? '+' : ''}₹{Math.round(pos.pnl).toLocaleString()}
+   397→   397→                            </div>
+   398→   398→                            <div className="flex items-center gap-1.5 justify-end">
+   399→   399→                              <span className={cn('text-[10px]', pos.pnlPercent >= 0 ? 'text-emerald-400/70' : 'text-red-400/70')}>
+   400→   400→                                {pos.pnlPercent >= 0 ? '+' : ''}{pos.pnlPercent.toFixed(2)}%
+   401→   401→                              </span>
+   402→   402→                              {rMult !== 0 && (
+   403→   403→                                <Badge variant="outline" className={cn('text-[9px] h-4 px-1', rMult >= 1 ? 'text-emerald-400' : rMult < 0 ? 'text-red-400' : 'text-muted-foreground')}>
+   404→   404→                                  {rMult.toFixed(1)}R
+   405→   405→                                </Badge>
+   406→   406→                              )}
+   407→   407→                            </div>
+   408→   408→                          </div>
+   409→   409→                        </div>
+   410→   410→                      );
+   411→   411→                    })}
+   412→   412→                  </div>
+   413→   413→                </ScrollArea>
+   414→   414→              )}
+   415→   415→            </CardContent>
+   416→   416→          </Card>
+   417→   417→
+   418→   418→          {/* Watchlist Market Overview */}
+   419→   419→          <Card className="border-border">
+   420→   420→            <CardContent className="p-4">
+   421→   421→              <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+   422→   422→                <Activity className="h-4 w-4 text-primary" />
+   423→   423→                Watchlist — Live Prices
+   424→   424→              </h3>
+   425→   425→              {quotes.length === 0 ? (
+   426→   426→                <p className="text-xs text-muted-foreground text-center py-4">Loading market data...</p>
+   427→   427→              ) : (
+   428→   428→                <ScrollArea className="max-h-[240px]">
+   429→   429→                  <table className="w-full text-xs">
+   430→   430→                    <thead>
+   431→   431→                      <tr className="border-b border-border/50 text-muted-foreground">
+   432→   432→                        <th className="text-left py-1.5 font-medium">Symbol</th>
+   433→   433→                        <th className="text-right py-1.5 font-medium">Price</th>
+   434→   434→                        <th className="text-right py-1.5 font-medium">Change</th>
+   435→   435→                        <th className="text-right py-1.5 font-medium hidden sm:table-cell">Sector</th>
+   436→   436→                      </tr>
+   437→   437→                    </thead>
+   438→   438→                    <tbody>
+   439→   439→                      {quotes.filter(q => q.price > 0).slice(0, 15).map(q => (
+   440→   440→                        <tr key={q.symbol} className="border-b border-border/30 hover:bg-secondary/30">
+   441→   441→                          <td className="py-1.5 font-medium">{q.symbol}</td>
+   442→   442→                          <td className="py-1.5 text-right font-mono">₹{q.price.toLocaleString()}</td>
+   443→   443→                          <td className={cn('py-1.5 text-right font-mono', q.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   444→   444→                            {q.changePercent >= 0 ? '+' : ''}{q.changePercent.toFixed(2)}%
+   445→   445→                          </td>
+   446→   446→                          <td className="py-1.5 text-right hidden sm:table-cell">
+   447→   447→                            {q.sector && <Badge variant="outline" className="text-[9px] h-4">{q.sector}</Badge>}
+   448→   448→                          </td>
+   449→   449→                        </tr>
+   450→   450→                      ))}
+   451→   451→                    </tbody>
+   452→   452→                  </table>
+   453→   453→                </ScrollArea>
+   454→   454→              )}
+   455→   455→            </CardContent>
+   456→   456→          </Card>
+   457→   457→        </div>
+   458→   458→
+   459→   459→        {/* Right: Allocation + Activity + Alerts */}
+   460→   460→        <div className="lg:col-span-2 space-y-4">
+   461→   461→          {/* Sector Allocation Pie */}
+   462→   462→          <Card className="border-border">
+   463→   463→            <CardContent className="p-4">
+   464→   464→              <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+   465→   465→                <PieIcon className="h-4 w-4 text-primary" />
+   466→   466→                Sector Allocation
+   467→   467→              </h3>
+   468→   468→              {sectors.length === 0 ? (
+   469→   469→                <p className="text-xs text-muted-foreground text-center py-8">No positions to show allocation.</p>
+   470→   470→              ) : (
+   471→   471→                <div className="h-[200px]">
+   472→   472→                  <ResponsiveContainer width="100%" height="100%">
+   473→   473→                    <PieChart>
+   474→   474→                      <Pie data={sectors} dataKey="value" nameKey="sector" cx="50%" cy="50%"
+   475→   475→                        innerRadius={45} outerRadius={80} paddingAngle={2} strokeWidth={0}>
+   476→   476→                        {sectors.map((_, i) => <Cell key={i} fill={SECTOR_COLORS[i % SECTOR_COLORS.length]} />)}
+   477→   477→                      </Pie>
+   478→   478→                      <Tooltip
+   479→   479→                        contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 11 }}
+   480→   480→                        formatter={(value: number) => [`₹${value.toLocaleString()}`, 'Invested']}
+   481→   481→                      />
+   482→   482→                    </PieChart>
+   483→   483→                  </ResponsiveContainer>
+   484→   484→                  <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2">
+   485→   485→                    {sectors.map((s, i) => (
+   486→   486→                      <div key={s.sector} className="flex items-center gap-1.5 text-[10px]">
+   487→   487→                        <div className="h-2 w-2 rounded-full" style={{ background: SECTOR_COLORS[i % SECTOR_COLORS.length] }} />
+   488→   488→                        <span className="text-muted-foreground">{s.sector}</span>
+   489→   489→                        <span className="font-mono">{s.pct}%</span>
+   490→   490→                      </div>
+   491→   491→                    ))}
+   492→   492→                  </div>
+   493→   493→                </div>
+   494→   494→              )}
+   495→   495→            </CardContent>
+   496→   496→          </Card>
+   497→   497→
+   498→   498→          {/* Auto-Trade Status Mini Card */}
+   499→   499→          <Card className={cn('border', autoStatus?.enabled ? 'border-emerald-500/30' : 'border-border')}>
+   500→   500→            <CardContent className="p-4">
+   501→   501→              <div className="flex items-center justify-between mb-2">
+   502→   502→                <h3 className="text-sm font-semibold flex items-center gap-2">
+   503→   503→                  <Shield className="h-4 w-4 text-primary" />
+   504→   504→                  Engine Status
+   505→   505→                </h3>
+   506→   506→                <Badge variant="outline" className={cn('text-[10px] h-5 gap-1', autoStatus?.enabled ? 'text-emerald-400 border-emerald-500/30' : 'text-muted-foreground')}>
+   507→   507→                  <span className={cn('h-1.5 w-1.5 rounded-full', autoStatus?.enabled ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+   508→   508→                  {autoStatus?.enabled ? 'Armed' : 'Manual'}
+   509→   509→                </Badge>
+   510→   510→              </div>
+   511→   511→              {autoStatus && (
+   512→   512→                <div className="grid grid-cols-3 gap-2 text-center">
+   513→   513→                  <div className="rounded bg-secondary/50 p-2">
+   514→   514→                    <div className="text-[10px] text-muted-foreground">Scans</div>
+   515→   515→                    <div className="text-sm font-bold font-mono">{autoStatus.scanCount}</div>
+   516→   516→                  </div>
+   517→   517→                  <div className="rounded bg-secondary/50 p-2">
+   518→   518→                    <div className="text-[10px] text-muted-foreground">Today Entries</div>
+   519→   519→                    <div className="text-sm font-bold font-mono text-emerald-400">{autoStatus.todayEntries}</div>
+   520→   520→                  </div>
+   521→   521→                  <div className="rounded bg-secondary/50 p-2">
+   522→   522→                    <div className="text-[10px] text-muted-foreground">Today P&L</div>
+   523→   523→                    <div className={cn('text-sm font-bold font-mono', autoStatus.todayPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   524→   524→                      {autoStatus.todayPnl >= 0 ? '+' : ''}₹{Math.round(autoStatus.todayPnl).toLocaleString()}
+   525→   525→                    </div>
+   526→   526→                  </div>
+   527→   527→                </div>
+   528→   528→              )}
+   529→   529→            </CardContent>
+   530→   530→          </Card>
+   531→   531→
+   532→   532→          {/* Recent Activity */}
+   533→   533→          <Card className="border-border">
+   534→   534→            <CardContent className="p-4">
+   535→   535→              <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+   536→   536→                <Activity className="h-4 w-4 text-primary" />
+   537→   537→                Recent Activity
+   538→   538→              </h3>
+   539→   539→              {logs.length === 0 ? (
+   540→   540→                <p className="text-xs text-muted-foreground text-center py-6">No recent activity.</p>
+   541→   541→              ) : (
+   542→   542→                <ScrollArea className="max-h-[200px]">
+   543→   543→                  <div className="space-y-1.5 pr-2">
+   544→   544→                    {logs.slice(0, 12).map(log => {
+   545→   545→                      const isEntry = log.action.includes('ENTRY');
+   546→   546→                      const isExit = log.action.includes('EXIT');
+   547→   547→                      const isPartial = log.action === 'PARTIAL_BOOK';
+   548→   548→                      return (
+   549→   549→                        <div key={log.id} className="flex items-center gap-2 text-xs py-1.5 border-b border-border/30 last:border-0">
+   550→   550→                          <div className={cn(
+   551→   551→                            'h-1.5 w-1.5 rounded-full shrink-0',
+   552→   552→                            isEntry ? 'bg-emerald-400' : isPartial ? 'bg-amber-400' : isExit ? 'bg-red-400' : 'bg-muted-foreground'
+   553→   553→                          )} />
+   554→   554→                          <span className="font-semibold shrink-0">{log.symbol}</span>
+   555→   555→                          <Badge variant="outline" className="text-[9px] h-4 px-1 shrink-0">
+   556→   556→                            {log.action.replace('AUTO_', '')}
+   557→   557→                          </Badge>
+   558→   558→                          <span className="text-muted-foreground truncate flex-1">{log.reason || ''}</span>
+   559→   559→                          <span className="text-muted-foreground shrink-0 text-[10px]">
+   560→   560→                            {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+   561→   561→                          </span>
+   562→   562→                        </div>
+   563→   563→                      );
+   564→   564→                    })}
+   565→   565→                  </div>
+   566→   566→                </ScrollArea>
+   567→   567→              )}
+   568→   568→            </CardContent>
+   569→   569→          </Card>
+   570→   570→
+   571→   571→          {/* Active Alerts */}
+   572→   572→          {alerts.length > 0 && (
+   573→   573→            <Card className="border-border">
+   574→   574→              <CardContent className="p-4">
+   575→   575→                <div className="flex items-center justify-between mb-3">
+   576→   576→                  <h3 className="text-sm font-semibold flex items-center gap-2">
+   577→   577→                    <Bell className="h-4 w-4 text-amber-400" />
+   578→   578→                    Active Alerts ({alerts.length})
+   579→   579→                  </h3>
+   580→   580→                </div>
+   581→   581→                <div className="space-y-1.5">
+   582→   582→                  {alerts.slice(0, 5).map(a => (
+   583→   583→                    <div key={a.id} className="flex items-center gap-2 text-xs py-1.5 border-b border-border/30 last:border-0">
+   584→   584→                      <div className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+   585→   585→                      <span className="font-semibold">{a.symbol}</span>
+   586→   586→                      <span className="text-muted-foreground">{a.condition} ₹{a.targetPrice.toLocaleString()}</span>
+   587→   587→                    </div>
+   588→   588→                  ))}
+   589→   589→                  {alerts.length > 5 && <p className="text-[10px] text-muted-foreground">+{alerts.length - 5} more</p>}
+   590→   590→                </div>
+   591→   591→              </CardContent>
+   592→   592→            </Card>
+   593→   593→          )}
+   594→   594→        </div>
+   595→   595→      </div>
+   596→   596→    </div>
+   597→   597→  );
+   598→   598→}

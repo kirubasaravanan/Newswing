@@ -1,0 +1,893 @@
+     1→'use client';
+     2→
+     3→import { useState, useEffect, useCallback } from 'react';
+     4→import { Card, CardContent } from '@/components/ui/card';
+     5→import { Button } from '@/components/ui/button';
+     6→import { Input } from '@/components/ui/input';
+     7→import { Label } from '@/components/ui/label';
+     8→import { Badge } from '@/components/ui/badge';
+     9→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    10→import {
+    11→  Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogClose,
+    12→} from '@/components/ui/dialog';
+    13→import { ScrollArea } from '@/components/ui/scroll-area';
+    14→import {
+    15→  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+    16→} from '@/components/ui/select';
+    17→import {
+    18→  BarChart3, TrendingUp, Shield, Bell, Plus, X, RefreshCw, Trash2,
+    19→  Target, PieChart as PieIcon, AlertTriangle, CheckCircle2, Loader2,
+    20→  ArrowUpRight, ArrowDownRight, Scale,
+    21→} from 'lucide-react';
+    22→import {
+    23→  LineChart, Line, BarChart, Bar, AreaChart, Area,
+    24→  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine, Cell, Legend, ComposedChart,
+    25→} from 'recharts';
+    26→import { cn } from '@/lib/utils';
+    27→import { toast } from 'sonner';
+    28→
+    29→// ── Risk Metrics Card ─────────────────────────────────
+    30→function RiskMetricsCard() {
+    31→  const [metrics, setMetrics] = useState<any>(null);
+    32→  const [loading, setLoading] = useState(true);
+    33→
+    34→  const fetchMetrics = useCallback(async () => {
+    35→    setLoading(true);
+    36→    try {
+    37→      const res = await fetch('/api/portfolio/risk-metrics');
+    38→      const data = await res.json();
+    39→      if (data.success) setMetrics(data);
+    40→    } catch { /* ignore */ }
+    41→    finally { setLoading(false); }
+    42→  }, []);
+    43→
+    44→  useEffect(() => { fetchMetrics(); }, [fetchMetrics]);
+    45→
+    46→  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+    47→  if (!metrics || metrics.tradeCount < 2) return <p className="text-center py-8 text-muted-foreground text-sm">Need at least 2 closed trades for risk metrics.</p>;
+    48→
+    49→  const m = metrics.metrics;
+    50→  const items = [
+    51→    { label: 'Sharpe Ratio', value: m.sharpe.toFixed(2), color: m.sharpe >= 1 ? 'text-emerald-400' : m.sharpe >= 0 ? 'text-amber-400' : 'text-red-400', desc: m.sharpe >= 1 ? 'Good' : m.sharpe >= 0 ? 'Moderate' : 'Poor' },
+    52→    { label: 'Sortino Ratio', value: m.sortino.toFixed(2), color: m.sortino >= 1.5 ? 'text-emerald-400' : 'text-amber-400', desc: 'Downside risk adjusted' },
+    53→    { label: 'Max Drawdown', value: `${m.maxDD.toFixed(1)}%`, color: 'text-red-400', desc: 'Worst peak-to-trough' },
+    54→    { label: 'Calmar Ratio', value: m.calmar.toFixed(2), color: m.calmar >= 1 ? 'text-emerald-400' : 'text-amber-400', desc: 'Return / MaxDD' },
+    55→    { label: 'VaR (95%)', value: `${m.var95.toFixed(2)}%`, color: 'text-red-400', desc: 'Worst 5% day loss' },
+    56→    { label: 'CAGR', value: `${m.cagr.toFixed(1)}%`, color: m.cagr >= 15 ? 'text-emerald-400' : 'text-amber-400', desc: 'Annualized return' },
+    57→    { label: 'Expectancy', value: `${m.expectancy?.toFixed(2) || 0}%`, color: (m.expectancy || 0) > 0 ? 'text-emerald-400' : 'text-red-400', desc: 'Avg win% x WR - Avg loss% x LR' },
+    58→    { label: 'Avg R-Multiple', value: `${m.avgRMultiple?.toFixed(2) || 0}R`, color: (m.avgRMultiple || 0) >= 1 ? 'text-emerald-400' : 'text-red-400', desc: 'Avg profit / risk per trade' },
+    59→    { label: 'Profit Factor', value: m.profitFactor?.toFixed(2) || '0', color: (m.profitFactor || 0) >= 1.5 ? 'text-emerald-400' : 'text-amber-400', desc: 'Gross profit / gross loss' },
+    60→    { label: 'Avg Holding', value: `${m.avgHoldingDays}d`, color: 'text-indigo-400', desc: 'Average trade duration' },
+    61→    { label: 'Best Trade', value: `${m.bestTrade?.toFixed(1) || 0}%`, color: 'text-emerald-400', desc: '' },
+    62→    { label: 'Worst Trade', value: `${m.worstTrade?.toFixed(1) || 0}%`, color: 'text-red-400', desc: '' },
+    63→  ];
+    64→
+    65→  return (
+    66→    <div className="grid grid-cols-3 lg:grid-cols-3 xl:grid-cols-3 gap-3">
+    67→      {items.map(item => (
+    68→        <div key={item.label} className="rounded-lg bg-secondary/50 p-3">
+    69→          <div className="text-[10px] text-muted-foreground uppercase">{item.label}</div>
+    70→          <div className={cn('text-lg font-bold font-mono mt-0.5', item.color)}>{item.value}</div>
+    71→          {item.desc && <div className="text-[10px] text-muted-foreground mt-0.5">{item.desc}</div>}
+    72→        </div>
+    73→      ))}
+    74→    </div>
+    75→  );
+    76→}
+    77→
+    78→// ── Benchmark Comparison ────────────────────────────────
+    79→function BenchmarkChart() {
+    80→  const [data, setData] = useState<any>(null);
+    81→  const [loading, setLoading] = useState(true);
+    82→
+    83→  useEffect(() => {
+    84→    (async () => {
+    85→      try {
+    86→        const res = await fetch('/api/portfolio/benchmark?days=90');
+    87→        const json = await res.json();
+    88→        if (json.success) setData(json.benchmark);
+    89→      } catch { /* ignore */ }
+    90→      finally { setLoading(false); }
+    91→    })();
+    92→  }, []);
+    93→
+    94→  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+    95→  if (!data || !data.chartData?.length) return <p className="text-center py-8 text-muted-foreground text-sm">No benchmark data available.</p>;
+    96→
+    97→  return (
+    98→    <div>
+    99→      <div className="grid grid-cols-3 gap-3 mb-4">
+   100→        <div className="rounded-lg bg-secondary/50 p-3">
+   101→          <div className="text-[10px] text-muted-foreground uppercase">Portfolio Return</div>
+   102→          <div className={cn('text-lg font-bold font-mono', data.portfolioTotalReturn >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   103→            {data.portfolioTotalReturn >= 0 ? '+' : ''}₹{data.portfolioTotalReturn.toLocaleString()}
+   104→          </div>
+   105→        </div>
+   106→        <div className="rounded-lg bg-secondary/50 p-3">
+   107→          <div className="text-[10px] text-muted-foreground uppercase">Nifty 50 Return</div>
+   108→          <div className={cn('text-lg font-bold font-mono', data.niftyTotalReturn >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   109→            {data.niftyTotalReturn >= 0 ? '+' : ''}{data.niftyTotalReturn.toFixed(2)}%
+   110→          </div>
+   111→        </div>
+   112→        <div className="rounded-lg bg-secondary/50 p-3">
+   113→          <div className="text-[10px] text-muted-foreground uppercase">Alpha / Beta</div>
+   114→          <div className="text-lg font-bold font-mono text-indigo-400">
+   115→            {data.alpha}%
+   116→            {data.beta != null && <span className="text-xs text-muted-foreground ml-1">β{data.beta}</span>}
+   117→          </div>
+   118→        </div>
+   119→      </div>
+   120→      <div className="h-[280px]">
+   121→        <ResponsiveContainer width="100%" height="100%">
+   122→          <LineChart data={data.chartData}>
+   123→            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+   124→            <XAxis dataKey="date" tick={{ fontSize: 9, fill: '#71717a' }} interval={Math.floor(data.chartData.length / 6)} />
+   125→            <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
+   126→            <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 11 }} />
+   127→            <ReferenceLine y={0} stroke="rgba(255,255,255,0.2)" />
+   128→            <Legend wrapperStyle={{ fontSize: 11 }} />
+   129→            <Line type="monotone" dataKey="portfolio" stroke="#6366f1" strokeWidth={2} name="Portfolio (₹)" dot={false} />
+   130→            <Line type="monotone" dataKey="nifty" stroke="#10b981" strokeWidth={1.5} name="Nifty 50 (%)" dot={false} strokeDasharray="4 2" />
+   131→          </LineChart>
+   132→        </ResponsiveContainer>
+   133→      </div>
+   134→    </div>
+   135→  );
+   136→}
+   137→
+   138→// ── Price Alerts ────────────────────────────────────────
+   139→function AlertsPanel() {
+   140→  const [alerts, setAlerts] = useState<any[]>([]);
+   141→  const [open, setOpen] = useState(false);
+   142→  const [form, setForm] = useState({ symbol: '', condition: 'ABOVE', targetPrice: '', notes: '' });
+   143→  const [checking, setChecking] = useState(false);
+   144→
+   145→  const fetchAlerts = useCallback(async () => {
+   146→    try {
+   147→      const res = await fetch('/api/portfolio/alerts');
+   148→      const data = await res.json();
+   149→      if (data.success) setAlerts(data.alerts);
+   150→    } catch { /* ignore */ }
+   151→  }, []);
+   152→
+   153→  useEffect(() => { fetchAlerts(); }, [fetchAlerts]);
+   154→
+   155→  const createAlert = async () => {
+   156→    if (!form.symbol || !form.targetPrice) return;
+   157→    try {
+   158→      const res = await fetch('/api/portfolio/alerts', {
+   159→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   160→        body: JSON.stringify(form),
+   161→      });
+   162→      const data = await res.json();
+   163→      if (data.success) {
+   164→        toast.success(`Alert set: ${form.symbol} ${form.condition} ₹${form.targetPrice}`);
+   165→        setForm({ symbol: '', condition: 'ABOVE', targetPrice: '', notes: '' });
+   166→        setOpen(false);
+   167→        fetchAlerts();
+   168→      }
+   169→    } catch { toast.error('Failed to create alert'); }
+   170→  };
+   171→
+   172→  const deleteAlert = async (id: string) => {
+   173→    await fetch(`/api/portfolio/alerts?id=${id}`, { method: 'DELETE' });
+   174→    fetchAlerts();
+   175→  };
+   176→
+   177→  const checkAlerts = async () => {
+   178→    setChecking(true);
+   179→    try {
+   180→      const res = await fetch('/api/portfolio/alerts', { method: 'PUT' });
+   181→      const data = await res.json();
+   182→      if (data.success && data.triggered.length > 0) {
+   183→        for (const t of data.triggered) {
+   184→          toast.success(`🔔 ${t.symbol} hit ₹${t.triggeredPrice}!`, {
+   185→            description: `Target: ₹${t.targetPrice} ${t.condition}`,
+   186→            duration: 8000,
+   187→          });
+   188→        }
+   189→        fetchAlerts();
+   190→      } else {
+   191→        toast.info('No alerts triggered');
+   192→      }
+   193→    } catch { toast.error('Failed to check alerts'); }
+   194→    finally { setChecking(false); }
+   195→  };
+   196→
+   197→  return (
+   198→    <div>
+   199→      <div className="flex items-center justify-between mb-3">
+   200→        <h3 className="text-sm font-semibold flex items-center gap-2"><Bell className="h-4 w-4" /> Price Alerts</h3>
+   201→        <div className="flex gap-2">
+   202→          <Button variant="outline" size="sm" onClick={checkAlerts} disabled={checking} className="h-7 text-xs gap-1">
+   203→            {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <Target className="h-3 w-3" />} Check
+   204→          </Button>
+   205→          <Dialog open={open} onOpenChange={setOpen}>
+   206→            <DialogTrigger asChild><Button size="sm" className="h-7 text-xs gap-1"><Plus className="h-3 w-3" /> New Alert</Button></DialogTrigger>
+   207→            <DialogContent className="sm:max-w-sm">
+   208→              <DialogHeader><DialogTitle>Create Price Alert</DialogTitle></DialogHeader>
+   209→              <div className="grid gap-3 py-2">
+   210→                <div><Label className="text-xs">Symbol</Label>
+   211→                  <Input value={form.symbol} onChange={e => setForm({ ...form, symbol: e.target.value.toUpperCase() })} placeholder="RELIANCE" className="h-8 text-xs" /></div>
+   212→                <div><Label className="text-xs">Condition</Label>
+   213→                  <Select value={form.condition} onValueChange={v => setForm({ ...form, condition: v })}>
+   214→                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+   215→                    <SelectContent><SelectItem value="ABOVE">Price goes ABOVE</SelectItem><SelectItem value="BELOW">Price goes BELOW</SelectItem></SelectContent>
+   216→                  </Select></div>
+   217→                <div><Label className="text-xs">Target Price (₹)</Label>
+   218→                  <Input type="number" value={form.targetPrice} onChange={e => setForm({ ...form, targetPrice: e.target.value })} placeholder="2500" className="h-8 text-xs" /></div>
+   219→              </div>
+   220→              <DialogFooter>
+   221→                <DialogClose asChild><Button variant="ghost" size="sm">Cancel</Button></DialogClose>
+   222→                <Button size="sm" onClick={createAlert}>Create</Button>
+   223→              </DialogFooter>
+   224→            </DialogContent>
+   225→          </Dialog>
+   226→        </div>
+   227→      </div>
+   228→      {alerts.length === 0 ? (
+   229→        <p className="text-xs text-muted-foreground text-center py-4">No alerts set. Create one to get notified when a price target is hit.</p>
+   230→      ) : (
+   231→        <ScrollArea className="max-h-[200px]">
+   232→          <div className="space-y-1.5 pr-2">
+   233→            {alerts.slice(0, 20).map(a => (
+   234→              <div key={a.id} className="flex items-center gap-2 text-xs py-1.5 border-b border-border/30">
+   235→                <div className={cn('h-2 w-2 rounded-full shrink-0', a.triggered ? 'bg-amber-400' : 'bg-blue-400')} />
+   236→                <span className="font-semibold">{a.symbol}</span>
+   237→                <Badge variant="outline" className="text-[9px] h-4">{a.condition}</Badge>
+   238→                <span className="font-mono">₹{a.targetPrice.toLocaleString()}</span>
+   239→                {a.triggered && <Badge className="text-[9px] h-4 bg-amber-500/20 text-amber-400">HIT ₹{a.triggeredPrice}</Badge>}
+   240→                <button onClick={() => deleteAlert(a.id)} className="ml-auto text-muted-foreground hover:text-red-400"><X className="h-3 w-3" /></button>
+   241→              </div>
+   242→            ))}
+   243→          </div>
+   244→        </ScrollArea>
+   245→      )}
+   246→    </div>
+   247→  );
+   248→}
+   249→
+   250→// ── Capital Gains Report ────────────────────────────────
+   251→function CapitalGainsReport() {
+   252→  const [data, setData] = useState<any>(null);
+   253→  const [loading, setLoading] = useState(true);
+   254→
+   255→  useEffect(() => {
+   256→    (async () => {
+   257→      try {
+   258→        const res = await fetch('/api/portfolio/capital-gains');
+   259→        const json = await res.json();
+   260→        if (json.success) setData(json);
+   261→      } catch { /* ignore */ }
+   262→      finally { setLoading(false); }
+   263→    })();
+   264→  }, []);
+   265→
+   266→  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+   267→  if (!data || (data.stcg.length === 0 && data.ltcg.length === 0)) return <p className="text-center py-8 text-muted-foreground text-sm">No closed trades for capital gains report.</p>;
+   268→
+   269→  const s = data.summary;
+   270→  return (
+   271→    <div>
+   272→      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+   273→        <div className="rounded-lg bg-red-500/10 p-3">
+   274→          <div className="text-[10px] text-red-400 uppercase">STCG ({s.stcgRate})</div>
+   275→          <div className="text-lg font-bold font-mono text-red-400">₹{Math.round(s.totalSTCG).toLocaleString()}</div>
+   276→          <div className="text-[10px] text-muted-foreground">Tax: ₹{s.stcgTax.toLocaleString()}</div>
+   277→        </div>
+   278→        <div className="rounded-lg bg-blue-500/10 p-3">
+   279→          <div className="text-[10px] text-blue-400 uppercase">LTCG ({s.ltcgRate})</div>
+   280→          <div className="text-lg font-bold font-mono text-blue-400">₹{Math.round(s.totalLTCG).toLocaleString()}</div>
+   281→          <div className="text-[10px] text-muted-foreground">Tax: ₹{s.ltcgTax.toLocaleString()}</div>
+   282→        </div>
+   283→        <div className="rounded-lg bg-secondary/50 p-3">
+   284→          <div className="text-[10px] text-muted-foreground uppercase">Exemption</div>
+   285→          <div className="text-lg font-bold font-mono">₹{s.ltcgExemption.toLocaleString()}</div>
+   286→          <div className="text-[10px] text-muted-foreground">LTCG threshold</div>
+   287→        </div>
+   288→        <div className="rounded-lg bg-amber-500/10 p-3">
+   289→          <div className="text-[10px] text-amber-400 uppercase">Total Tax Est.</div>
+   290→          <div className="text-lg font-bold font-mono text-amber-400">₹{s.totalTax.toLocaleString()}</div>
+   291→        </div>
+   292→      </div>
+   293→      {data.byFinancialYear.length > 0 && (
+   294→        <div className="mb-4">
+   295→          <h4 className="text-xs font-semibold mb-2">By Financial Year</h4>
+   296→          <ScrollArea className="max-h-[150px]">
+   297→            <table className="w-full text-xs">
+   298→              <thead><tr className="border-b border-border text-muted-foreground">
+   299→                <th className="text-left py-1 font-medium">FY</th><th className="text-right py-1 font-medium">STCG</th>
+   300→                <th className="text-right py-1 font-medium">LTCG</th><th className="text-right py-1 font-medium">Tax</th>
+   301→              </tr></thead>
+   302→              <tbody>
+   303→                {data.byFinancialYear.map((fy: any) => (
+   304→                  <tr key={fy.fy} className="border-b border-border/30">
+   305→                    <td className="py-1 font-mono">{fy.fy}</td>
+   306→                    <td className={cn('text-right py-1 font-mono', fy.stcg >= 0 ? 'text-red-400' : 'text-emerald-400')}>{fy.stcg >= 0 ? '+' : ''}₹{fy.stcg.toLocaleString()}</td>
+   307→                    <td className={cn('text-right py-1 font-mono', fy.ltcg >= 0 ? 'text-red-400' : 'text-emerald-400')}>{fy.ltcg >= 0 ? '+' : ''}₹{fy.ltcg.toLocaleString()}</td>
+   308→                    <td className="text-right py-1 font-mono text-amber-400">₹{(fy.stcgTax + fy.ltcgTax).toLocaleString()}</td>
+   309→                  </tr>
+   310→                ))}
+   311→              </tbody>
+   312→            </table>
+   313→          </ScrollArea>
+   314→        </div>
+   315→      )}
+   316→      <ScrollArea className="max-h-[200px]">
+   317→        <table className="w-full text-xs">
+   318→          <thead><tr className="border-b border-border text-muted-foreground">
+   319→            <th className="text-left py-1 font-medium">Symbol</th><th className="text-right py-1 font-medium">P&L</th>
+   320→            <th className="text-right py-1 font-medium">Type</th><th className="text-right py-1 font-medium">Days</th>
+   321→            <th className="text-right py-1 font-medium">Exit</th>
+   322→          </tr></thead>
+   323→          <tbody>
+   324→            {[...data.stcg.map((t: any) => ({ ...t, type: 'STCG' })), ...data.ltcg.map((t: any) => ({ ...t, type: 'LTCG' }))]
+   325→              .sort((a: any, b: any) => new Date(b.exitDate).getTime() - new Date(a.exitDate).getTime())
+   326→              .slice(0, 20)
+   327→              .map((t: any) => (
+   328→                <tr key={t.id} className="border-b border-border/30">
+   329→                  <td className="py-1 font-semibold">{t.symbol}</td>
+   330→                  <td className={cn('text-right py-1 font-mono', (t.pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   331→                    {(t.pnl || 0) >= 0 ? '+' : ''}₹{Math.round(t.pnl || 0).toLocaleString()}
+   332→                  </td>
+   333→                  <td className="text-right py-1"><Badge variant="outline" className={cn('text-[9px] h-4', t.type === 'LTCG' ? 'text-blue-400' : 'text-red-400')}>{t.type}</Badge></td>
+   334→                  <td className="text-right py-1 font-mono text-muted-foreground">{t.holdingDays}d</td>
+   335→                  <td className="text-right py-1 text-muted-foreground">{new Date(t.exitDate).toLocaleDateString()}</td>
+   336→                </tr>
+   337→              ))}
+   338→          </tbody>
+   339→        </table>
+   340→      </ScrollArea>
+   341→    </div>
+   342→  );
+   343→}
+   344→
+   345→// ── Rebalance Tool ─────────────────────────────────────
+   346→function RebalancePanel() {
+   347→  const [data, setData] = useState<any>(null);
+   348→  const [loading, setLoading] = useState(true);
+   349→
+   350→  const fetchRebalance = useCallback(async () => {
+   351→    setLoading(true);
+   352→    try {
+   353→      const res = await fetch('/api/portfolio/rebalance');
+   354→      const json = await res.json();
+   355→      if (json.success) setData(json.rebalance);
+   356→    } catch { /* ignore */ }
+   357→    finally { setLoading(false); }
+   358→  }, []);
+   359→
+   360→  useEffect(() => { fetchRebalance(); }, [fetchRebalance]);
+   361→
+   362→  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+   363→  if (!data || data.allocations.length === 0) return <p className="text-center py-8 text-muted-foreground text-sm">Open some positions to see rebalancing suggestions.</p>;
+   364→
+   365→  return (
+   366→    <div>
+   367→      <div className="grid grid-cols-3 gap-3 mb-4">
+   368→        <div className="rounded-lg bg-secondary/50 p-3">
+   369→          <div className="text-[10px] text-muted-foreground uppercase">Portfolio Value</div>
+   370→          <div className="text-lg font-bold font-mono">₹{data.totalValue.toLocaleString()}</div>
+   371→        </div>
+   372→        <div className="rounded-lg bg-secondary/50 p-3">
+   373→          <div className="text-[10px] text-muted-foreground uppercase">Cash Available</div>
+   374→          <div className="text-lg font-bold font-mono text-emerald-400">₹{data.cashAvailable.toLocaleString()}</div>
+   375→        </div>
+   376→        <div className="rounded-lg bg-secondary/50 p-3">
+   377→          <div className="text-[10px] text-muted-foreground uppercase">Sectors</div>
+   378→          <div className="text-lg font-bold font-mono text-indigo-400">{data.sectorCount}</div>
+   379→        </div>
+   380→      </div>
+   381→
+   382→      {data.actions.length > 0 && (
+   383→        <div className="mb-4 space-y-1.5">
+   384→          <h4 className="text-xs font-semibold flex items-center gap-1"><Scale className="h-3 w-3" /> Suggested Actions</h4>
+   385→          {data.actions.map((a: any, i: number) => (
+   386→            <div key={i} className={cn('flex items-center gap-2 text-xs p-2 rounded-lg',
+   387→              a.type === 'REDUCE' ? 'bg-red-500/10' : 'bg-emerald-500/10')}>
+   388→              {a.type === 'REDUCE' ? <ArrowDownRight className="h-3 w-3 text-red-400" /> : <ArrowUpRight className="h-3 w-3 text-emerald-400" />}
+   389→              <Badge variant="outline" className={cn('text-[9px] h-4', a.type === 'REDUCE' ? 'text-red-400' : 'text-emerald-400')}>{a.type}</Badge>
+   390→              <span>{a.note}</span>
+   391→              <span className="ml-auto font-mono">₹{a.amount.toLocaleString()}</span>
+   392→            </div>
+   393→          ))}
+   394→        </div>
+   395→      )}
+   396→
+   397→      <h4 className="text-xs font-semibold mb-2">Sector Allocation</h4>
+   398→      <ScrollArea className="max-h-[180px]">
+   399→        <table className="w-full text-xs">
+   400→          <thead><tr className="border-b border-border text-muted-foreground">
+   401→            <th className="text-left py-1 font-medium">Sector</th>
+   402→            <th className="text-right py-1 font-medium">Value</th>
+   403→            <th className="text-right py-1 font-medium">Now</th>
+   404→            <th className="text-right py-1 font-medium">Target</th>
+   405→            <th className="text-right py-1 font-medium">Diff</th>
+   406→          </tr></thead>
+   407→          <tbody>
+   408→            {data.allocations.map((a: any) => (
+   409→              <tr key={a.sector} className="border-b border-border/30">
+   410→                <td className="py-1">{a.sector}</td>
+   411→                <td className="text-right py-1 font-mono">₹{a.value.toLocaleString()}</td>
+   412→                <td className="text-right py-1 font-mono">{a.currentPct}%</td>
+   413→                <td className="text-right py-1 font-mono text-muted-foreground">{a.targetPct}%</td>
+   414→                <td className={cn('text-right py-1 font-mono', Math.abs(a.diff) > 10 ? (a.diff > 0 ? 'text-red-400' : 'text-emerald-400') : 'text-muted-foreground')}>
+   415→                  {a.diff > 0 ? '+' : ''}{a.diff}%
+   416→                </td>
+   417→              </tr>
+   418→            ))}
+   419→          </tbody>
+   420→        </table>
+   421→      </ScrollArea>
+   422→    </div>
+   423→  );
+   424→}
+   425→
+   426→// ── SIP Tracker (Analytics version) ────────────────────
+   427→function SIPTracker() {
+   428→  const [data, setData] = useState<any>(null);
+   429→  const [loading, setLoading] = useState(true);
+   430→  useEffect(() => {
+   431→    (async () => {
+   432→      try {
+   433→        const res = await fetch('/api/portfolio/sip');
+   434→        const d = await res.json();
+   435→        if (d.success) setData(d);
+   436→      } catch { /* ignore */ }
+   437→      finally { setLoading(false); }
+   438→    })();
+   439→  }, []);
+   440→  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+   441→  if (!data || data.plans.length === 0) return <p className="text-center py-8 text-muted-foreground text-sm">No active SIP plans. Create one in Settings → SIP Plans.</p>;
+   442→  return (
+   443→    <div>
+   444→      <div className="grid grid-cols-2 gap-3 mb-4">
+   445→        <div className="rounded-lg bg-secondary/50 p-3">
+   446→          <div className="text-[10px] text-muted-foreground uppercase">Total Invested</div>
+   447→          <div className="text-lg font-bold font-mono">₹{Math.round(data.totalInvested).toLocaleString()}</div>
+   448→        </div>
+   449→        <div className="rounded-lg bg-secondary/50 p-3">
+   450→          <div className="text-[10px] text-muted-foreground uppercase">Current Value</div>
+   451→          <div className={cn('text-lg font-bold font-mono', (data.totalCurrentValue - data.totalInvested) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   452→            ₹{Math.round(data.totalCurrentValue).toLocaleString()}
+   453→          </div>
+   454→        </div>
+   455→      </div>
+   456→      <ScrollArea className="max-h-[300px]">
+   457→        <table className="w-full text-xs">
+   458→          <thead><tr className="border-b border-border text-muted-foreground">
+   459→            <th className="text-left py-1 font-medium">Symbol</th><th className="text-right py-1 font-medium">Amount</th>
+   460→            <th className="text-right py-1 font-medium">Frequency</th><th className="text-right py-1 font-medium">Installments</th>
+   461→            <th className="text-right py-1 font-medium">Avg Price</th><th className="text-right py-1 font-medium">Return</th>
+   462→          </tr></thead>
+   463→          <tbody>
+   464→            {data.plans.map((p: any) => (
+   465→              <tr key={p.id} className="border-b border-border/30">
+   466→                <td className="py-1.5 font-semibold">{p.symbol}</td>
+   467→                <td className="text-right py-1.5 font-mono">₹{p.amount.toLocaleString()}</td>
+   468→                <td className="text-right py-1.5"><Badge variant="outline" className="text-[9px] h-4">{p.frequency}</Badge></td>
+   469→                <td className="text-right py-1.5 font-mono">{p.installmentsCompleted}</td>
+   470→                <td className="text-right py-1.5 font-mono">₹{p.avgPrice > 0 ? p.avgPrice.toFixed(1) : '—'}</td>
+   471→                <td className={cn('text-right py-1.5 font-mono', p.returnPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   472→                  {p.returnPct.toFixed(1)}%
+   473→                </td>
+   474→              </tr>
+   475→            ))}
+   476→          </tbody>
+   477→        </table>
+   478→      </ScrollArea>
+   479→    </div>
+   480→  );
+   481→}
+   482→
+   483→// ── Dividend Tracker (Analytics version) ───────────────
+   484→function DividendTracker() {
+   485→  const [data, setData] = useState<any>(null);
+   486→  const [loading, setLoading] = useState(true);
+   487→  useEffect(() => {
+   488→    (async () => {
+   489→      try {
+   490→        const res = await fetch('/api/portfolio/dividends');
+   491→        const d = await res.json();
+   492→        if (d.success) setData(d);
+   493→      } catch { /* ignore */ }
+   494→      finally { setLoading(false); }
+   495→    })();
+   496→  }, []);
+   497→  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+   498→  if (!data || data.dividends.length === 0) return <p className="text-center py-8 text-muted-foreground text-sm">No dividends recorded. Add them in Settings → Dividends.</p>;
+   499→  const s = data.summary;
+   500→  const byYearEntries = Object.entries(s.byYear).sort((a, b) => b[0].localeCompare(a[0]));
+   501→  return (
+   502→    <div>
+   503→      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+   504→        <div className="rounded-lg bg-emerald-500/10 p-3">
+   505→          <div className="text-[10px] text-emerald-400 uppercase">Total Dividends</div>
+   506→          <div className="text-lg font-bold font-mono text-emerald-400">₹{s.totalDividends.toLocaleString()}</div>
+   507→        </div>
+   508→        <div className="rounded-lg bg-secondary/50 p-3">
+   509→          <div className="text-[10px] text-muted-foreground uppercase">Stocks</div>
+   510→          <div className="text-lg font-bold font-mono">{s.uniqueStocks}</div>
+   511→        </div>
+   512→        {byYearEntries.slice(0, 2).map(([year, amount]) => (
+   513→          <div key={year} className="rounded-lg bg-secondary/50 p-3">
+   514→            <div className="text-[10px] text-muted-foreground uppercase">{year}</div>
+   515→            <div className="text-lg font-bold font-mono text-emerald-400">₹{Math.round(amount as number).toLocaleString()}</div>
+   516→          </div>
+   517→        ))}
+   518→      </div>
+   519→      <h4 className="text-xs font-semibold mb-2">By Stock</h4>
+   520→      <ScrollArea className="max-h-[200px]">
+   521→        <div className="space-y-1 pr-2">
+   522→          {Object.entries(s.bySymbol).slice(0, 15).map(([sym, amt]) => (
+   523→            <div key={sym} className="flex items-center justify-between text-xs py-1.5 border-b border-border/30">
+   524→              <span className="font-semibold">{sym}</span>
+   525→              <span className="font-mono text-emerald-400">₹{Math.round(amt as number).toLocaleString()}</span>
+   526→            </div>
+   527→          ))}
+   528→        </div>
+   529→      </ScrollArea>
+   530→    </div>
+   531→  );
+   532→}
+   533→
+   534→// ── R-Multiple Distribution ────────────────────────────
+   535→function RMultipleDistribution() {
+   536→  const [data, setData] = useState<any>(null);
+   537→  const [loading, setLoading] = useState(true);
+   538→
+   539→  useEffect(() => {
+   540→    (async () => {
+   541→      try {
+   542→        const res = await fetch('/api/portfolio/risk-metrics');
+   543→        const json = await res.json();
+   544→        if (json.success) setData(json);
+   545→      } catch { /* ignore */ }
+   546→      finally { setLoading(false); }
+   547→    })();
+   548→  }, []);
+   549→
+   550→  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+   551→  if (!data || !data.rMultiples?.length) return <p className="text-center py-8 text-muted-foreground text-sm">No closed trades yet.</p>;
+   552→
+   553→  const rMultiples = data.rMultiples;
+   554→  const m = data.metrics;
+   555→
+   556→  // Build histogram buckets
+   557→  const buckets: { range: string; count: number; positive: boolean }[] = [];
+   558→  const ranges = [
+   559→    [-10, -3], [-3, -2], [-2, -1], [-1, -0.5], [-0.5, 0],
+   560→    [0, 0.5], [0.5, 1], [1, 1.5], [1.5, 2], [2, 3], [3, 10],
+   561→  ];
+   562→  for (const [lo, hi] of ranges) {
+   563→    const count = rMultiples.filter(r => r >= lo && r < hi).length;
+   564→    if (count > 0) buckets.push({ range: `${lo}R to ${hi}R`, count, positive: lo >= 0 });
+   565→  }
+   566→
+   567→  return (
+   568→    <div className="space-y-4">
+   569→      <div className="flex items-center justify-between">
+   570→        <h3 className="text-sm font-semibold">R-Multiple Distribution</h3>
+   571→        <div className="flex gap-4 text-xs">
+   572→          <span className="text-muted-foreground">Avg: <span className={cn('font-bold', (m.avgRMultiple || 0) >= 1 ? 'text-emerald-400' : 'text-red-400')}>{m.avgRMultiple?.toFixed(2) || 0}R</span></span>
+   573→          <span className="text-muted-foreground">Expectancy: <span className={cn('font-bold', (m.expectancy || 0) > 0 ? 'text-emerald-400' : 'text-red-400')}>{m.expectancy?.toFixed(2) || 0}%</span></span>
+   574→        </div>
+   575→      </div>
+   576→      <div className="h-[250px]">
+   577→        <ResponsiveContainer width="100%" height="100%">
+   578→          <BarChart data={buckets}>
+   579→            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+   580→            <XAxis dataKey="range" tick={{ fontSize: 9, fill: '#71717a' }} angle={-45} textAnchor="end" height={60} />
+   581→            <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
+   582→            <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 11 }} />
+   583→            <ReferenceLine x={0} stroke="rgba(255,255,255,0.2)" />
+   584→            <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+   585→              {buckets.map((b, i) => <Cell key={i} fill={b.positive ? '#10b981' : '#ef4444'} fillOpacity={0.8} />)}
+   586→            </Bar>
+   587→          </BarChart>
+   588→        </ResponsiveContainer>
+   589→      </div>
+   590→      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+   591→        <div className="rounded-lg bg-secondary/50 p-3">
+   592→          <div className="text-[10px] text-muted-foreground uppercase">Profit Factor</div>
+   593→          <div className={cn('text-lg font-bold font-mono', (m.profitFactor || 0) >= 1.5 ? 'text-emerald-400' : 'text-amber-400')}>
+   594→            {m.profitFactor?.toFixed(2) || '0'}x
+   595→          </div>
+   596→        </div>
+   597→        <div className="rounded-lg bg-secondary/50 p-3">
+   598→          <div className="text-[10px] text-muted-foreground uppercase">Avg Win</div>
+   599→          <div className="text-lg font-bold font-mono text-emerald-400">{m.avgWin?.toFixed(2) || 0}%</div>
+   600→        </div>
+   601→        <div className="rounded-lg bg-secondary/50 p-3">
+   602→          <div className="text-[10px] text-muted-foreground uppercase">Avg Loss</div>
+   603→          <div className="text-lg font-bold font-mono text-red-400">{m.avgLoss?.toFixed(2) || 0}%</div>
+   604→        </div>
+   605→        <div className="rounded-lg bg-secondary/50 p-3">
+   606→          <div className="text-[10px] text-muted-foreground uppercase">Win Rate</div>
+   607→          <div className="text-lg font-bold font-mono text-indigo-400">{m.winRate?.toFixed(1) || 0}%</div>
+   608→        </div>
+   609→      </div>
+   610→    </div>
+   611→  );
+   612→}
+   613→
+   614→// ── Equity Curve with Drawdown ─────────────────────────
+   615→function EquityCurveCard() {
+   616→  const [data, setData] = useState<any>(null);
+   617→  const [loading, setLoading] = useState(true);
+   618→
+   619→  useEffect(() => {
+   620→    (async () => {
+   621→      try {
+   622→        const res = await fetch('/api/portfolio/equity-curve?days=90');
+   623→        const json = await res.json();
+   624→        if (json.success) setData(json);
+   625→      } catch { /* ignore */ }
+   626→      finally { setLoading(false); }
+   627→    })();
+   628→  }, []);
+   629→
+   630→  if (loading) return <div className="text-center py-8 text-muted-foreground text-sm"><Loader2 className="h-4 w-4 mx-auto animate-spin" /></div>;
+   631→  if (!data || !data.chartData?.length) return (
+   632→    <div className="text-center py-8">
+   633→      <p className="text-sm text-muted-foreground">No equity curve data yet.</p>
+   634→      <p className="text-xs text-muted-foreground mt-1">NAV snapshots are taken when you visit Dashboard or Analytics.</p>
+   635→    </div>
+   636→  );
+   637→
+   638→  const s = data.summary;
+   639→
+   640→  return (
+   641→    <div className="space-y-4">
+   642→      <div className="flex items-center justify-between">
+   643→        <h3 className="text-sm font-semibold">Equity Curve & Drawdown</h3>
+   644→        <div className="flex gap-3 text-xs">
+   645→          <span className="text-muted-foreground">NAV: <span className="font-bold font-mono">₹{s.currentNAV.toLocaleString()}</span></span>
+   646→          <span className={cn('font-mono', s.totalReturn >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   647→            {s.totalReturn >= 0 ? '+' : ''}{s.totalReturn.toFixed(2)}%
+   648→          </span>
+   649→        </div>
+   650→      </div>
+   651→      <div className="h-[280px]">
+   652→        <ResponsiveContainer width="100%" height="100%">
+   653→          <ComposedChart data={data.chartData}>
+   654→            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+   655→            <XAxis dataKey="date" tick={{ fontSize: 9, fill: '#71717a' }} interval={Math.floor(data.chartData.length / 6)} />
+   656→            <YAxis yAxisId="nav" tick={{ fontSize: 10, fill: '#71717a' }} />
+   657→            <YAxis yAxisId="dd" orientation="right" tick={{ fontSize: 9, fill: '#ef4444' }} />
+   658→            <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 11 }} />
+   659→            <ReferenceLine yAxisId="dd" y={0} stroke="rgba(255,255,255,0.15)" />
+   660→            <Area yAxisId="nav" type="monotone" dataKey="nav" stroke="#6366f1" fill="url(#navGrad)" strokeWidth={2} name="NAV" dot={false} />
+   661→            <Bar yAxisId="dd" dataKey="drawdown" fill="#ef4444" fillOpacity={0.3} name="Drawdown %" />
+   662→            <Legend wrapperStyle={{ fontSize: 11 }} />
+   663→            <defs>
+   664→              <linearGradient id="navGrad" x1="0" y1="0" x2="0" y2="1">
+   665→                <stop offset="5%" stopColor="#6366f1" stopOpacity={0.15} />
+   666→                <stop offset="95%" stopColor="transparent" stopOpacity={0} />
+   667→              </linearGradient>
+   668→            </defs>
+   669→          </ComposedChart>
+   670→        </ResponsiveContainer>
+   671→      </div>
+   672→      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+   673→        {[
+   674→          { l: 'Total Return', v: `${s.totalReturn >= 0 ? '+' : ''}${s.totalReturn.toFixed(2)}%`, c: s.totalReturn >= 0 ? 'text-emerald-400' : 'text-red-400' },
+   675→          { l: 'Max Drawdown', v: `-${s.maxDD.toFixed(2)}%`, c: 'text-red-400' },
+   676→          { l: 'Best Day', v: `+₹${s.bestDay.toLocaleString()}`, c: 'text-emerald-400' },
+   677→          { l: 'Worst Day', v: `₹${s.worstDay.toLocaleString()}`, c: 'text-red-400' },
+   678→          { l: 'Positive Days', v: `${s.positiveDays}/${s.snapshots}`, c: 'text-indigo-400' },
+   679→        ].map(item => (
+   680→          <div key={item.l} className="rounded-lg bg-secondary/50 p-3">
+   681→            <div className="text-[10px] text-muted-foreground uppercase">{item.l}</div>
+   682→            <div className={cn('text-sm font-bold font-mono mt-0.5', item.c)}>{item.v}</div>
+   683→          </div>
+   684→        ))}
+   685→      </div>
+   686→    </div>
+   687→  );
+   688→}
+   689→
+   690→// ── Main Analytics Tab ─────────────────────────────────
+   691→export function AnalyticsTab() {
+   692→  const [trades, setTrades] = useState<any[]>([]);
+   693→  const [analyticsData, setAnalyticsData] = useState<any>(null);
+   694→  const [loading, setLoading] = useState(true);
+   695→
+   696→  const fetchAnalytics = useCallback(async () => {
+   697→    setLoading(true);
+   698→    try {
+   699→      const res = await fetch('/api/trades');
+   700→      const json = await res.json();
+   701→      const allTrades = json.trades || [];
+   702→      const closed = allTrades.filter((t: any) => t.status === 'CLOSED' && t.pnl != null);
+   703→
+   704→      const wins = closed.filter((t: any) => t.pnl > 0);
+   705→      const totalPnL = closed.reduce((s: number, t: any) => s + t.pnl, 0);
+   706→      const grossProfit = wins.reduce((s: number, t: any) => s + t.pnl, 0);
+   707→      const grossLoss = Math.abs(closed.filter((t: any) => t.pnl <= 0).reduce((s: number, t: any) => s + t.pnl, 0));
+   708→
+   709→      const monthMap = new Map<string, { pnl: number; trades: number }>();
+   710→      for (const t of closed) {
+   711→        const d = new Date(t.exitDate);
+   712→        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+   713→        const prev = monthMap.get(key) || { pnl: 0, trades: 0 };
+   714→        prev.pnl += t.pnl;
+   715→        prev.trades += 1;
+   716→        monthMap.set(key, prev);
+   717→      }
+   718→      const byMonth = Array.from(monthMap.entries()).map(([month, v]) => ({
+   719→        month, pnl: Math.round(v.pnl), trades: v.trades,
+   720→      })).sort((a, b) => a.month.localeCompare(b.month));
+   721→
+   722→      const buckets = [
+   723→        { range: '< -5%', min: -Infinity, max: -5 }, { range: '-5% to -2%', min: -5, max: -2 },
+   724→        { range: '-2% to 0%', min: -2, max: 0 }, { range: '0% to 2%', min: 0, max: 2 },
+   725→        { range: '2% to 5%', min: 2, max: 5 }, { range: '> 5%', min: 5, max: Infinity },
+   726→      ];
+   727→      const pnlDistribution = buckets.map(b => ({
+   728→        range: b.range,
+   729→        count: closed.filter((t: any) => t.pnlPercent >= b.min && t.pnlPercent < b.max).length,
+   730→      }));
+   731→
+   732→      let peak = 0, running = 0, maxDD = 0;
+   733→      for (const t of closed.sort((a: any, b: any) => new Date(a.exitDate).getTime() - new Date(b.exitDate).getTime())) {
+   734→        running += t.pnl;
+   735→        peak = Math.max(peak, running);
+   736→        maxDD = Math.max(maxDD, (peak - running) / peak * 100);
+   737→      }
+   738→
+   739→      setAnalyticsData({
+   740→        trades: closed, totalPnL,
+   741→        winRate: closed.length > 0 ? (wins.length / closed.length) * 100 : 0,
+   742→        avgWin: wins.length > 0 ? grossProfit / wins.length : 0,
+   743→        avgLoss: closed.length - wins.length > 0 ? grossLoss / (closed.length - wins.length) : 0,
+   744→        profitFactor: grossLoss > 0 ? grossProfit / grossLoss : 0,
+   745→        maxDD, byMonth, pnlDistribution,
+   746→      });
+   747→    } catch { /* ignore */ }
+   748→    finally { setLoading(false); }
+   749→  }, []);
+   750→
+   751→  useEffect(() => { fetchAnalytics(); }, [fetchAnalytics]);
+   752→
+   753→  if (loading) return <div className="flex items-center justify-center py-16"><div className="text-center text-muted-foreground"><RefreshCw className="h-6 w-6 mx-auto mb-2 animate-spin" /><p className="text-sm">Loading analytics...</p></div></div>;
+   754→
+   755→  const COLORS = ['#10b981', '#f59e0b', '#6366f1', '#ef4444', '#06b6d4', '#ec4899'];
+   756→
+   757→  return (
+   758→    <div className="space-y-4">
+   759→      <div className="flex items-center justify-between">
+   760→        <h2 className="text-lg font-bold flex items-center gap-2"><BarChart3 className="h-5 w-5 text-indigo-400" /> Analytics</h2>
+   761→        <Button variant="outline" size="sm" onClick={fetchAnalytics} className="gap-2 h-8 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</Button>
+   762→      </div>
+   763→
+   764→      <Tabs defaultValue="overview" className="w-full">
+   765→        <TabsList className="w-full justify-start mb-4">
+   766→          <TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger>
+   767→          <TabsTrigger value="risk" className="text-xs">Risk Metrics</TabsTrigger>
+   768→          <TabsTrigger value="rmultiple" className="text-xs">R-Multiples</TabsTrigger>
+   769→          <TabsTrigger value="equity" className="text-xs">Equity Curve</TabsTrigger>
+   770→          <TabsTrigger value="benchmark" className="text-xs">Benchmark</TabsTrigger>
+   771→          <TabsTrigger value="alerts" className="text-xs">Alerts</TabsTrigger>
+   772→          <TabsTrigger value="tax" className="text-xs">Capital Gains</TabsTrigger>
+   773→          <TabsTrigger value="rebalance" className="text-xs">Rebalance</TabsTrigger>
+   774→          <TabsTrigger value="sip" className="text-xs">SIP</TabsTrigger>
+   775→          <TabsTrigger value="dividends" className="text-xs">Dividends</TabsTrigger>
+   776→        </TabsList>
+   777→
+   778→        <TabsContent value="overview">
+   779→          {analyticsData && analyticsData.trades.length > 0 ? (
+   780→            <div className="space-y-4">
+   781→              <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+   782→                <Card><CardContent className="p-3">
+   783→                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total P&L</div>
+   784→                  <div className={cn('text-xl font-bold mt-1', analyticsData.totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   785→                    {analyticsData.totalPnL >= 0 ? '+' : ''}₹{Math.round(analyticsData.totalPnL).toLocaleString()}
+   786→                  </div>
+   787→                </CardContent></Card>
+   788→                <Card><CardContent className="p-3">
+   789→                  <div className="text-[10px] uppercase tracking-wider text-emerald-400">Win Rate</div>
+   790→                  <div className="text-xl font-bold mt-1 text-emerald-400">{analyticsData.winRate.toFixed(1)}%</div>
+   791→                </CardContent></Card>
+   792→                <Card><CardContent className="p-3">
+   793→                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Profit Factor</div>
+   794→                  <div className={cn('text-xl font-bold mt-1', analyticsData.profitFactor >= 1.5 ? 'text-emerald-400' : analyticsData.profitFactor >= 1 ? 'text-amber-400' : 'text-red-400')}>
+   795→                    {analyticsData.profitFactor.toFixed(2)}x
+   796→                  </div>
+   797→                </CardContent></Card>
+   798→                <Card><CardContent className="p-3">
+   799→                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Avg Win</div>
+   800→                  <div className="text-xl font-bold mt-1 text-emerald-400">+₹{Math.round(analyticsData.avgWin).toLocaleString()}</div>
+   801→                </CardContent></Card>
+   802→                <Card><CardContent className="p-3">
+   803→                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Avg Loss</div>
+   804→                  <div className="text-xl font-bold mt-1 text-red-400">-₹{Math.round(analyticsData.avgLoss).toLocaleString()}</div>
+   805→                </CardContent></Card>
+   806→                <Card><CardContent className="p-3">
+   807→                  <div className="text-[10px] uppercase tracking-wider text-red-400">Max Drawdown</div>
+   808→                  <div className="text-xl font-bold mt-1 text-red-400">{analyticsData.maxDD.toFixed(1)}%</div>
+   809→                </CardContent></Card>
+   810→              </div>
+   811→
+   812→              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+   813→                {analyticsData.byMonth.length > 0 && (
+   814→                  <Card className="border-border"><CardContent className="p-4">
+   815→                    <h3 className="text-sm font-semibold mb-4 flex items-center gap-2"><TrendingUp className="h-4 w-4" /> Monthly P&L</h3>
+   816→                    <div className="h-52">
+   817→                      <ResponsiveContainer width="100%" height="100%">
+   818→                        <BarChart data={analyticsData.byMonth}>
+   819→                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+   820→                          <XAxis dataKey="month" tick={{ fontSize: 10, fill: '#71717a' }} />
+   821→                          <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
+   822→                          <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} formatter={(v: number) => [`₹${v.toLocaleString()}`, 'P&L']} />
+   823→                          <ReferenceLine y={0} stroke="rgba(255,255,255,0.3)" />
+   824→                          <Bar dataKey="pnl" name="P&L" radius={[3, 3, 0, 0]}>
+   825→                            {analyticsData.byMonth.map((m: any, i: number) => <Cell key={i} fill={m.pnl >= 0 ? '#10b981' : '#ef4444'} fillOpacity={0.7} />)}
+   826→                          </Bar>
+   827→                        </BarChart>
+   828→                      </ResponsiveContainer>
+   829→                    </div>
+   830→                  </CardContent></Card>
+   831→                )}
+   832→
+   833→                <Card className="border-border"><CardContent className="p-4">
+   834→                  <h3 className="text-sm font-semibold mb-4 flex items-center gap-2"><PieIcon className="h-4 w-4" /> P&L Distribution</h3>
+   835→                  <div className="h-52">
+   836→                    <ResponsiveContainer width="100%" height="100%">
+   837→                      <BarChart data={analyticsData.pnlDistribution} layout="vertical">
+   838→                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+   839→                        <XAxis type="number" tick={{ fontSize: 10, fill: '#71717a' }} />
+   840→                        <YAxis dataKey="range" type="category" tick={{ fontSize: 10, fill: '#71717a' }} width={80} />
+   841→                        <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} />
+   842→                        <Bar dataKey="count" name="Trades" radius={[0, 3, 3, 0]}>
+   843→                          {analyticsData.pnlDistribution.map((_: any, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} fillOpacity={0.7} />)}
+   844→                        </Bar>
+   845→                      </BarChart>
+   846→                    </ResponsiveContainer>
+   847→                  </div>
+   848→                </CardContent></Card>
+   849→
+   850→                {analyticsData.trades.length > 1 && (
+   851→                  <Card className="border-border lg:col-span-2"><CardContent className="p-4">
+   852→                    <h3 className="text-sm font-semibold mb-4">Cumulative P&L</h3>
+   853→                    <div className="h-52">
+   854→                      <ResponsiveContainer width="100%" height="100%">
+   855→                        <AreaChart data={(() => { let cum = 0; return analyticsData.trades.map((t: any, i: number) => { cum += t.pnl; return { idx: i + 1, cumPnL: Math.round(cum), pnl: Math.round(t.pnl) }; }); })()}>
+   856→                          <defs><linearGradient id="cumGrad2" x1="0" y1="0" x2="0" y2="1">
+   857→                            <stop offset="5%" stopColor={analyticsData.totalPnL >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
+   858→                            <stop offset="95%" stopColor="transparent" stopOpacity={0} />
+   859→                          </linearGradient></defs>
+   860→                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+   861→                          <XAxis dataKey="idx" tick={{ fontSize: 10, fill: '#71717a' }} />
+   862→                          <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
+   863→                          <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} />
+   864→                          <ReferenceLine y={0} stroke="rgba(255,255,255,0.3)" />
+   865→                          <Area type="monotone" dataKey="cumPnL" stroke={analyticsData.totalPnL >= 0 ? '#10b981' : '#ef4444'} fill="url(#cumGrad2)" strokeWidth={2} />
+   866→                        </AreaChart>
+   867→                      </ResponsiveContainer>
+   868→                    </div>
+   869→                  </CardContent></Card>
+   870→                )}
+   871→              </div>
+   872→            </div>
+   873→          ) : (
+   874→            <div className="text-center py-16 text-muted-foreground">
+   875→              <LineChart className="h-12 w-12 mx-auto mb-3 opacity-20" />
+   876→              <p className="text-sm">Close some trades to see analytics.</p>
+   877→            </div>
+   878→          )}
+   879→        </TabsContent>
+   880→
+   881→        <TabsContent value="risk"><Card className="border-border"><CardContent className="p-4"><RiskMetricsCard /></CardContent></Card></TabsContent>
+   882→        <TabsContent value="rmultiple"><Card className="border-border"><CardContent className="p-4"><RMultipleDistribution /></CardContent></Card></TabsContent>
+   883→        <TabsContent value="equity"><Card className="border-border"><CardContent className="p-4"><EquityCurveCard /></CardContent></Card></TabsContent>
+   884→        <TabsContent value="benchmark"><Card className="border-border"><CardContent className="p-4"><BenchmarkChart /></CardContent></Card></TabsContent>
+   885→        <TabsContent value="alerts"><Card className="border-border"><CardContent className="p-4"><AlertsPanel /></CardContent></Card></TabsContent>
+   886→        <TabsContent value="tax"><Card className="border-border"><CardContent className="p-4"><CapitalGainsReport /></CardContent></Card></TabsContent>
+   887→        <TabsContent value="rebalance"><Card className="border-border"><CardContent className="p-4"><RebalancePanel /></CardContent></Card></TabsContent>
+   888→        <TabsContent value="sip"><Card className="border-border"><CardContent className="p-4"><SIPTracker /></CardContent></Card></TabsContent>
+   889→        <TabsContent value="dividends"><Card className="border-border"><CardContent className="p-4"><DividendTracker /></CardContent></Card></TabsContent>
+   890→      </Tabs>
+   891→    </div>
+   892→  );
+   893→}
