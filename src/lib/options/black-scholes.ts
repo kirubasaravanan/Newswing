@@ -1,6 +1,15 @@
 /**
  * Black-Scholes Options Pricing Engine
  * Implements standard BS model with Greeks, IV solver, and Greeks-based SL/TP.
+ * 
+ * Supports dividend yield (q) for stock options via Black-Scholes-Merton model:
+ *   d1 = [ln(S/K) + (r - q + σ²/2)T] / (σ√T)
+ *   d2 = d1 - σ√T
+ *   CE = S·e^(-qT)·N(d1) - K·e^(-rT)·N(d2)
+ *   PE = K·e^(-rT)·N(-d2) - S·e^(-qT)·N(-d1)
+ * 
+ * Index options: q = 0 (no dividends, cash-settled)
+ * Stock options: q = dividend yield (e.g., ITC ~3%, HINDUNILVR ~1.5%)
  */
 
 // ── Normal Distribution ──────────────────────────────────────
@@ -39,13 +48,14 @@ export interface BlackScholesResult {
 }
 
 /**
- * Black-Scholes option pricing
+ * Black-Scholes-Merton option pricing (with dividend yield support)
  * @param S - Spot price
  * @param K - Strike price
  * @param T - Time to expiry in YEARS
  * @param r - Risk-free rate (0.07 for India)
  * @param sigma - Implied volatility as decimal (e.g. 0.15 for 15%)
  * @param type - 'CE' or 'PE'
+ * @param q - Dividend yield (0 for index options, ~0.01-0.04 for stocks)
  */
 export function blackScholes(
   S: number,
@@ -53,7 +63,8 @@ export function blackScholes(
   T: number,
   r: number,
   sigma: number,
-  type: 'CE' | 'PE'
+  type: 'CE' | 'PE',
+  q: number = 0
 ): BlackScholesResult {
   if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) {
     // At expiry or invalid: intrinsic value only
@@ -62,7 +73,7 @@ export function blackScholes(
   }
 
   const sqrtT = Math.sqrt(T);
-  const d1 = (Math.log(S / K) + (r + (sigma * sigma) / 2) * T) / (sigma * sqrtT);
+  const d1 = (Math.log(S / K) + (r - q + (sigma * sigma) / 2) * T) / (sigma * sqrtT);
   const d2 = d1 - sigma * sqrtT;
 
   const nd1 = normalPDF(d1);
@@ -72,21 +83,26 @@ export function blackScholes(
   const Nnd2 = normalCDF(-d2);
 
   const expRT = Math.exp(-r * T);
+  const expQT = Math.exp(-q * T); // Dividend yield discount
 
   let premium: number;
   let delta: number;
 
   if (type === 'CE') {
-    premium = S * Nd1 - K * expRT * Nd2;
-    delta = Nd1;
+    premium = S * expQT * Nd1 - K * expRT * Nd2;
+    delta = Math.exp(-q * T) * Nd1; // Delta adjusted for dividends
   } else {
-    premium = K * expRT * Nnd2 - S * Nnd1;
-    delta = Nd1 - 1;
+    premium = K * expRT * Nnd2 - S * expQT * Nnd1;
+    delta = Math.exp(-q * T) * (Nd1 - 1);
   }
 
-  const gamma = nd1 / (S * sigma * sqrtT);
-  // Theta per day (365 days convention for India)
-  const theta = (-S * nd1 * sigma / (2 * sqrtT) - r * K * expRT * (type === 'CE' ? Nd2 : -Nnd2)) / 365;
+  const gamma = nd1 * Math.exp(-q * T) / (S * sigma * sqrtT);
+  // Theta per day (365 days convention for India) — includes dividend yield
+  const theta = (
+    -S * nd1 * sigma * Math.exp(-q * T) / (2 * sqrtT)
+    + q * S * Math.exp(-q * T) * (type === 'CE' ? Nd1 : -Nnd1)
+    - r * K * expRT * (type === 'CE' ? Nd2 : -Nnd2)
+  ) / 365;
   // Vega per 1% change in IV
   const vega = (S * nd1 * sqrtT) / 100;
 
@@ -286,10 +302,73 @@ export function calculateGreeksSL(config: GreeksSLConfig): GreeksSLResult {
 
 // ── Lot Size Mapping ─────────────────────────────────────────
 
+// ── Dividend Yield Estimates (Annual) ───────────────────────
+// Approximate dividend yields for major F&O stocks.
+// In production, fetch from exchange or financial data API.
+
+const DIVIDEND_YIELDS: Record<string, number> = {
+  // Indices have no dividends (cash-settled)
+  NIFTY: 0,
+  BANKNIFTY: 0,
+  FINNIFTY: 0,
+  NIFTYIT: 0,
+  MIDCPNIFTY: 0,
+  // High dividend yield stocks
+  ITC: 0.032,
+  HINDUNILVR: 0.015,
+  COALINDIA: 0.045,
+  BPCL: 0.028,
+  HPCL: 0.035,
+  IOC: 0.040,
+  NTPC: 0.030,
+  POWERGRID: 0.035,
+  // Moderate dividend yield
+  RELIANCE: 0.004,
+  TCS: 0.012,
+  INFY: 0.023,
+  HDFCBANK: 0.011,
+  ICICIBANK: 0.008,
+  SBIN: 0.010,
+  AXISBANK: 0.005,
+  KOTAKBANK: 0.001,
+  BAJFINANCE: 0.003,
+  LT: 0.015,
+  BHARTIARTL: 0.003,
+  MARUTI: 0.005,
+  TATAMOTORS: 0.001,
+  SUNPHARMA: 0.003,
+  WIPRO: 0.003,
+  ASIANPAINT: 0.008,
+  HCLTECH: 0.040,
+  ADANIENT: 0,
+  TATASTEEL: 0.020,
+};
+
+export function getDividendYield(symbol: string): number {
+  return DIVIDEND_YIELDS[symbol] ?? 0.01; // Default 1% for unknown stocks
+}
+
+// ── Symbol Classification ─────────────────────────────────────
+
+export const INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'NIFTYIT', 'MIDCPNIFTY'] as const;
+export type IndexSymbol = typeof INDEX_SYMBOLS[number];
+
+export function isIndexSymbol(symbol: string): boolean {
+  return INDEX_SYMBOLS.includes(symbol as IndexSymbol);
+}
+
+export function getSymbolType(symbol: string): 'index' | 'stock' {
+  return isIndexSymbol(symbol) ? 'index' : 'stock';
+}
+
+// ── Lot Size Mapping ─────────────────────────────────────────
+
 const LOT_SIZES: Record<string, number> = {
   NIFTY: 25,
   BANKNIFTY: 15,
   FINNIFTY: 25,
+  NIFTYIT: 25,
+  MIDCPNIFTY: 50,
   RELIANCE: 250,
   TCS: 175,
   INFY: 300,
@@ -314,7 +393,16 @@ const LOT_SIZES: Record<string, number> = {
 };
 
 export function getOptionLotSize(symbol: string): number {
-  return LOT_SIZES[symbol] ?? 100;
+  return LOT_SIZES[symbol] ?? 100; // Default lot size for unknown F&O stocks
+}
+
+// ── Settlement Type ───────────────────────────────────────────
+// All Indian options are European-style (exercise only at expiry)
+// Index options: Cash-settled
+// Stock options: Physical settlement (delivery of shares)
+
+export function getSettlementType(symbol: string): 'cash' | 'physical' {
+  return isIndexSymbol(symbol) ? 'cash' : 'physical';
 }
 
 // ── Time to Expiry Helper ────────────────────────────────────

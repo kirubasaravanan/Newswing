@@ -1,6 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { blackScholes, impliedVolatility, calculateGreeksSL, getOptionLotSize, timeToExpiryYears, daysToExpiry as dte } from '@/lib/options/black-scholes';
+import { z } from 'zod';
+import { blackScholes, impliedVolatility, calculateGreeksSL, getOptionLotSize, timeToExpiryYears, daysToExpiry as dte, getDividendYield } from '@/lib/options/black-scholes';
+
+// ── Zod Schemas ───────────────────────────────────────────────
+
+const createOptionTradeSchema = z.object({
+  symbol: z.string().min(1, 'Symbol is required'),
+  optionType: z.enum(['CE', 'PE'], { errorMap: () => ({ message: 'optionType must be CE or PE' }) }),
+  action: z.enum(['BUY', 'SELL'], { errorMap: () => ({ message: 'action must be BUY or SELL' }) }),
+  strikePrice: z.coerce.number().positive('Strike must be positive'),
+  expiryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expiry must be YYYY-MM-DD'),
+  lotSize: z.coerce.number().int().positive().optional(),
+  qty: z.coerce.number().int().positive().optional().default(1),
+  entryPremium: z.coerce.number().positive('Entry premium must be positive'),
+  stopLoss: z.coerce.number().positive().optional(),
+  takeProfit: z.coerce.number().positive().optional(),
+  notes: z.string().max(500).optional(),
+  tags: z.string().max(200).optional(),
+  underlyingPrice: z.coerce.number().positive().optional(),
+  strategyId: z.string().optional(),
+});
+
+const closeTradeSchema = z.object({
+  id: z.string().min(1, 'Trade ID is required'),
+  exitPremium: z.coerce.number().positive().optional(),
+  exitReason: z.enum(['MANUAL', 'SL_HIT', 'TP_HIT', 'EXPIRED', 'THETA_DECAY']).optional(),
+});
 
 // GET all option trades
 export async function GET(request: NextRequest) {
@@ -29,12 +55,20 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    const parsed = createOptionTradeSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { success: false, error: 'Validation failed', details: parsed.error.flatten().fieldErrors },
+        { status: 400 }
+      );
+    }
+
     const {
       symbol, optionType, action, strikePrice, expiryDate,
       lotSize, qty, entryPremium,
       stopLoss, takeProfit, notes, tags,
       underlyingPrice, strategyId,
-    } = body;
+    } = parsed.data;
 
     // Get spot price
     const spot = underlyingPrice || 0;
@@ -42,15 +76,16 @@ export async function POST(request: NextRequest) {
     const T = timeToExpiryYears(expiryDate);
     const d = dte(expiryDate);
 
-    // Calculate Greeks from premium
+    // Calculate Greeks from premium (with dividend yield for stocks)
     let iv: number;
+    const q = getDividendYield(symbol);
     try {
       iv = impliedVolatility(spot, strikePrice, T, r, entryPremium, optionType);
     } catch {
       iv = 0.15; // fallback
     }
 
-    const bs = blackScholes(spot, strikePrice, T, r, iv, optionType);
+    const bs = blackScholes(spot, strikePrice, T, r, iv, optionType, q);
 
     // Auto-calculate SL/TP if not provided
     let sl = stopLoss;
@@ -127,7 +162,14 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json();
-    const { id, exitPremium, exitReason } = body;
+    const parsed = closeTradeSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { success: false, error: 'Validation failed', details: parsed.error.flatten().fieldErrors },
+        { status: 400 }
+      );
+    }
+    const { id, exitPremium, exitReason } = parsed.data;
 
     const trade = await db.optionTrade.findUnique({ where: { id } });
     if (!trade) {

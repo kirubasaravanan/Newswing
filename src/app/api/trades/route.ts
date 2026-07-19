@@ -1,5 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { z } from 'zod';
+
+// ── Zod Schemas ───────────────────────────────────────────────
+
+const createTradeSchema = z.object({
+  symbol: z.string().min(1, 'Symbol is required'),
+  stockName: z.string().max(100).optional(),
+  direction: z.enum(['LONG', 'SHORT']).default('LONG'),
+  entryDate: z.string().optional(),
+  entryPrice: z.coerce.number().positive('Entry price must be positive'),
+  qty: z.coerce.number().int().positive('Quantity must be positive'),
+  stopLoss: z.coerce.number().positive('Stop loss must be positive'),
+  targetPrice: z.coerce.number().positive('Target price must be positive'),
+  notes: z.string().max(1000).optional(),
+  tags: z.string().max(200).optional(),
+  autoTraded: z.boolean().optional().default(false),
+  exitReason: z.string().optional(),
+  portfolioId: z.string().optional(),
+});
+
+const closeTradeSchema = z.object({
+  id: z.string().min(1, 'Trade ID required'),
+  exitDate: z.string().optional(),
+  exitPrice: z.coerce.number().positive('Exit price must be positive').optional(),
+  status: z.enum(['CLOSED', 'CANCELLED']).optional(),
+  exitReason: z.string().max(100).optional(),
+});
 
 // GET all paper trades
 export async function GET() {
@@ -18,20 +45,28 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    const parsed = createTradeSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { success: false, error: 'Validation failed', details: parsed.error.flatten().fieldErrors },
+        { status: 400 }
+      );
+    }
+
     const trade = await db.paperTrade.create({
       data: {
-        symbol: body.symbol,
-        stockName: body.stockName || null,
-        direction: body.direction || 'LONG',
-        entryDate: new Date(body.entryDate || Date.now()),
-        entryPrice: parseFloat(body.entryPrice),
-        qty: parseInt(body.qty),
-        stopLoss: parseFloat(body.stopLoss),
-        targetPrice: parseFloat(body.targetPrice),
-        notes: body.notes || null,
-        tags: body.tags || null,
-        autoTraded: body.autoTraded || false,
-        exitReason: body.exitReason || null,
+        symbol: parsed.data.symbol,
+        stockName: parsed.data.stockName || null,
+        direction: parsed.data.direction,
+        entryDate: new Date(parsed.data.entryDate || Date.now()),
+        entryPrice: parsed.data.entryPrice,
+        qty: parsed.data.qty,
+        stopLoss: parsed.data.stopLoss,
+        targetPrice: parsed.data.targetPrice,
+        notes: parsed.data.notes || null,
+        tags: parsed.data.tags || null,
+        autoTraded: parsed.data.autoTraded,
+        exitReason: parsed.data.exitReason || null,
       },
     });
     return NextResponse.json({ success: true, trade });
@@ -40,64 +75,71 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// PUT update a trade (close it) — updates CapitalWallet like a real PMS
+// PUT update a trade (close it) — uses Prisma transaction for wallet + trade atomicity
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json();
-    const { id, exitDate, exitPrice, status, exitReason } = body;
-
-    const trade = await db.paperTrade.findUnique({ where: { id } });
-    if (!trade) {
-      return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
+    const parsed = closeTradeSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { success: false, error: 'Validation failed', details: parsed.error.flatten().fieldErrors },
+        { status: 400 }
+      );
     }
+    const { id, exitDate, exitPrice, status, exitReason } = parsed.data;
 
-    // Calculate P&L with direction awareness
-    let pnl: number | null = null;
-    let pnlPercent: number | null = null;
+    // Use Prisma transaction for atomic trade close + wallet update
+    const result = await db.$transaction(async (tx) => {
+      const trade = await tx.paperTrade.findUnique({ where: { id } });
+      if (!trade) throw new Error('Trade not found');
 
-    if (exitPrice != null) {
-      const ep = trade.entryPrice;
-      const xp = parseFloat(exitPrice);
-      if (trade.direction === 'SHORT') {
-        // SHORT: profit when price goes down
-        pnl = (ep - xp) * trade.qty;
-        pnlPercent = ((ep - xp) / ep) * 100;
-      } else {
-        // LONG: profit when price goes up
-        pnl = (xp - ep) * trade.qty;
-        pnlPercent = ((xp - ep) / ep) * 100;
+      let pnl: number | null = null;
+      let pnlPercent: number | null = null;
+
+      if (exitPrice != null) {
+        const ep = trade.entryPrice;
+        const xp = exitPrice;
+        if (trade.direction === 'SHORT') {
+          pnl = (ep - xp) * trade.qty;
+          pnlPercent = ((ep - xp) / ep) * 100;
+        } else {
+          pnl = (xp - ep) * trade.qty;
+          pnlPercent = ((xp - ep) / ep) * 100;
+        }
       }
-    }
 
-    const updated = await db.paperTrade.update({
-      where: { id },
-      data: {
-        exitDate: exitDate ? new Date(exitDate) : undefined,
-        exitPrice: exitPrice ? parseFloat(exitPrice) : undefined,
-        pnl,
-        pnlPercent,
-        status: status || 'CLOSED',
-        exitReason: exitReason || 'MANUAL',
-      },
-    });
+      const updated = await tx.paperTrade.update({
+        where: { id },
+        data: {
+          exitDate: exitDate ? new Date(exitDate) : undefined,
+          exitPrice: exitPrice ?? undefined,
+          pnl,
+          pnlPercent,
+          status: status || 'CLOSED',
+          exitReason: exitReason || 'MANUAL',
+        },
+      });
 
-    // ── CRITICAL: Update CapitalWallet when closing a trade ──
-    if (pnl != null && (status === 'CLOSED' || !status)) {
-      try {
-        const wallet = await db.capitalWallet.findFirst();
+      // Update wallet atomically in same transaction
+      if (pnl != null && (status === 'CLOSED' || !status)) {
+        const wallet = await tx.capitalWallet.findFirst();
         if (wallet) {
-          await db.capitalWallet.update({
+          const newRealizedPnl = Math.round((wallet.realizedPnl + pnl) * 100) / 100;
+          await tx.capitalWallet.update({
             where: { id: wallet.id },
-            data: { realizedPnl: wallet.realizedPnl + pnl },
+            data: { realizedPnl: newRealizedPnl },
           });
         }
-      } catch (walletErr) {
-        console.error('Wallet update failed on trade close:', walletErr);
       }
-    }
 
-    return NextResponse.json({ success: true, trade: updated });
-  } catch (error) {
+      return updated;
+    });
+
+    return NextResponse.json({ success: true, trade: result });
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'Trade not found') {
+      return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
+    }
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }

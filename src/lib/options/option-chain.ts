@@ -1,18 +1,38 @@
 /**
- * Option Chain Fetcher
- * Uses Yahoo Finance for spot price, generates theoretical option chain via Black-Scholes.
+ * Option Chain Generator (V2 — VIX-Aware)
+ * 
+ * Key improvements over V1:
+ * - VIX-based IV estimation (not flat hardcoded values)
+ * - IV term structure (near-week > far-week for indices)
+ * - Dividend yield support via BSM model for stocks
+ * - Proper index/stock differentiation (NIFTY, BANKNIFTY, FINNIFTY, NIFTYIT, MIDCPNIFTY)
+ * - Stock weekly options support (50+ F&O stocks now have weekly expiries)
+ * - Expiry classification (near-week, mid-week, far-week, monthly)
+ * - Settlement type awareness (cash vs physical)
+ * - PCR and max pain calculations
+ * - Bid/ask spread based on liquidity tier
  */
 
-import { blackScholes, impliedVolatility, getOptionLotSize, timeToExpiryYears, daysToExpiry as dte } from './black-scholes';
+import {
+  blackScholes,
+  getOptionLotSize,
+  getDividendYield,
+  getSymbolType,
+  getSettlementType,
+  timeToExpiryYears,
+  daysToExpiry as dte,
+  INDEX_SYMBOLS,
+} from './black-scholes';
+import { fetchVIX, vixAdjustedIV, type VIXData, getVIXGuidance } from './vix';
 
 // ── Symbol → Yahoo Ticker Mapping ────────────────────────────
-
-const INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY'];
 
 const YAHOO_MAP: Record<string, string> = {
   NIFTY: '^NSEI',
   BANKNIFTY: '^NSEBANK',
   FINNIFTY: '^CNXFINANCE',
+  NIFTYIT: '^CNXIT',
+  MIDCPNIFTY: '^CRSMIDCP', // or ^NSEMDCP50
 };
 
 function toYahoo(symbol: string): string {
@@ -62,29 +82,40 @@ async function fetchSpot(symbol: string): Promise<{ price: number; change: numbe
     fetchedAt: Date.now(),
   });
 
-  return { price: Math.round(price * 100) / 100, change: Math.round(change * 100) / 100, changePct: Math.round(changePct * 100) / 100 };
+  return {
+    price: Math.round(price * 100) / 100,
+    change: Math.round(change * 100) / 100,
+    changePct: Math.round(changePct * 100) / 100,
+  };
 }
 
 // ── Strike Generation ────────────────────────────────────────
 
 function getStrikeStep(symbol: string, spot: number): number {
+  // Index-specific steps
   if (symbol === 'NIFTY') return 50;
   if (symbol === 'BANKNIFTY') return 100;
   if (symbol === 'FINNIFTY') return 50;
-  // Stocks: adaptive step
+  if (symbol === 'NIFTYIT') return 50;
+  if (symbol === 'MIDCPNIFTY') return 25;
+
+  // Stocks: adaptive step based on price
   if (spot > 3000) return 50;
   if (spot > 1000) return 20;
   if (spot > 500) return 10;
   if (spot > 200) return 5;
-  return 2.5;
+  if (spot > 100) return 2.5;
+  return 1;
 }
 
 function getStrikeRange(symbol: string): { below: number; above: number } {
-  if (symbol === 'NIFTY') return { below: 2000, above: 2000 };
-  if (symbol === 'BANKNIFTY') return { below: 2000, above: 2000 };
+  if (symbol === 'NIFTY') return { below: 2500, above: 2500 };
+  if (symbol === 'BANKNIFTY') return { below: 3000, above: 3000 };
   if (symbol === 'FINNIFTY') return { below: 1500, above: 1500 };
-  // Stocks
-  return { below: 20, above: 20 };
+  if (symbol === 'NIFTYIT') return { below: 1000, above: 1000 };
+  if (symbol === 'MIDCPNIFTY') return { below: 800, above: 800 };
+  // Stocks: show ±15% range (enough for most strategies)
+  return { below: 25, above: 25 };
 }
 
 export function generateStrikes(underlyingPrice: number, symbol: string): number[] {
@@ -101,64 +132,121 @@ export function generateStrikes(underlyingPrice: number, symbol: string): number
   return strikes;
 }
 
-// ── IV Estimation (Simplified Volatility Smile) ───────────────
+// ── Expiry Classification ────────────────────────────────────
 
-function estimateIV(strike: number, spot: number, type: 'CE' | 'PE', symbol: string): number {
-  const isIndex = INDEX_SYMBOLS.includes(symbol);
-  const baseIV = isIndex ? 0.13 : 0.25;
+export type ExpiryType = 'near_week' | 'mid_week' | 'far_week' | 'monthly' | 'far_monthly';
 
-  const moneyness = (strike - spot) / spot; // positive for OTM calls
+export interface ExpiryInfo {
+  date: string;
+  label: string;
+  type: ExpiryType;
+  daysToExpiry: number;
+  isIndex: boolean;
+  isWeekly: boolean;
+  isCurrentMonth: boolean;
+}
 
-  // Volatility smile: OTM puts and ITM calls have higher IV
-  // CE: IV decreases as strike goes up (for OTM calls)
-  // PE: IV increases as strike goes down (for OTM puts)
-  let skew: number;
-  if (type === 'CE') {
-    skew = -0.8; // IV drops for higher strikes
+/**
+ * Classify an expiry by its distance and type.
+ * Near-week: 0-7 days (highest IV, gamma risk)
+ * Mid-week: 8-21 days (moderate IV)
+ * Far-week: 22-35 days (lower IV)
+ * Monthly: >35 days (lowest IV, most liquid for stocks)
+ */
+export function classifyExpiry(expiryDate: string, symbol: string): ExpiryInfo {
+  const days = dte(expiryDate);
+  const isIndex = (INDEX_SYMBOLS as readonly string[]).includes(symbol);
+
+  // Determine if it's current month
+  const now = new Date();
+  const expiry = new Date(expiryDate);
+  const isCurrentMonth = now.getMonth() === expiry.getMonth() && now.getFullYear() === expiry.getFullYear();
+
+  let type: ExpiryType;
+  if (days <= 7) {
+    type = 'near_week';
+  } else if (days <= 21) {
+    type = isIndex ? 'mid_week' : 'far_week'; // Stocks with 2-3 week expiry = far
+  } else if (days <= 35) {
+    type = isIndex ? 'far_week' : 'monthly';
   } else {
-    skew = 0.8; // IV rises for lower strikes
+    type = isCurrentMonth ? 'monthly' : 'far_monthly';
   }
 
-  // Add smile curvature
-  const smile = 0.3 * moneyness * moneyness; // quadratic term for deep OTM
+  // Generate human-readable label
+  const d = new Date(expiryDate);
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-  const iv = baseIV + skew * moneyness + smile;
+  let label: string;
+  if (days <= 7) {
+    label = `${dayNames[d.getDay()]} (${days}d)`;
+  } else if (isIndex) {
+    label = `${d.getDate()} ${monthNames[d.getMonth()]} (${days}d)`;
+  } else {
+    // Monthly: show month name
+    label = `${monthNames[d.getMonth()]} ${d.getDate()} (${days}d)`;
+  }
 
-  // Clamp to reasonable bounds
-  return Math.max(0.05, Math.min(iv, 2.0));
+  return {
+    date: expiryDate,
+    label,
+    type,
+    daysToExpiry: days,
+    isIndex,
+    isWeekly: isIndex || days <= 21,
+    isCurrentMonth,
+  };
 }
 
 // ── Expiry Dates ─────────────────────────────────────────────
 
-/**
- * Get next N expiry dates.
- * Indices: weekly expiries on Thursdays.
- * Stocks: monthly expiries on last Thursday.
- */
-export function getNextExpiries(symbol: string, count: number = 6): string[] {
-  const isIndex = INDEX_SYMBOLS.includes(symbol);
-  const expiries: string[] = [];
+// Stocks that have weekly options (as of 2024-25, NSE has expanded weekly F&O)
+const STOCKS_WITH_WEEKLY_OPTIONS = new Set([
+  'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN',
+  'AXISBANK', 'KOTAKBANK', 'BAJFINANCE', 'ITC', 'LT', 'BHARTIARTL',
+  'HINDUNILVR', 'TATAMOTORS', 'ASIANPAINT', 'MARUTI', 'SUNPHARMA',
+  'WIPRO', 'HCLTECH', 'TATASTEEL', 'ADANIENT', 'TITAN', 'HDFCLIFE',
+  'SBILIFE', 'DIVISLAB', 'DRREDDY', 'CIPLA', 'EICHERMOT', 'HEROMOTOCO',
+  'ULTRACEMCO', 'NESTLEIND', 'BPCL', 'POWERGRID', 'NTPC', 'COALINDIA',
+  'ONGC', 'IOC', 'HPCL', 'GRASIM', 'INDUSINDBK', 'TATACONSUM',
+  'BAJAJFINSV', 'M_M', 'DIXON', 'VEDL', 'HAL', 'BEL',
+]);
 
+function hasWeeklyOptions(symbol: string): boolean {
+  return (INDEX_SYMBOLS as readonly string[]).includes(symbol) || STOCKS_WITH_WEEKLY_OPTIONS.has(symbol);
+}
+
+/**
+ * Get next N expiry dates with classification.
+ * 
+ * Index: Weekly expiries every Thursday (NIFTY, BANKNIFTY, FINNIFTY, NIFTYIT, MIDCPNIFTY)
+ * Stocks with weekly: Weekly + Monthly (last Thursday)
+ * Other stocks: Monthly (last Thursday) only
+ */
+export function getNextExpiries(symbol: string, count: number = 8): string[] {
+  const expiries: string[] = [];
   const now = new Date();
-  // Convert to IST
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  const istNow = new Date(now.getTime() + istOffset);
 
   for (let i = 0; i < 365 && expiries.length < count; i++) {
-    const d = new Date(istNow);
+    const d = new Date(now);
     d.setDate(d.getDate() + i);
 
-    if (isIndex) {
-      // Weekly: every Thursday
-      if (d.getDay() === 4) {
-        const dateStr = formatDate(d);
-        if (!expiries.includes(dateStr)) expiries.push(dateStr);
-      }
+    if (d.getDay() !== 4) continue; // Only Thursdays
+
+    const dateStr = formatDate(d);
+    if (expiries.includes(dateStr)) continue;
+
+    const isIndex = (INDEX_SYMBOLS as readonly string[]).includes(symbol);
+    const weekly = hasWeeklyOptions(symbol);
+
+    if (isIndex || weekly) {
+      // All Thursdays are valid expiries
+      expiries.push(dateStr);
     } else {
-      // Monthly: last Thursday of each month
+      // Monthly: only last Thursday of month
       if (isLastThursday(d)) {
-        const dateStr = formatDate(d);
-        if (!expiries.includes(dateStr)) expiries.push(dateStr);
+        expiries.push(dateStr);
       }
     }
   }
@@ -193,6 +281,7 @@ interface OptionLegData {
   bid: number;
   ask: number;
   itm: boolean;
+  theoretical: boolean;  // Flag: this is theoretical pricing, not live
 }
 
 export interface OptionChainRow {
@@ -203,43 +292,196 @@ export interface OptionChainRow {
   moneyness: 'ITM' | 'ATM' | 'OTM';
 }
 
+// ── PCR (Put-Call Ratio) Calculation ─────────────────────────
+
+export interface PCRData {
+  pcr: number;
+  totalCEOI: number;
+  totalPEOI: number;
+  interpretation: string;
+  signal: 'bullish' | 'bearish' | 'neutral' | 'extreme_bearish' | 'extreme_bullish';
+}
+
+export function calculatePCR(chain: OptionChainRow[]): PCRData {
+  let totalCEOI = 0;
+  let totalPEOI = 0;
+
+  for (const row of chain) {
+    totalCEOI += row.ce.oi;
+    totalPEOI += row.pe.oi;
+  }
+
+  const pcr = totalCEOI > 0 ? totalPEOI / totalCEOI : 0;
+
+  let interpretation: string;
+  let signal: PCRData['signal'];
+
+  if (pcr > 1.5) {
+    signal = 'extreme_bearish';
+    interpretation = `PCR at ${pcr.toFixed(2)} — Extremely high put writing. Market is oversold, strong support expected. Contrarian bullish signal.`;
+  } else if (pcr > 1.2) {
+    signal = 'bearish';
+    interpretation = `PCR at ${pcr.toFixed(2)} — High put writing. Heavy support at current levels, mildly bearish sentiment.`;
+  } else if (pcr > 0.8) {
+    signal = 'neutral';
+    interpretation = `PCR at ${pcr.toFixed(2)} — Balanced put-call activity. Neutral market sentiment.`;
+  } else if (pcr > 0.5) {
+    signal = 'bullish';
+    interpretation = `PCR at ${pcr.toFixed(2)} — More call writing than puts. Bullish sentiment, resistance expected.`;
+  } else {
+    signal = 'extreme_bullish';
+    interpretation = `PCR at ${pcr.toFixed(2)} — Very low PCR. Extreme bullishness, potential for reversal. Contrarian bearish signal.`;
+  }
+
+  return { pcr: Math.round(pcr * 100) / 100, totalCEOI, totalPEOI, interpretation, signal };
+}
+
+// ── Max Pain Calculation ─────────────────────────────────────
+
+export interface MaxPainResult {
+  strike: number;
+  maxPainStrike: number;
+  totalPainAtMax: number;
+  reasoning: string;
+}
+
+/**
+ * Calculate max pain — the strike at which option buyers lose the most money.
+ * Sellers (institutions) tend to pin the price near max pain on expiry day.
+ * 
+ * Pain at strike K = Sum of (intrinsic value of all CE above K) + Sum of (intrinsic value of all PE below K)
+ * Max pain = K where total pain is maximum (sellers gain most)
+ */
+export function calculateMaxPain(chain: OptionChainRow[], spot: number): MaxPainResult {
+  let maxPainStrike = spot;
+  let minTotalPain = Infinity;
+
+  for (const row of chain) {
+    let totalPain = 0;
+
+    // CE pain: all CE with strike < currentStrike will have intrinsic value
+    // Sellers lose = intrinsic value × OI
+    for (const r of chain) {
+      if (r.ce.oi > 0 && r.strike < row.strike) {
+        totalPain += (row.strike - r.strike) * r.ce.oi;
+      }
+      if (r.pe.oi > 0 && r.strike > row.strike) {
+        totalPain += (r.strike - row.strike) * r.pe.oi;
+      }
+    }
+
+    if (totalPain < minTotalPain) {
+      minTotalPain = totalPain;
+      maxPainStrike = row.strike;
+    }
+  }
+
+  const distanceFromSpot = ((maxPainStrike - spot) / spot * 100).toFixed(2);
+  const days = 1; // Max pain is most relevant on expiry day
+
+  let reasoning: string;
+  if (Math.abs(maxPainStrike - spot) < spot * 0.005) {
+    reasoning = `Max pain at ₹${maxPainStrike} (≈ ATM, ${distanceFromSpot}% from spot). Price is already near max pain — expect consolidation around this level on expiry.`;
+  } else if (maxPainStrike > spot) {
+    reasoning = `Max pain at ₹${maxPainStrike} (+${distanceFromSpot}% from spot). Gravitational pull upward toward max pain. More relevant within ${days} day(s) of expiry.`;
+  } else {
+    reasoning = `Max pain at ₹${maxPainStrike} (${distanceFromSpot}% from spot). Downward pull toward max pain. More relevant within ${days} day(s) of expiry.`;
+  }
+
+  return {
+    strike: spot,
+    maxPainStrike,
+    totalPainAtMax: Math.round(minTotalPain),
+    reasoning,
+  };
+}
+
+// ── Liquidity Tier (for bid/ask spread estimation) ───────────
+
+type LiquidityTier = 'ultra' | 'high' | 'medium' | 'low';
+
+function getLiquidityTier(symbol: string): LiquidityTier {
+  const ultra = ['NIFTY', 'BANKNIFTY'];
+  const high = ['FINNIFTY', 'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN'];
+  const medium = ['AXISBANK', 'KOTAKBANK', 'BAJFINANCE', 'ITC', 'LT', 'BHARTIARTL', 'HINDUNILVR', 'TATAMOTORS'];
+
+  if (ultra.includes(symbol)) return 'ultra';
+  if (high.includes(symbol)) return 'high';
+  if (medium.includes(symbol)) return 'medium';
+  return 'low';
+}
+
+function getSpreadMultiplier(tier: LiquidityTier, moneyness: 'ITM' | 'ATM' | 'OTM'): number {
+  // Tighter spreads for liquid names, wider for OTM
+  const baseSpreads: Record<LiquidityTier, number> = {
+    ultra: 0.005,  // 0.5%
+    high: 0.015,   // 1.5%
+    medium: 0.03,  // 3%
+    low: 0.06,     // 6%
+  };
+
+  const otmMultiplier = moneyness === 'OTM' ? 2.0 : moneyness === 'ATM' ? 1.0 : 1.2;
+
+  return baseSpreads[tier] * otmMultiplier;
+}
+
+// ── Main: Fetch Option Chain ─────────────────────────────────
+
 export interface OptionChainResult {
   symbol: string;
+  symbolType: 'index' | 'stock';
+  settlementType: 'cash' | 'physical';
   underlyingPrice: number;
   change: number;
   changePct: number;
   expiryDate: string;
+  expiryInfo: ExpiryInfo;
   expiryDates: string[];
   chain: OptionChainRow[];
+  vix: VIXData | null;
+  pcr: PCRData | null;
+  maxPain: MaxPainResult | null;
+  dividendYield: number;
+  lotSize: number;
+  dataSource: 'theoretical';  // Always theoretical until real OI/volume data is integrated
 }
-
-// ── Main: Fetch Option Chain ─────────────────────────────────
 
 export async function fetchOptionChain(
   symbol: string,
   expiryDate: string
 ): Promise<OptionChainResult> {
-  // 1. Get spot price
-  const spotData = await fetchSpot(symbol);
+  // 1. Fetch spot price and VIX in parallel
+  const [spotData, vixData] = await Promise.all([
+    fetchSpot(symbol),
+    fetchVIX().catch(() => null), // VIX is best-effort
+  ]);
+
   const spot = spotData.price;
+  const symbolType = getSymbolType(symbol);
+  const settlementType = getSettlementType(symbol);
+  const lotSize = getOptionLotSize(symbol);
+  const dividendYield = getDividendYield(symbol);
 
-  // 2. Get expiry dates
-  const expiryDates = getNextExpiries(symbol, 8);
+  // 2. Get expiry dates and classify
+  const expiryDates = getNextExpiries(symbol, 10);
   const targetExpiry = expiryDate || expiryDates[0];
+  const expiryInfo = classifyExpiry(targetExpiry, symbol);
 
-  // 3. Time to expiry
+  // 3. Time to expiry and risk-free rate
   const T = timeToExpiryYears(targetExpiry);
-  const r = 0.07; // India risk-free rate
+  const r = 0.07; // India risk-free rate (7% RBI repo rate approx)
 
   // 4. Generate strikes
   const strikes = generateStrikes(spot, symbol);
-  const lotSize = getOptionLotSize(symbol);
 
   // 5. ATM strike
   const step = getStrikeStep(symbol, spot);
   const atmStrike = Math.round(spot / step) * step;
 
-  // 6. Build chain
+  // 6. Get VIX value for IV estimation
+  const vixValue = vixData?.value ?? (symbolType === 'index' ? 13 : 22);
+
+  // 7. Build chain with VIX-adjusted IV
   const chain: OptionChainRow[] = strikes.map((strike) => {
     const dist = ((strike - spot) / spot) * 100;
     const isATM = Math.abs(strike - atmStrike) < step / 2;
@@ -253,19 +495,31 @@ export async function fetchOptionChain(
       moneyness = 'OTM';
     }
 
-    const ceIV = estimateIV(strike, spot, 'CE', symbol);
-    const peIV = estimateIV(strike, spot, 'PE', symbol);
+    const days = expiryInfo.daysToExpiry;
 
-    const ceBS = blackScholes(spot, strike, T, r, ceIV, 'CE');
-    const peBS = blackScholes(spot, strike, T, r, peIV, 'PE');
+    // VIX-adjusted IV for each leg
+    const ceIV = vixAdjustedIV(vixValue, symbolType, strike, spot, 'CE', days);
+    const peIV = vixAdjustedIV(vixValue, symbolType, strike, spot, 'PE', days);
 
-    // Simulated bid/ask spread (wider for OTM)
-    const ceSpread = ceBS.premium > 0 ? Math.max(ceBS.premium * 0.02, 0.05) : 0;
-    const peSpread = peBS.premium > 0 ? Math.max(peBS.premium * 0.02, 0.05) : 0;
+    // BSM pricing with dividend yield for stocks
+    const ceBS = blackScholes(spot, strike, T, r, ceIV, 'CE', dividendYield);
+    const peBS = blackScholes(spot, strike, T, r, peIV, 'PE', dividendYield);
 
-    // Simulated OI (higher near ATM)
+    // Liquidity-based bid/ask spread
+    const ceSpread = ceBS.premium > 0
+      ? Math.max(ceBS.premium * getSpreadMultiplier(getLiquidityTier(symbol), moneyness), 0.05)
+      : 0;
+    const peSpread = peBS.premium > 0
+      ? Math.max(peBS.premium * getSpreadMultiplier(getLiquidityTier(symbol), moneyness), 0.05)
+      : 0;
+
+    // Simulated OI (higher near ATM, more for liquid names)
     const atmDist = Math.abs(strike - atmStrike);
-    const oiBase = Math.max(0, 100000 - atmDist * 50);
+    const liquidityBase: Record<string, number> = {
+      NIFTY: 500000, BANKNIFTY: 300000, FINNIFTY: 100000,
+      NIFTYIT: 50000, MIDCPNIFTY: 30000,
+    };
+    const oiBase = Math.max(0, (liquidityBase[symbol] || 50000) - atmDist * 80);
 
     return {
       strike,
@@ -283,6 +537,7 @@ export async function fetchOptionChain(
         bid: Math.round((ceBS.premium - ceSpread) * 100) / 100,
         ask: Math.round((ceBS.premium + ceSpread) * 100) / 100,
         itm: strike < spot,
+        theoretical: true,
       },
       pe: {
         ltp: Math.round(peBS.premium * 100) / 100,
@@ -296,18 +551,32 @@ export async function fetchOptionChain(
         bid: Math.round((peBS.premium - peSpread) * 100) / 100,
         ask: Math.round((peBS.premium + peSpread) * 100) / 100,
         itm: strike > spot,
+        theoretical: true,
       },
     };
   });
 
+  // 8. Calculate derived metrics
+  const pcr = calculatePCR(chain);
+  const maxPain = calculateMaxPain(chain, spot);
+
   return {
     symbol,
+    symbolType,
+    settlementType,
     underlyingPrice: spot,
     change: spotData.change,
     changePct: spotData.changePct,
     expiryDate: targetExpiry,
+    expiryInfo,
     expiryDates,
     chain,
+    vix: vixData,
+    pcr,
+    maxPain,
+    dividendYield,
+    lotSize,
+    dataSource: 'theoretical',
   };
 }
 
@@ -317,3 +586,8 @@ export async function fetchSpotPrice(symbol: string): Promise<number> {
   const data = await fetchSpot(symbol);
   return data.price;
 }
+
+// ── VIX API for frontend ────────────────────────────────────
+
+export { fetchVIX, getVIXGuidance, expectedDailyMove, expectedWeeklyRange } from './vix';
+export type { VIXData, VIXGuidance } from './vix';

@@ -46,6 +46,11 @@ model ScreeningResult {
   qtyB        Int            // Suggested qty for B setup
   notes       String?
   createdAt   DateTime @default(now())
+
+  @@index([symbol])
+  @@index([createdAt])
+  @@index([stockId, createdAt])
+  @@index([score])
 }
 
 model PaperTrade {
@@ -73,6 +78,12 @@ model PaperTrade {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   journal       TradeJournalEntry?
+
+  @@index([symbol])
+  @@index([status])
+  @@index([createdAt])
+  @@index([portfolioId, status])
+  @@index([direction, status])
 }
 
 model TradeJournalEntry {
@@ -148,6 +159,8 @@ model CapitalWallet {
   unrealizedPnl  Float    @default(0)         // Current open positions P&L
   updatedAt      DateTime @updatedAt
   createdAt      DateTime @default(now())
+
+  @@index([id])  // Ensure quick singleton lookup
 }
 
 model DailySnapshot {
@@ -173,6 +186,10 @@ model AutoTradeLog {
   executed      Boolean  @default(false)
   reason        String?
   createdAt     DateTime @default(now())
+
+  @@index([symbol])
+  @@index([createdAt])
+  @@index([action])
 }
 
 model UniverseScan {
@@ -211,6 +228,9 @@ model PriceAlert {
   triggeredPrice Float?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  @@index([symbol, active])
+  @@index([triggered])
 }
 
 model DividendRecord {
@@ -288,6 +308,12 @@ model OptionTrade {
   tags          String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  @@index([symbol])
+  @@index([status])
+  @@index([createdAt])
+  @@index([expiryDate])
+  @@index([optionType, action, status])
 }
 
 model OptionStrategy {
@@ -306,4 +332,7 @@ model OptionStrategy {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   trades        OptionTrade[]
+
+  @@index([symbol, status])
+  @@index([createdAt])
 }
