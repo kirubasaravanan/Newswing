@@ -8,9 +8,8 @@ const nextConfig: NextConfig = {
   },
   reactStrictMode: false,
   allowedDevOrigins: [
-    /\.space-z\.ai$/,
-    /preview-.*\.space-z\.ai$/,
-    /localhost$/,
+    "space-z.ai",
+    "preview-chat-28ff4fbd-2816-4981-89d7-dc308f68dd0f.space-z.ai",
   ],
   experimental: {
     optimizePackageImports: [
