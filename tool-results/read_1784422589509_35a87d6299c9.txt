@@ -1,0 +1,545 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→import { useState, useEffect, useCallback } from 'react';
+     4→     4→import { Card, CardContent } from '@/components/ui/card';
+     5→     5→import { Button } from '@/components/ui/button';
+     6→     6→import { Input } from '@/components/ui/input';
+     7→     7→import { Label } from '@/components/ui/label';
+     8→     8→import { Badge } from '@/components/ui/badge';
+     9→     9→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    10→    10→import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogClose } from '@/components/ui/dialog';
+    11→    11→import { ScrollArea } from '@/components/ui/scroll-area';
+    12→    12→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    13→    13→import {
+    14→    14→  Briefcase, Plus, Trash2, Wallet, RefreshCw, FolderPlus, IndianRupee,
+    15→    15→  TrendingUp, Calendar, PieChart as PieIcon, Shield,
+    16→    16→} from 'lucide-react';
+    17→    17→import { toast } from 'sonner';
+    18→    18→import { cn } from '@/lib/utils';
+    19→    19→import { getUniverseStats } from '@/lib/trading/universe-scanner';
+    20→    20→
+    21→    21→// ── Portfolio Manager ──────────────────────────────────
+    22→    22→function PortfolioManager() {
+    23→    23→  const [portfolios, setPortfolios] = useState<any[]>([]);
+    24→    24→  const [open, setOpen] = useState(false);
+    25→    25→  const [form, setForm] = useState({ name: '', description: '', totalCapital: '200000' });
+    26→    26→
+    27→    27→  const fetchPortfolios = useCallback(async () => {
+    28→    28→    try {
+    29→    29→      const res = await fetch('/api/portfolios');
+    30→    30→      const data = await res.json();
+    31→    31→      if (data.success) setPortfolios(data.portfolios);
+    32→    32→    } catch { /* ignore */ }
+    33→    33→  }, []);
+    34→    34→  useEffect(() => { fetchPortfolios(); }, [fetchPortfolios]);
+    35→    35→
+    36→    36→  const createPortfolio = async () => {
+    37→    37→    if (!form.name) return;
+    38→    38→    try {
+    39→    39→      const res = await fetch('/api/portfolios', {
+    40→    40→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+    41→    41→        body: JSON.stringify({ name: form.name, description: form.description, totalCapital: parseFloat(form.totalCapital) }),
+    42→    42→      });
+    43→    43→      const data = await res.json();
+    44→    44→      if (data.success) {
+    45→    45→        toast.success(`Portfolio "${form.name}" created`);
+    46→    46→        setForm({ name: '', description: '', totalCapital: '200000' });
+    47→    47→        setOpen(false);
+    48→    48→        fetchPortfolios();
+    49→    49→      }
+    50→    50→    } catch { toast.error('Failed to create portfolio'); }
+    51→    51→  };
+    52→    52→
+    53→    53→  const deletePortfolio = async (id: string) => {
+    54→    54→    await fetch(`/api/portfolios?id=${id}`, { method: 'DELETE' });
+    55→    55→    fetchPortfolios();
+    56→    56→  };
+    57→    57→
+    58→    58→  return (
+    59→    59→    <div>
+    60→    60→      <div className="flex items-center justify-between mb-3">
+    61→    61→        <h3 className="text-sm font-semibold flex items-center gap-2"><Briefcase className="h-4 w-4" /> Portfolios</h3>
+    62→    62→        <Dialog open={open} onOpenChange={setOpen}>
+    63→    63→          <DialogTrigger asChild><Button size="sm" className="h-7 text-xs gap-1"><Plus className="h-3 w-3" /> New Portfolio</Button></DialogTrigger>
+    64→    64→          <DialogContent className="sm:max-w-sm">
+    65→    65→            <DialogHeader><DialogTitle>Create Portfolio</DialogTitle></DialogHeader>
+    66→    66→            <div className="grid gap-3 py-2">
+    67→    67→              <div><Label className="text-xs">Name</Label><Input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Aggressive Growth" className="h-8 text-xs" /></div>
+    68→    68→              <div><Label className="text-xs">Description</Label><Input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="High risk, high reward" className="h-8 text-xs" /></div>
+    69→    69→              <div><Label className="text-xs">Capital (₹)</Label><Input type="number" value={form.totalCapital} onChange={e => setForm({ ...form, totalCapital: e.target.value })} className="h-8 text-xs" /></div>
+    70→    70→            </div>
+    71→    71→            <DialogFooter>
+    72→    72→              <DialogClose asChild><Button variant="ghost" size="sm">Cancel</Button></DialogClose>
+    73→    73→              <Button size="sm" onClick={createPortfolio}>Create</Button>
+    74→    74→            </DialogFooter>
+    75→    75→          </DialogContent>
+    76→    76→        </Dialog>
+    77→    77→      </div>
+    78→    78→      {portfolios.length === 0 ? (
+    79→    79→        <p className="text-xs text-muted-foreground text-center py-6">No portfolios. Create one to organize your trades.</p>
+    80→    80→      ) : (
+    81→    81→        <div className="grid gap-2">
+    82→    82→          {portfolios.map(p => (
+    83→    83→            <div key={p.id} className="flex items-center gap-3 rounded-lg bg-secondary/50 p-3">
+    84→    84→              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/20 text-indigo-400 text-xs font-bold">
+    85→    85→                {p.name.charAt(0)}
+    86→    86→              </div>
+    87→    87→              <div className="flex-1 min-w-0">
+    88→    88→                <div className="text-sm font-semibold truncate">{p.name}</div>
+    89→    89→                <div className="text-[10px] text-muted-foreground">
+    90→    90→                  ₹{Math.round(p.totalCapital).toLocaleString()} &middot; {p.openPositions || 0} open
+    91→    91→                  {p.description && ` · ${p.description}`}
+    92→    92→                </div>
+    93→    93→              </div>
+    94→    94→              {p.isDefault && <Badge variant="outline" className="text-[9px] h-4 text-indigo-400">DEFAULT</Badge>}
+    95→    95→              <button onClick={() => deletePortfolio(p.id)} className="text-muted-foreground hover:text-red-400"><Trash2 className="h-3.5 w-3.5" /></button>
+    96→    96→            </div>
+    97→    97→          ))}
+    98→    98→        </div>
+    99→    99→      )}
+   100→   100→    </div>
+   101→   101→  );
+   102→   102→}
+   103→   103→
+   104→   104→// ── SIP Plans Manager ──────────────────────────────────
+   105→   105→function SIPPanel() {
+   106→   106→  const [data, setData] = useState<any>(null);
+   107→   107→  const [open, setOpen] = useState(false);
+   108→   108→  const [form, setForm] = useState({ symbol: '', amount: '5000', frequency: 'MONTHLY', nextDate: '', stockName: '' });
+   109→   109→
+   110→   110→  const fetchSIPs = useCallback(async () => {
+   111→   111→    try {
+   112→   112→      const res = await fetch('/api/portfolio/sip');
+   113→   113→      const d = await res.json();
+   114→   114→      if (d.success) setData(d);
+   115→   115→    } catch { /* ignore */ }
+   116→   116→  }, []);
+   117→   117→  useEffect(() => { fetchSIPs(); }, [fetchSIPs]);
+   118→   118→
+   119→   119→  const createSIP = async () => {
+   120→   120→    if (!form.symbol || !form.amount || !form.nextDate) return;
+   121→   121→    try {
+   122→   122→      const res = await fetch('/api/portfolio/sip', {
+   123→   123→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   124→   124→        body: JSON.stringify(form),
+   125→   125→      });
+   126→   126→      const d = await res.json();
+   127→   127→      if (d.success) {
+   128→   128→        toast.success(`SIP created: ${form.symbol} ₹${form.amount}`);
+   129→   129→        setForm({ symbol: '', amount: '5000', frequency: 'MONTHLY', nextDate: '', stockName: '' });
+   130→   130→        setOpen(false);
+   131→   131→        fetchSIPs();
+   132→   132→      }
+   133→   133→    } catch { toast.error('Failed to create SIP'); }
+   134→   134→  };
+   135→   135→
+   136→   136→  const deleteSIP = async (id: string) => {
+   137→   137→    await fetch(`/api/portfolio/sip?id=${id}`, { method: 'DELETE' });
+   138→   138→    fetchSIPs();
+   139→   139→  };
+   140→   140→
+   141→   141→  return (
+   142→   142→    <div>
+   143→   143→      <div className="flex items-center justify-between mb-3">
+   144→   144→        <h3 className="text-sm font-semibold flex items-center gap-2"><Calendar className="h-4 w-4" /> SIP Plans</h3>
+   145→   145→        <Dialog open={open} onOpenChange={setOpen}>
+   146→   146→          <DialogTrigger asChild><Button size="sm" className="h-7 text-xs gap-1"><Plus className="h-3 w-3" /> New SIP</Button></DialogTrigger>
+   147→   147→          <DialogContent className="sm:max-w-sm">
+   148→   148→            <DialogHeader><DialogTitle>Create SIP Plan</DialogTitle></DialogHeader>
+   149→   149→            <div className="grid gap-3 py-2">
+   150→   150→              <div><Label className="text-xs">Symbol</Label><Input value={form.symbol} onChange={e => setForm({ ...form, symbol: e.target.value.toUpperCase() })} placeholder="HDFCBANK" className="h-8 text-xs" /></div>
+   151→   151→              <div><Label className="text-xs">Amount (₹)</Label><Input type="number" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="h-8 text-xs" /></div>
+   152→   152→              <div><Label className="text-xs">Frequency</Label>
+   153→   153→                <Select value={form.frequency} onValueChange={v => setForm({ ...form, frequency: v })}>
+   154→   154→                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+   155→   155→                  <SelectContent>
+   156→   156→                    <SelectItem value="WEEKLY">Weekly</SelectItem>
+   157→   157→                    <SelectItem value="MONTHLY">Monthly</SelectItem>
+   158→   158→                    <SelectItem value="QUARTERLY">Quarterly</SelectItem>
+   159→   159→                  </SelectContent>
+   160→   160→                </Select>
+   161→   161→              </div>
+   162→   162→              <div><Label className="text-xs">Next Installment Date</Label><Input type="date" value={form.nextDate} onChange={e => setForm({ ...form, nextDate: e.target.value })} className="h-8 text-xs" /></div>
+   163→   163→            </div>
+   164→   164→            <DialogFooter>
+   165→   165→              <DialogClose asChild><Button variant="ghost" size="sm">Cancel</Button></DialogClose>
+   166→   166→              <Button size="sm" onClick={createSIP}>Create</Button>
+   167→   167→            </DialogFooter>
+   168→   168→          </DialogContent>
+   169→   169→        </Dialog>
+   170→   170→      </div>
+   171→   171→
+   172→   172→      {data && (
+   173→   173→        <div className="grid grid-cols-2 gap-3 mb-3">
+   174→   174→          <div className="rounded-lg bg-secondary/50 p-3">
+   175→   175→            <div className="text-[10px] text-muted-foreground uppercase">Total Invested</div>
+   176→   176→            <div className="text-lg font-bold font-mono">₹{Math.round(data.totalInvested).toLocaleString()}</div>
+   177→   177→          </div>
+   178→   178→          <div className="rounded-lg bg-secondary/50 p-3">
+   179→   179→            <div className="text-[10px] text-muted-foreground uppercase">Current Value</div>
+   180→   180→            <div className={cn('text-lg font-bold font-mono', (data.totalCurrentValue - data.totalInvested) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   181→   181→              ₹{Math.round(data.totalCurrentValue).toLocaleString()}
+   182→   182→            </div>
+   183→   183→          </div>
+   184→   184→        </div>
+   185→   185→      )}
+   186→   186→
+   187→   187→      {(!data || data.plans.length === 0) ? (
+   188→   188→        <p className="text-xs text-muted-foreground text-center py-4">No active SIP plans.</p>
+   189→   189→      ) : (
+   190→   190→        <ScrollArea className="max-h-[250px]">
+   191→   191→          <div className="space-y-1.5 pr-2">
+   192→   192→            {data.plans.map((p: any) => (
+   193→   193→              <div key={p.id} className="flex items-center gap-2 text-xs py-2 border-b border-border/30">
+   194→   194→                <div className="flex-1 min-w-0">
+   195→   195→                  <div className="font-semibold">{p.symbol}</div>
+   196→   196→                  <div className="text-[10px] text-muted-foreground">
+   197→   197→                    ₹{p.amount.toLocaleString()} · {p.frequency} · {p.installmentsCompleted} done
+   198→   198→                  </div>
+   199→   199→                </div>
+   200→   200→                <div className="text-right shrink-0">
+   201→   201→                  <div className="font-mono text-emerald-400">{p.returnPct >= 0 ? '+' : ''}{p.returnPct.toFixed(1)}%</div>
+   202→   202→                  <div className="text-[10px] text-muted-foreground">Next: {new Date(p.nextDate).toLocaleDateString()}</div>
+   203→   203→                </div>
+   204→   204→                <button onClick={() => deleteSIP(p.id)} className="text-muted-foreground hover:text-red-400"><Trash2 className="h-3 w-3" /></button>
+   205→   205→              </div>
+   206→   206→            ))}
+   207→   207→          </div>
+   208→   208→        </ScrollArea>
+   209→   209→      )}
+   210→   210→    </div>
+   211→   211→  );
+   212→   212→}
+   213→   213→
+   214→   214→// ── Watchlist Folders ──────────────────────────────────
+   215→   215→function WatchlistFolders() {
+   216→   216→  const [folders, setFolders] = useState<any[]>([]);
+   217→   217→  const [ungrouped, setUngrouped] = useState<any[]>([]);
+   218→   218→  const [open, setOpen] = useState(false);
+   219→   219→  const [form, setForm] = useState({ name: '', color: '#6366f1' });
+   220→   220→
+   221→   221→  const fetchFolders = useCallback(async () => {
+   222→   222→    try {
+   223→   223→      const res = await fetch('/api/watchlist/folders');
+   224→   224→      const data = await res.json();
+   225→   225→      if (data.success) { setFolders(data.folders || []); setUngrouped(data.ungrouped || []); }
+   226→   226→    } catch { /* ignore */ }
+   227→   227→  }, []);
+   228→   228→  useEffect(() => { fetchFolders(); }, [fetchFolders]);
+   229→   229→
+   230→   230→  const createFolder = async () => {
+   231→   231→    if (!form.name) return;
+   232→   232→    try {
+   233→   233→      const res = await fetch('/api/watchlist/folders', {
+   234→   234→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   235→   235→        body: JSON.stringify(form),
+   236→   236→      });
+   237→   237→      if ((await res.json()).success) {
+   238→   238→        toast.success(`Folder "${form.name}" created`);
+   239→   239→        setForm({ name: '', color: '#6366f1' });
+   240→   240→        setOpen(false);
+   241→   241→        fetchFolders();
+   242→   242→      }
+   243→   243→    } catch { toast.error('Failed to create folder'); }
+   244→   244→  };
+   245→   245→
+   246→   246→  const deleteFolder = async (id: string) => {
+   247→   247→    await fetch(`/api/watchlist/folders?id=${id}`, { method: 'DELETE' });
+   248→   248→    fetchFolders();
+   249→   249→  };
+   250→   250→
+   251→   251→  return (
+   252→   252→    <div>
+   253→   253→      <div className="flex items-center justify-between mb-3">
+   254→   254→        <h3 className="text-sm font-semibold flex items-center gap-2"><FolderPlus className="h-4 w-4" /> Watchlist Folders</h3>
+   255→   255→        <Dialog open={open} onOpenChange={setOpen}>
+   256→   256→          <DialogTrigger asChild><Button size="sm" className="h-7 text-xs gap-1"><Plus className="h-3 w-3" /> New Folder</Button></DialogTrigger>
+   257→   257→          <DialogContent className="sm:max-w-sm">
+   258→   258→            <DialogHeader><DialogTitle>Create Folder</DialogTitle></DialogHeader>
+   259→   259→            <div className="grid gap-3 py-2">
+   260→   260→              <div><Label className="text-xs">Name</Label><Input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Banking Stocks" className="h-8 text-xs" /></div>
+   261→   261→              <div><Label className="text-xs">Color</Label><Input type="color" value={form.color} onChange={e => setForm({ ...form, color: e.target.value })} className="h-8 w-16" /></div>
+   262→   262→            </div>
+   263→   263→            <DialogFooter>
+   264→   264→              <DialogClose asChild><Button variant="ghost" size="sm">Cancel</Button></DialogClose>
+   265→   265→              <Button size="sm" onClick={createFolder}>Create</Button>
+   266→   266→            </DialogFooter>
+   267→   267→          </DialogContent>
+   268→   268→        </Dialog>
+   269→   269→      </div>
+   270→   270→
+   271→   271→      {folders.length === 0 && ungrouped.length === 0 ? (
+   272→   272→        <p className="text-xs text-muted-foreground text-center py-4">No folders. Organize your watchlist by creating folders.</p>
+   273→   273→      ) : (
+   274→   274→        <ScrollArea className="max-h-[300px]">
+   275→   275→          <div className="space-y-2 pr-2">
+   276→   276→            {folders.map((f: any) => (
+   277→   277→              <div key={f.id} className="rounded-lg bg-secondary/30 p-2.5">
+   278→   278→                <div className="flex items-center justify-between mb-1.5">
+   279→   279→                  <div className="flex items-center gap-2">
+   280→   280→                    <div className="h-2.5 w-2.5 rounded-full" style={{ background: f.color }} />
+   281→   281→                    <span className="text-xs font-semibold">{f.name}</span>
+   282→   282→                    <Badge variant="outline" className="text-[9px] h-4">{f.stocks?.length || 0}</Badge>
+   283→   283→                  </div>
+   284→   284→                  <button onClick={() => deleteFolder(f.id)} className="text-muted-foreground hover:text-red-400"><Trash2 className="h-3 w-3" /></button>
+   285→   285→                </div>
+   286→   286→                <div className="flex flex-wrap gap-1">
+   287→   287→                  {f.stocks?.map((s: any) => (
+   288→   288→                    <Badge key={s.symbol} variant="secondary" className="text-[10px] h-5">{s.symbol}</Badge>
+   289→   289→                  ))}
+   290→   290→                </div>
+   291→   291→              </div>
+   292→   292→            ))}
+   293→   293→            {ungrouped.length > 0 && (
+   294→   294→              <div className="rounded-lg bg-secondary/30 p-2.5">
+   295→   295→                <div className="text-[10px] text-muted-foreground mb-1.5">Ungrouped ({ungrouped.length})</div>
+   296→   296→                <div className="flex flex-wrap gap-1">
+   297→   297→                  {ungrouped.slice(0, 20).map((s: any) => (
+   298→   298→                    <Badge key={s.symbol} variant="outline" className="text-[10px] h-5">{s.symbol}</Badge>
+   299→   299→                  ))}
+   300→   300→                  {ungrouped.length > 20 && <span className="text-[10px] text-muted-foreground">+{ungrouped.length - 20} more</span>}
+   301→   301→                </div>
+   302→   302→              </div>
+   303→   303→            )}
+   304→   304→          </div>
+   305→   305→        </ScrollArea>
+   306→   306→      )}
+   307→   307→    </div>
+   308→   308→  );
+   309→   309→}
+   310→   310→
+   311→   311→// ── Capital & Config ───────────────────────────────────
+   312→   312→function CapitalConfig() {
+   313→   313→  const [wallet, setWallet] = useState<any>(null);
+   314→   314→  const [editing, setEditing] = useState(false);
+   315→   315→  const [capital, setCapital] = useState('200000');
+   316→   316→
+   317→   317→  const fetchWallet = useCallback(async () => {
+   318→   318→    try {
+   319→   319→      const res = await fetch('/api/portfolio/summary');
+   320→   320→      const data = await res.json();
+   321→   321→      if (data.success && data.summary?.wallet) {
+   322→   322→        setWallet(data.summary.wallet);
+   323→   323→        setCapital(String(data.summary.wallet.totalCapital));
+   324→   324→      }
+   325→   325→    } catch { /* ignore */ }
+   326→   326→  }, []);
+   327→   327→  useEffect(() => { fetchWallet(); }, [fetchWallet]);
+   328→   328→
+   329→   329→  const updateCapital = async () => {
+   330→   330→    try {
+   331→   331→      const res = await fetch('/api/portfolio/summary', {
+   332→   332→        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+   333→   333→        body: JSON.stringify({ totalCapital: parseFloat(capital) }),
+   334→   334→      });
+   335→   335→      if (res.ok) { toast.success('Capital updated'); setEditing(false); fetchWallet(); }
+   336→   336→    } catch { toast.error('Failed to update capital'); }
+   337→   337→  };
+   338→   338→
+   339→   339→  if (!wallet) return <p className="text-xs text-muted-foreground text-center py-4">Loading...</p>;
+   340→   340→
+   341→   341→  return (
+   342→   342→    <div className="space-y-3">
+   343→   343→      <h3 className="text-sm font-semibold flex items-center gap-2"><Wallet className="h-4 w-4" /> Capital Configuration</h3>
+   344→   344→      <div className="grid grid-cols-2 gap-3">
+   345→   345→        <div className="rounded-lg bg-secondary/50 p-3">
+   346→   346→          <div className="text-[10px] text-muted-foreground uppercase">Total Capital</div>
+   347→   347→          {editing ? (
+   348→   348→            <div className="flex gap-1 mt-1">
+   349→   349→              <Input type="number" value={capital} onChange={e => setCapital(e.target.value)} className="h-7 text-xs" />
+   350→   350→              <Button size="sm" className="h-7 text-xs" onClick={updateCapital}>Save</Button>
+   351→   351→            </div>
+   352→   352→          ) : (
+   353→   353→            <div className="flex items-center gap-1 mt-1">
+   354→   354→              <span className="text-lg font-bold font-mono">₹{Math.round(wallet.totalCapital).toLocaleString()}</span>
+   355→   355→              <button onClick={() => setEditing(true)} className="text-muted-foreground hover:text-foreground"><RefreshCw className="h-3 w-3" /></button>
+   356→   356→            </div>
+   357→   357→          )}
+   358→   358→        </div>
+   359→   359→        <div className="rounded-lg bg-secondary/50 p-3">
+   360→   360→          <div className="text-[10px] text-muted-foreground uppercase">Available Cash</div>
+   361→   361→          <div className="text-lg font-bold font-mono text-emerald-400">₹{Math.round(wallet.available).toLocaleString()}</div>
+   362→   362→        </div>
+   363→   363→        <div className="rounded-lg bg-secondary/50 p-3">
+   364→   364→          <div className="text-[10px] text-muted-foreground uppercase">Deployed</div>
+   365→   365→          <div className="text-lg font-bold font-mono">₹{Math.round(wallet.deployed).toLocaleString()}</div>
+   366→   366→        </div>
+   367→   367→        <div className="rounded-lg bg-secondary/50 p-3">
+   368→   368→          <div className="text-[10px] text-muted-foreground uppercase">Realized P&L</div>
+   369→   369→          <div className={cn('text-lg font-bold font-mono', wallet.realizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   370→   370→            {wallet.realizedPnl >= 0 ? '+' : ''}₹{Math.round(wallet.realizedPnl).toLocaleString()}
+   371→   371→          </div>
+   372→   372→        </div>
+   373→   373→      </div>
+   374→   374→    </div>
+   375→   375→  );
+   376→   376→}
+   377→   377→
+   378→   378→// ── Universe Stats ─────────────────────────────────────
+   379→   379→function UniverseStatsCard() {
+   380→   380→  const [stats, setStats] = useState<any>(null);
+   381→   381→  useEffect(() => {
+   382→   382→    const s = getUniverseStats();
+   383→   383→    setStats(s);
+   384→   384→  }, []);
+   385→   385→
+   386→   386→  if (!stats) return null;
+   387→   387→  const topSectors = Object.entries(stats.bySector).sort((a, b) => b[1] - a[1]).slice(0, 8);
+   388→   388→
+   389→   389→  return (
+   390→   390→    <div>
+   391→   391→      <h3 className="text-sm font-semibold flex items-center gap-2 mb-3"><PieChart as any className="h-4 w-4" /> Scan Universe</h3>
+   392→   392→      <div className="grid grid-cols-3 gap-3 mb-3">
+   393→   393→        <div className="rounded-lg bg-indigo-500/10 p-3 text-center">
+   394→   394→          <div className="text-[10px] text-indigo-400 uppercase">Total Stocks</div>
+   395→   395→          <div className="text-2xl font-bold font-mono text-indigo-400">{stats.total}</div>
+   396→   396→        </div>
+   397→   397→        <div className="rounded-lg bg-secondary/50 p-3 text-center">
+   398→   398→          <div className="text-[10px] text-muted-foreground uppercase">Categories</div>
+   399→   399→          <div className="text-2xl font-bold font-mono">{Object.keys(stats.byCategory).length}</div>
+   400→   400→        </div>
+   401→   401→        <div className="rounded-lg bg-secondary/50 p-3 text-center">
+   402→   402→          <div className="text-[10px] text-muted-foreground uppercase">Sectors</div>
+   403→   403→          <div className="text-2xl font-bold font-mono">{Object.keys(stats.bySector).length}</div>
+   404→   404→        </div>
+   405→   405→      </div>
+   406→   406→      <h4 className="text-xs font-semibold mb-2">By Category</h4>
+   407→   407→      <div className="flex flex-wrap gap-1.5 mb-3">
+   408→   408→        {Object.entries(stats.byCategory).map(([cat, count]) => (
+   409→   409→          <Badge key={cat} variant="outline" className="text-[10px] h-5">{cat}: {count}</Badge>
+   410→   410→        ))}
+   411→   411→      </div>
+   412→   412→      <h4 className="text-xs font-semibold mb-2">Top Sectors</h4>
+   413→   413→      <div className="flex flex-wrap gap-1.5">
+   414→   414→        {topSectors.map(([sector, count]) => (
+   415→   415→          <Badge key={sector} variant="secondary" className="text-[10px] h-5">{sector} ({count})</Badge>
+   416→   416→        ))}
+   417→   417→      </div>
+   418→   418→    </div>
+   419→   419→  );
+   420→   420→}
+   421→   421→
+   422→   422→// ── Dividend Tracker ───────────────────────────────────
+   423→   423→function DividendPanel() {
+   424→   424→  const [data, setData] = useState<any>(null);
+   425→   425→  const [open, setOpen] = useState(false);
+   426→   426→  const [form, setForm] = useState({ symbol: '', exDate: '', dividendPerShare: '', qty: '1', stockName: '' });
+   427→   427→
+   428→   428→  const fetchDividends = useCallback(async () => {
+   429→   429→    try {
+   430→   430→      const res = await fetch('/api/portfolio/dividends');
+   431→   431→      const d = await res.json();
+   432→   432→      if (d.success) setData(d);
+   433→   433→    } catch { /* ignore */ }
+   434→   434→  }, []);
+   435→   435→  useEffect(() => { fetchDividends(); }, [fetchDividends]);
+   436→   436→
+   437→   437→  const addDividend = async () => {
+   438→   438→    if (!form.symbol || !form.exDate || !form.dividendPerShare) return;
+   439→   439→    try {
+   440→   440→      const dps = parseFloat(form.dividendPerShare);
+   441→   441→      const qty = parseInt(form.qty) || 1;
+   442→   442→      const res = await fetch('/api/portfolio/dividends', {
+   443→   443→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   444→   444→        body: JSON.stringify({ ...form, totalAmount: dps * qty }),
+   445→   445→      });
+   446→   446→      if ((await res.json()).success) {
+   447→   447→        toast.success(`Dividend recorded: ${form.symbol}`);
+   448→   448→        setForm({ symbol: '', exDate: '', dividendPerShare: '', qty: '1', stockName: '' });
+   449→   449→        setOpen(false);
+   450→   450→        fetchDividends();
+   451→   451→      }
+   452→   452→    } catch { toast.error('Failed to record dividend'); }
+   453→   453→  };
+   454→   454→
+   455→   455→  const deleteDiv = async (id: string) => {
+   456→   456→    await fetch(`/api/portfolio/dividends?id=${id}`, { method: 'DELETE' });
+   457→   457→    fetchDividends();
+   458→   458→  };
+   459→   459→
+   460→   460→  return (
+   461→   461→    <div>
+   462→   462→      <div className="flex items-center justify-between mb-3">
+   463→   463→        <h3 className="text-sm font-semibold flex items-center gap-2"><IndianRupee className="h-4 w-4" /> Dividend Tracker</h3>
+   464→   464→        <Dialog open={open} onOpenChange={setOpen}>
+   465→   465→          <DialogTrigger asChild><Button size="sm" className="h-7 text-xs gap-1"><Plus className="h-3 w-3" /> Record Dividend</Button></DialogTrigger>
+   466→   466→          <DialogContent className="sm:max-w-sm">
+   467→   467→            <DialogHeader><DialogTitle>Record Dividend</DialogTitle></DialogHeader>
+   468→   468→            <div className="grid gap-3 py-2">
+   469→   469→              <div><Label className="text-xs">Symbol</Label><Input value={form.symbol} onChange={e => setForm({ ...form, symbol: e.target.value.toUpperCase() })} placeholder="ITC" className="h-8 text-xs" /></div>
+   470→   470→              <div className="grid grid-cols-2 gap-2">
+   471→   471→                <div><Label className="text-xs">Ex-Date</Label><Input type="date" value={form.exDate} onChange={e => setForm({ ...form, exDate: e.target.value })} className="h-8 text-xs" /></div>
+   472→   472→                <div><Label className="text-xs">DPS (₹)</Label><Input type="number" step="0.01" value={form.dividendPerShare} onChange={e => setForm({ ...form, dividendPerShare: e.target.value })} placeholder="6.75" className="h-8 text-xs" /></div>
+   473→   473→              </div>
+   474→   474→              <div><Label className="text-xs">Qty Held</Label><Input type="number" value={form.qty} onChange={e => setForm({ ...form, qty: e.target.value })} className="h-8 text-xs" /></div>
+   475→   475→            </div>
+   476→   476→            <DialogFooter>
+   477→   477→              <DialogClose asChild><Button variant="ghost" size="sm">Cancel</Button></DialogClose>
+   478→   478→              <Button size="sm" onClick={addDividend}>Record</Button>
+   479→   479→            </DialogFooter>
+   480→   480→          </DialogContent>
+   481→   481→        </Dialog>
+   482→   482→      </div>
+   483→   483→
+   484→   484→      {data?.summary && data.summary.totalDividends > 0 && (
+   485→   485→        <div className="grid grid-cols-2 gap-3 mb-3">
+   486→   486→          <div className="rounded-lg bg-emerald-500/10 p-3">
+   487→   487→            <div className="text-[10px] text-emerald-400 uppercase">Total Dividends</div>
+   488→   488→            <div className="text-lg font-bold font-mono text-emerald-400">₹{data.summary.totalDividends.toLocaleString()}</div>
+   489→   489→          </div>
+   490→   490→          <div className="rounded-lg bg-secondary/50 p-3">
+   491→   491→            <div className="text-[10px] text-muted-foreground uppercase">Stocks</div>
+   492→   492→            <div className="text-lg font-bold font-mono">{data.summary.uniqueStocks}</div>
+   493→   493→          </div>
+   494→   494→        </div>
+   495→   495→      )}
+   496→   496→
+   497→   497→      {(!data || data.dividends.length === 0) ? (
+   498→   498→        <p className="text-xs text-muted-foreground text-center py-4">No dividends recorded yet.</p>
+   499→   499→      ) : (
+   500→   500→        <ScrollArea className="max-h-[220px]">
+   501→   501→          <div className="space-y-1.5 pr-2">
+   502→   502→            {data.dividends.slice(0, 20).map((d: any) => (
+   503→   503→              <div key={d.id} className="flex items-center gap-2 text-xs py-1.5 border-b border-border/30">
+   504→   504→                <span className="font-semibold shrink-0">{d.symbol}</span>
+   505→   505→                <Badge variant="outline" className="text-[9px] h-4 text-emerald-400">₹{d.dividendPerShare}/share</Badge>
+   506→   506→                <span className="font-mono text-emerald-400">₹{Math.round(d.totalAmount).toLocaleString()}</span>
+   507→   507→                <span className="text-muted-foreground ml-auto">{new Date(d.exDate).toLocaleDateString()}</span>
+   508→   508→                <button onClick={() => deleteDiv(d.id)} className="text-muted-foreground hover:text-red-400"><Trash2 className="h-3 w-3" /></button>
+   509→   509→              </div>
+   510→   510→            ))}
+   511→   511→          </div>
+   512→   512→        </ScrollArea>
+   513→   513→      )}
+   514→   514→    </div>
+   515→   515→  );
+   516→   516→}
+   517→   517→
+   518→   518→// ── Main Settings Tab ──────────────────────────────────
+   519→   519→export function SettingsTab() {
+   520→   520→  return (
+   521→   521→    <div className="space-y-4">
+   522→   522→      <div className="flex items-center justify-between">
+   523→   523→        <h2 className="text-lg font-bold flex items-center gap-2"><Shield className="h-5 w-5 text-indigo-400" /> Settings</h2>
+   524→   524→      </div>
+   525→   525→
+   526→   526→      <Tabs defaultValue="capital" className="w-full">
+   527→   527→        <TabsList className="w-full justify-start mb-4">
+   528→   528→          <TabsTrigger value="capital" className="text-xs">Capital</TabsTrigger>
+   529→   529→          <TabsTrigger value="portfolios" className="text-xs">Portfolios</TabsTrigger>
+   530→   530→          <TabsTrigger value="sip" className="text-xs">SIP Plans</TabsTrigger>
+   531→   531→          <TabsTrigger value="dividends" className="text-xs">Dividends</TabsTrigger>
+   532→   532→          <TabsTrigger value="folders" className="text-xs">Watchlist Folders</TabsTrigger>
+   533→   533→          <TabsTrigger value="universe" className="text-xs">Universe</TabsTrigger>
+   534→   534→        </TabsList>
+   535→   535→
+   536→   536→        <TabsContent value="capital"><Card className="border-border"><CardContent className="p-4"><CapitalConfig /></CardContent></Card></TabsContent>
+   537→   537→        <TabsContent value="portfolios"><Card className="border-border"><CardContent className="p-4"><PortfolioManager /></CardContent></Card></TabsContent>
+   538→   538→        <TabsContent value="sip"><Card className="border-border"><CardContent className="p-4"><SIPPanel /></CardContent></Card></TabsContent>
+   539→   539→        <TabsContent value="dividends"><Card className="border-border"><CardContent className="p-4"><DividendPanel /></CardContent></Card></TabsContent>
+   540→   540→        <TabsContent value="folders"><Card className="border-border"><CardContent className="p-4"><WatchlistFolders /></CardContent></Card></TabsContent>
+   541→   541→        <TabsContent value="universe"><Card className="border-border"><CardContent className="p-4"><UniverseStatsCard /></CardContent></Card></TabsContent>
+   542→   542→      </Tabs>
+   543→   543→    </div>
+   544→   544→  );
+   545→   545→}

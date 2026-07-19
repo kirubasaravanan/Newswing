@@ -1,0 +1,707 @@
+     1→     1→/**
+     2→     2→ * V-Swing Screening Engine v65.5
+     3→     3→ * Ported from Pine Script to TypeScript
+     4→     4→ * 
+     5→     5→ * This engine replicates the exact logic from the TradingView strategy
+     6→     6→ * for scanning NSE stocks based on 6-factor confluence scoring.
+     7→     7→ */
+     8→     8→
+     9→     9→import {
+    10→    10→  SMA, EMA, RSI, ATR, ADX, WMA
+    11→    11→} from 'technicalindicators';
+    12→    12→
+    13→    13→// ── Types ──────────────────────────────────────────────────
+    14→    14→
+    15→    15→export interface OHLCV {
+    16→    16→  date: string;
+    17→    17→  open: number;
+    18→    18→  high: number;
+    19→    19→  low: number;
+    20→    20→  close: number;
+    21→    21→  volume: number;
+    22→    22→}
+    23→    23→
+    24→    24→export interface ScreeningConfig {
+    25→    25→  liveCapital: number;
+    26→    26→  riskPct: number;
+    27→    27→  maxSlots: number;
+    28→    28→  maxOpenTrades: number;
+    29→    29→  maxHoldBars: number;
+    30→    30→  minScore: number;
+    31→    31→  minRR: number;
+    32→    32→  cooldownBars: number;
+    33→    33→  useMacro: boolean;
+    34→    34→  minTurnoverCr: number;
+    35→    35→}
+    36→    36→
+    37→    37→export const DEFAULT_CONFIG: ScreeningConfig = {
+    38→    38→  liveCapital: 200000,
+    39→    39→  riskPct: 1.0,
+    40→    40→  maxSlots: 8,
+    41→    41→  maxOpenTrades: 3,
+    42→    42→  maxHoldBars: 25,
+    43→    43→  minScore: 3,
+    44→    44→  minRR: 1.5,
+    45→    45→  cooldownBars: 1,
+    46→    46→  useMacro: true,
+    47→    47→  minTurnoverCr: 25.0,
+    48→    48→};
+    49→    49→
+    50→    50→export interface ConfluenceScores {
+    51→    51→  scoreTrend: number;
+    52→    52→  scorePullback: number;
+    53→    53→  scoreTrigger: number;
+    54→    54→  scoreVolume: number;
+    55→    55→  scoreRS: number;
+    56→    56→  scoreGap: number;
+    57→    57→  totalScore: number;
+    58→    58→}
+    59→    59→
+    60→    60→export interface ScreeningResult {
+    61→    61→  symbol: string;
+    62→    62→  name?: string;
+    63→    63→  date: string;
+    64→    64→  score: number;
+    65→    65→  setupType: 'A+' | 'B' | null;
+    66→    66→  entryPrice: number;
+    67→    67→  stopLoss: number;
+    68→    68→  targetPrice: number;
+    69→    69→  riskReward: number;
+    70→    70→  atr: number;
+    71→    71→  rsi: number;
+    72→    72→  scores: ConfluenceScores;
+    73→    73→  checks: {
+    74→    74→    trendAbove: boolean;
+    75→    75→    pullbackOk: boolean;
+    76→    76→    triggerOk: boolean;
+    77→    77→    volumeOk: boolean;
+    78→    78→    rsOk: boolean;
+    79→    79→    gapOk: boolean;
+    80→    80→    regimeSafe: boolean;
+    81→    81→    liquid: boolean;
+    82→    82→    trending: boolean;
+    83→    83→    validVol: boolean;
+    84→    84→    notExtended: boolean;
+    85→    85→  };
+    86→    86→  sizing: {
+    87→    87→    qtyA: number;  // A+ setup qty
+    88→    88→    qtyB: number;  // B setup qty
+    89→    89→    riskPerShareA: number;
+    90→    90→    riskPerShareB: number;
+    91→    91→    riskAmtA: number;
+    92→    92→    riskAmtB: number;
+    93→    93→  };
+    94→    94→  indicators: {
+    95→    95→    sma200: number;
+    96→    96→    ema20: number;
+    97→    97→    ema10: number;
+    98→    98→    adx: number;
+    99→    99→    diPlus: number;
+   100→   100→    diMinus: number;
+   101→   101→  };
+   102→   102→}
+   103→   103→
+   104→   104→// ── Helper: lookback with index safety ──────────────────────
+   105→   105→
+   106→   106→function get<T>(arr: T[], index: number, fallback: T): T {
+   107→   107→  if (index < 0 || index >= arr.length) return fallback;
+   108→   108→  return arr[index];
+   109→   109→}
+   110→   110→
+   111→   111→// ── Core Engine ────────────────────────────────────────────
+   112→   112→
+   113→   113→export function runScreening(
+   114→   114→  symbol: string,
+   115→   115→  candles: OHLCV[],
+   116→   116→  niftyCandles: OHLCV[],
+   117→   117→  config: ScreeningConfig = DEFAULT_CONFIG
+   118→   118→): ScreeningResult | null {
+   119→   119→  const len = candles.length;
+   120→   120→  if (len < 250) return null; // Need enough data for SMA 200
+   121→   121→
+   122→   122→  const closes = candles.map(c => c.close);
+   123→   123→  const highs = candles.map(c => c.high);
+   124→   124→  const lows = candles.map(c => c.low);
+   125→   125→  const volumes = candles.map(c => c.volume);
+   126→   126→
+   127→   127→  // ── Indicators ─────────────────────────────────────────
+   128→   128→  const sma200Arr = SMA.calculate({ period: 200, values: closes });
+   129→   129→  const ema20Arr = EMA.calculate({ period: 20, values: closes });
+   130→   130→  const ema10Arr = EMA.calculate({ period: 10, values: closes });
+   131→   131→  const rsi14Arr = RSI.calculate({ period: 14, values: closes });
+   132→   132→  const atr14Arr = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
+   133→   133→  const dmiResult = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+   134→   134→
+   135→   135→  // Pad arrays to match candle length
+   136→   136→  const sma200 = padArray(sma200Arr, len);
+   137→   137→  const ema20 = padArray(ema20Arr, len);
+   138→   138→  const ema10 = padArray(ema10Arr, len);
+   139→   139→  const rsi14 = padArray(rsi14Arr, len);
+   140→   140→  const atr14 = padArray(atr14Arr, len);
+   141→   141→  const adxArr = dmiResult.map(d => d.adx);
+   142→   142→  const diPlusArr = dmiResult.map(d => d.pdi);
+   143→   143→  const diMinusArr = dmiResult.map(d => d.mdi);
+   144→   144→  const adx = padArray(adxArr, len);
+   145→   145→  const diPlus = padArray(diPlusArr, len);
+   146→   146→  const diMinus = padArray(diMinusArr, len);
+   147→   147→
+   148→   148→  // ── Current bar (last bar) ─────────────────────────────
+   149→   149→  const i = len - 1; // current bar index
+   150→   150→  const i1 = len - 2; // previous bar
+   151→   151→
+   152→   152→  // Need at least 2 bars of valid indicator data
+   153→   153→  if (!sma200[i] || !ema20[i] || !atr14[i] || !rsi14[i] || !adx[i]) return null;
+   154→   154→
+   155→   155→  const currentClose = closes[i];
+   156→   156→  const currentOpen = candles[i].open;
+   157→   157→  const currentHigh = highs[i];
+   158→   158→  const currentLow = lows[i];
+   159→   159→  const currentVolume = volumes[i];
+   160→   160→  const prevHigh = get(highs, i1, currentHigh);
+   161→   161→
+   162→   162→  // ── Adaptive range (ATR-based lookback) ────────────────
+   163→   163→  const atrSma20 = calcSMA(atr14.slice(0, i + 1).filter(v => v != null), 20);
+   164→   164→  const currentAtr = atr14[i]!;
+   165→   165→  const rangeLen = currentAtr > atrSma20 ? 30 : 60;
+   166→   166→
+   167→   167→  const structHigh = Math.max(...highs.slice(Math.max(0, i - rangeLen), i));
+   168→   168→  const structLow = Math.min(...lows.slice(Math.max(0, i - rangeLen), i));
+   169→   169→
+   170→   170→  // ── ADX / Trending check ──────────────────────────────
+   171→   171→  const prevAdx = get(adx, i1, 0);
+   172→   172→  const adxRising = adx[i]! > prevAdx;
+   173→   173→  const adxHealthy = adx[i]! > 15;
+   174→   174→  const marketTrending = (adx[i]! > 18) || (adxRising && adxHealthy);
+   175→   175→
+   176→   176→  // ── Volatility check ───────────────────────────────────
+   177→   177→  const volLo = marketTrending ? 0.6 : 0.8;
+   178→   178→  const volHi = marketTrending ? 1.8 : 1.3;
+   179→   179→  const validVolatility = currentAtr > (atrSma20 * volLo) && currentAtr < (atrSma20 * volHi);
+   180→   180→
+   181→   181→  // ── Macro / Nifty check ────────────────────────────────
+   182→   182→  let regimeSafe = true;
+   183→   183→  if (config.useMacro && niftyCandles.length >= 200) {
+   184→   184→    const niftyCloses = niftyCandles.map(c => c.close);
+   185→   185→    const nifty200Arr = SMA.calculate({ period: 200, values: niftyCloses });
+   186→   186→    const nifty200 = nifty200Arr[nifty200Arr.length - 1];
+   187→   187→    regimeSafe = nifty200 != null && currentClose > nifty200;
+   188→   188→  }
+   189→   189→
+   190→   190→  // ── Liquidity check ────────────────────────────────────
+   191→   191→  const turnoverCr = (currentClose * currentVolume) / 10000000;
+   192→   192→  const turnoverMA20 = calcSMA(
+   193→   193→    candles.slice(Math.max(0, i - 20), i).map(c => (c.close * c.volume) / 10000000),
+   194→   194→    20
+   195→   195→  );
+   196→   196→  const liquid = turnoverMA20 >= config.minTurnoverCr;
+   197→   197→
+   198→   198→  // ── Volume MA ─────────────────────────────────────────
+   199→   199→  const volMA20 = calcSMA(volumes.slice(Math.max(0, i - 20), i + 1), 20);
+   200→   200→  const minLiquidityCheck = currentVolume > volMA20;
+   201→   201→
+   202→   202→  // ── Not extended check ─────────────────────────────────
+   203→   203→  const notExtended = currentClose < (ema20[i]! * 1.06);
+   204→   204→
+   205→   205→  // ── Confluence Scores (exact Pine Script logic) ────────
+   206→   206→
+   207→   207→  // Score 1: Trend
+   208→   208→  const scoreTrend = (currentClose > sma200[i]! && rsi14[i]! > 52) ? 1 : 0;
+   209→   209→
+   210→   210→  // Score 2: Pullback
+   211→   211→  const lowest4 = Math.min(...lows.slice(Math.max(0, i - 4), i + 1));
+   212→   212→  const scorePullback = (lowest4 < ema20[i]! * 1.02 && currentClose > ema20[i]!) ? 1 : 0;
+   213→   213→
+   214→   214→  // Score 3: Trigger
+   215→   215→  const scoreTrigger = currentClose > prevHigh ? 1 : 0;
+   216→   216→
+   217→   217→  // Score 4: Volume
+   218→   218→  const prevVolMA20 = calcSMA(volumes.slice(Math.max(0, i1 - 20), i1 + 1), 20);
+   219→   219→  const scoreVolume = (currentVolume > volMA20 * 1.05 || get(volumes, i1, 0) > prevVolMA20 * 1.1) ? 1 : 0;
+   220→   220→
+   221→   221→  // Score 5: Relative Strength (vs Nifty)
+   222→   222→  let scoreRS = 0;
+   223→   223→  if (niftyCandles.length >= 20) {
+   224→   224→    const niftyClose = niftyCandles[niftyCandles.length - 1]?.close ?? 0;
+   225→   225→    if (niftyClose > 0) {
+   226→   226→      // Calculate rolling RS for last 25 bars
+   227→   227→      const rsWindow = Math.min(25, candles.length, niftyCandles.length);
+   228→   228→      const rsValues: number[] = [];
+   229→   229→      for (let j = len - rsWindow; j < len; j++) {
+   230→   230→        const nj = niftyCandles.length - rsWindow + (j - (len - rsWindow));
+   231→   231→        if (nj >= 0 && niftyCandles[nj]?.close > 0) {
+   232→   232→          rsValues.push(closes[j] / niftyCandles[nj].close);
+   233→   233→        }
+   234→   234→      }
+   235→   235→      const rsMA = calcSMA(rsValues, 20);
+   236→   236→      const currentRS = closes[i] / niftyClose;
+   237→   237→      const rs5ago = rsValues.length > 5 ? rsValues[rsValues.length - 6] : 0;
+   238→   238→      scoreRS = (currentRS > rsMA || currentRS > rs5ago) ? 1 : 0;
+   239→   239→    }
+   240→   240→  }
+   241→   241→
+   242→   242→  // Score 6: Gap
+   243→   243→  const prevClose = get(closes, i1, currentClose);
+   244→   244→  const gapPct = Math.abs(currentOpen - prevClose) / prevClose * 100;
+   245→   245→  const scoreGap = gapPct < 3.5 ? 1 : 0;
+   246→   246→
+   247→   247→  const totalScore = scoreTrend + scorePullback + scoreTrigger + scoreVolume + scoreRS + scoreGap;
+   248→   248→
+   249→   249→  // ── Regime Clear check ─────────────────────────────────
+   250→   250→  const regimeClear = regimeSafe && liquid && minLiquidityCheck && marketTrending && validVolatility && notExtended;
+   251→   251→
+   252→   252→  // ── Entry / SL / TP calculation ────────────────────────
+   253→   253→  const theoreticalEP = Math.max(currentOpen, prevHigh);
+   254→   254→  const stopLow5 = Math.min(...lows.slice(Math.max(0, i - 5), i));
+   255→   255→  const rawSL = stopLow5 - (get(atr14, i1, currentAtr) * 0.8);
+   256→   256→  const riskPerShare = theoreticalEP - rawSL;
+   257→   257→
+   258→   258→  if (riskPerShare <= 0) return null;
+   259→   259→
+   260→   260→  const structRange = structHigh - structLow;
+   261→   261→  const expectedReward = structRange;
+   262→   262→  const rr = expectedReward / riskPerShare;
+   263→   263→
+   264→   264→  if (rr < config.minRR && totalScore < 6) return null;
+   265→   265→
+   266→   266→  // ── Position Sizing ────────────────────────────────────
+   267→   267→  const tp1 = theoreticalEP + (riskPerShare * 1.5);
+   268→   268→
+   269→   269→  // A+ sizing
+   270→   270→  const riskAmtA = config.liveCapital * (config.riskPct / 100);
+   271→   271→  const qtyRiskA = Math.floor(riskAmtA / (riskPerShare * 1)); // pointvalue = 1 for NSE cash
+   272→   272→  const qtyCapA = Math.floor((config.liveCapital / config.maxSlots) / theoreticalEP);
+   273→   273→  const qtyA = Math.max(0, Math.min(qtyRiskA, qtyCapA));
+   274→   274→
+   275→   275→  // B sizing (half risk, 60% capital)
+   276→   276→  const riskAmtB = config.liveCapital * ((config.riskPct * 0.5) / 100);
+   277→   277→  const qtyRiskB = Math.floor(riskAmtB / (riskPerShare * 1));
+   278→   278→  const qtyCapB = Math.floor(((config.liveCapital / config.maxSlots) * 0.6) / theoreticalEP);
+   279→   279→  const qtyB = Math.max(0, Math.min(qtyRiskB, qtyCapB));
+   280→   280→
+   281→   281→  // ── Final assembly ─────────────────────────────────────
+   282→   282→  if (totalScore < config.minScore) return null;
+   283→   283→  if (!regimeClear) return null;
+   284→   284→
+   285→   285→  // Strong momentum check (gap < 5% for score 6)
+   286→   286→  const strongMomentum = totalScore === 6 && gapPct < 5.0;
+   287→   287→  const withinGap = currentOpen <= (prevHigh * 1.03);
+   288→   288→  if (!withinGap && !strongMomentum) return null;
+   289→   289→
+   290→   290→  return {
+   291→   291→    symbol,
+   292→   292→    date: candles[i].date,
+   293→   293→    score: totalScore,
+   294→   294→    setupType: totalScore === 6 ? 'A+' : 'B',
+   295→   295→    entryPrice: Math.round(theoreticalEP * 100) / 100,
+   296→   296→    stopLoss: Math.round(rawSL * 100) / 100,
+   297→   297→    targetPrice: Math.round(tp1 * 100) / 100,
+   298→   298→    riskReward: Math.round(rr * 100) / 100,
+   299→   299→    atr: Math.round(currentAtr * 100) / 100,
+   300→   300→    rsi: Math.round(rsi14[i]! * 100) / 100,
+   301→   301→    scores: {
+   302→   302→      scoreTrend,
+   303→   303→      scorePullback,
+   304→   304→      scoreTrigger,
+   305→   305→      scoreVolume,
+   306→   306→      scoreRS,
+   307→   307→      scoreGap,
+   308→   308→      totalScore,
+   309→   309→    },
+   310→   310→    checks: {
+   311→   311→      trendAbove: scoreTrend === 1,
+   312→   312→      pullbackOk: scorePullback === 1,
+   313→   313→      triggerOk: scoreTrigger === 1,
+   314→   314→      volumeOk: scoreVolume === 1,
+   315→   315→      rsOk: scoreRS === 1,
+   316→   316→      gapOk: scoreGap === 1,
+   317→   317→      regimeSafe,
+   318→   318→      liquid,
+   319→   319→      trending: marketTrending,
+   320→   320→      validVol: validVolatility,
+   321→   321→      notExtended,
+   322→   322→    },
+   323→   323→    sizing: {
+   324→   324→      qtyA,
+   325→   325→      qtyB,
+   326→   326→      riskPerShareA: Math.round(riskPerShare * 100) / 100,
+   327→   327→      riskPerShareB: Math.round(riskPerShare * 100) / 100,
+   328→   328→      riskAmtA: Math.round(riskAmtA),
+   329→   329→      riskAmtB: Math.round(riskAmtB),
+   330→   330→    },
+   331→   331→    indicators: {
+   332→   332→      sma200: Math.round(sma200[i]! * 100) / 100,
+   333→   333→      ema20: Math.round(ema20[i]! * 100) / 100,
+   334→   334→      ema10: Math.round(get(ema10, i, 0) * 100) / 100,
+   335→   335→      adx: Math.round(adx[i]! * 100) / 100,
+   336→   336→      diPlus: Math.round(get(diPlus, i, 0) * 100) / 100,
+   337→   337→      diMinus: Math.round(get(diMinus, i, 0) * 100) / 100,
+   338→   338→    },
+   339→   339→  };
+   340→   340→}
+   341→   341→
+   342→   342→// ── Backtest Engine ─────────────────────────────────────────
+   343→   343→
+   344→   344→export interface BacktestTradeResult {
+   345→   345→  symbol: string;
+   346→   346→  entryDate: string;
+   347→   347→  entryPrice: number;
+   348→   348→  exitDate: string;
+   349→   349→  exitPrice: number;
+   350→   350→  qty: number;
+   351→   351→  pnl: number;
+   352→   352→  pnlPercent: number;
+   353→   353→  score: number;
+   354→   354→  setupType: string;
+   355→   355→  exitReason: string;
+   356→   356→}
+   357→   357→
+   358→   358→export interface BacktestResult {
+   359→   359→  trades: BacktestTradeResult[];
+   360→   360→  equityCurve: { date: string; equity: number }[];
+   361→   361→  stats: {
+   362→   362→    totalTrades: number;
+   363→   363→    winTrades: number;
+   364→   364→    lossTrades: number;
+   365→   365→    winRate: number;
+   366→   366→    profitFactor: number;
+   367→   367→    maxDrawdown: number;
+   368→   368→    avgWin: number;
+   369→   369→    avgLoss: number;
+   370→   370→    bestTrade: number;
+   371→   371→    worstTrade: number;
+   372→   372→    finalCapital: number;
+   373→   373→    sharpeRatio: number;
+   374→   374→  };
+   375→   375→}
+   376→   376→
+   377→   377→export function runBacktest(
+   378→   378→  symbol: string,
+   379→   379→  candles: OHLCV[],
+   380→   380→  niftyCandles: OHLCV[],
+   381→   381→  config: ScreeningConfig = DEFAULT_CONFIG
+   382→   382→): BacktestResult {
+   383→   383→  const { maxSlots, maxOpenTrades, maxHoldBars, riskPct, liveCapital } = config;
+   384→   384→  const trades: BacktestTradeResult[] = [];
+   385→   385→  const equityCurve: { date: string; equity: number }[] = [];
+   386→   386→  
+   387→   387→  let capital = liveCapital;
+   388→   388→  let peakEquity = capital;
+   389→   389→  let maxDD = 0;
+   390→   390→  let lastTradeBar = -999;
+   391→   391→
+   392→   392→  // Track open positions for pyramiding
+   393→   393→  interface OpenPosition {
+   394→   394→    entryBar: number;
+   395→   395→    entryPrice: number;
+   396→   396→    qty: number;
+   397→   397→    stopLoss: number;
+   398→   398→    tp1: number;
+   399→   399→    score: number;
+   400→   400→    setupType: string;
+   401→   401→    partialTaken: boolean;
+   402→   402→    trailActive: boolean;
+   403→   403→    totalQty: number;
+   404→   404→    avgPrice: number;
+   405→   405→    blendedSL: number;
+   406→   406→  }
+   407→   407→  let openPositions: OpenPosition[] = [];
+   408→   408→
+   409→   409→  // Pre-compute all indicators for the full dataset
+   410→   410→  const closes = candles.map(c => c.close);
+   411→   411→  const highs = candles.map(c => c.high);
+   412→   412→  const lows = candles.map(c => c.low);
+   413→   413→  const volumes = candles.map(c => c.volume);
+   414→   414→
+   415→   415→  const sma200Full = padArray(SMA.calculate({ period: 200, values: closes }), candles.length);
+   416→   416→  const ema20Full = padArray(EMA.calculate({ period: 20, values: closes }), candles.length);
+   417→   417→  const ema10Full = padArray(EMA.calculate({ period: 10, values: closes }), candles.length);
+   418→   418→  const rsi14Full = padArray(RSI.calculate({ period: 14, values: closes }), candles.length);
+   419→   419→  const atr14Full = padArray(ATR.calculate({ period: 14, high: highs, low: lows, close: closes }), candles.length);
+   420→   420→  const adxResultFull = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+   421→   421→  const adxFull = padArray(adxResultFull.map(d => d.adx), candles.length);
+   422→   422→
+   423→   423→  // Nifty data
+   424→   424→  let nifty200Full: (number | null)[] = [];
+   425→   425→  if (niftyCandles.length >= 200) {
+   426→   426→    const nCloses = niftyCandles.map(c => c.close);
+   427→   427→    nifty200Full = padArray(SMA.calculate({ period: 200, values: nCloses }), niftyCandles.length);
+   428→   428→  }
+   429→   429→
+   430→   430→  // Walk through each bar
+   431→   431→  for (let barIdx = 201; barIdx < candles.length; barIdx++) {
+   432→   432→    const bar = candles[barIdx];
+   433→   433→    
+   434→   434→    // Check exits for all open positions
+   435→   435→    const closedIndices: number[] = [];
+   436→   436→    for (let p = 0; p < openPositions.length; p++) {
+   437→   437→      const pos = openPositions[p];
+   438→   438→      const barsHeld = barIdx - pos.entryBar;
+   439→   439→      
+   440→   440→      // Partial TP check
+   441→   441→      if (!pos.partialTaken && bar.high >= pos.tp1) {
+   442→   442→        const closeQty = Math.ceil(pos.totalQty * 0.3);
+   443→   443→        const pnl = closeQty * (pos.tp1 - pos.avgPrice);
+   444→   444→        capital += pnl + closeQty * pos.avgPrice;
+   445→   445→        pos.totalQty -= closeQty;
+   446→   446→        pos.trailActive = true;
+   447→   447→        pos.partialTaken = true;
+   448→   448→      }
+   449→   449→
+   450→   450→      // Trailing stop
+   451→   451→      if (pos.trailActive) {
+   452→   452→        const trailLow5 = Math.min(...lows.slice(Math.max(0, barIdx - 5), barIdx + 1));
+   453→   453→        const dynamicTrail = Math.max(
+   454→   454→          (ema10Full[barIdx] ?? pos.avgPrice) - (atr14Full[barIdx] ?? 0),
+   455→   455→          trailLow5
+   456→   456→        );
+   457→   457→        pos.blendedSL = Math.max(pos.blendedSL, pos.avgPrice, dynamicTrail);
+   458→   458→      }
+   459→   459→
+   460→   460→      // SL hit
+   461→   461→      if (bar.low <= pos.blendedSL && pos.totalQty > 0) {
+   462→   462→        const pnl = pos.totalQty * (pos.blendedSL - pos.avgPrice);
+   463→   463→        capital += pnl + pos.totalQty * pos.avgPrice;
+   464→   464→        trades.push({
+   465→   465→          symbol,
+   466→   466→          entryDate: candles[pos.entryBar].date,
+   467→   467→          entryPrice: pos.avgPrice,
+   468→   468→          exitDate: bar.date,
+   469→   469→          exitPrice: pos.blendedSL,
+   470→   470→          qty: pos.totalQty,
+   471→   471→          pnl: Math.round(pnl * 100) / 100,
+   472→   472→          pnlPercent: Math.round((pnl / (pos.totalQty * pos.avgPrice)) * 10000) / 100,
+   473→   473→          score: pos.score,
+   474→   474→          setupType: pos.setupType,
+   475→   475→          exitReason: pos.trailActive ? 'TRAIL_STOP' : 'SL_HIT',
+   476→   476→        });
+   477→   477→        closedIndices.push(p);
+   478→   478→        continue;
+   479→   479→      }
+   480→   480→
+   481→   481→      // Dead capital exit
+   482→   482→      if (barsHeld > maxHoldBars && !pos.trailActive && pos.totalQty > 0) {
+   483→   483→        const pnl = pos.totalQty * (bar.close - pos.avgPrice);
+   484→   484→        capital += pnl + pos.totalQty * pos.avgPrice;
+   485→   485→        trades.push({
+   486→   486→          symbol,
+   487→   487→          entryDate: candles[pos.entryBar].date,
+   488→   488→          entryPrice: pos.avgPrice,
+   489→   489→          exitDate: bar.date,
+   490→   490→          exitPrice: bar.close,
+   491→   491→          qty: pos.totalQty,
+   492→   492→          pnl: Math.round(pnl * 100) / 100,
+   493→   493→          pnlPercent: Math.round((pnl / (pos.totalQty * pos.avgPrice)) * 10000) / 100,
+   494→   494→          score: pos.score,
+   495→   495→          setupType: pos.setupType,
+   496→   496→          exitReason: 'DEAD_CAPITAL',
+   497→   497→        });
+   498→   498→        closedIndices.push(p);
+   499→   499→      }
+   500→   500→    }
+   501→   501→    // Remove closed positions (and fully exited ones)
+   502→   502→    openPositions = openPositions.filter((_, idx) => !closedIndices.includes(idx)).filter(p => p.totalQty > 0);
+   503→   503→
+   504→   504→    // Track equity
+   505→   505→    peakEquity = Math.max(peakEquity, capital);
+   506→   506→    const dd = ((peakEquity - capital) / peakEquity) * 100;
+   507→   507→    maxDD = Math.max(maxDD, dd);
+   508→   508→    equityCurve.push({ date: bar.date, equity: Math.round(capital * 100) / 100 });
+   509→   509→
+   510→   510→    // Check for new entry (simplified - using previous bar's signal)
+   511→   511→    if (barIdx < 2 || barIdx - lastTradeBar <= config.cooldownBars) continue;
+   512→   512→    if (openPositions.length >= maxOpenTrades) continue;
+   513→   513→
+   514→   514→    const i = barIdx;
+   515→   515→    const i1 = barIdx - 1;
+   516→   516→    
+   517→   517→    // Quick signal check on previous bar
+   518→   518→    const prevSMA200 = sma200Full[i1];
+   519→   519→    const prevEMA20 = ema20Full[i1];
+   520→   520→    const prevRSI = rsi14Full[i1];
+   521→   521→    const prevATR = atr14Full[i1];
+   522→   522→    const prevADX = adxFull[i1];
+   523→   523→    const prevCandle = candles[i1];
+   524→   524→
+   525→   525→    if (!prevSMA200 || !prevEMA20 || !prevRSI || !prevATR || !prevADX) continue;
+   526→   526→
+   527→   527→    // Simplified confluence check (mirroring the screening logic)
+   528→   528→    const prevADX1 = adxFull[i1 - 1] ?? 0;
+   529→   529→    const trending = prevADX > 18 || (prevADX > prevADX1 && prevADX > 15);
+   530→   530→    const atrSma20 = calcSMA(atr14Full.slice(Math.max(0, i - 20), i).filter(v => v != null), 20);
+   531→   531→    const validVol = prevATR > atrSma20 * 0.6 && prevATR < atrSma20 * 1.8;
+   532→   532→    const notExt = prevCandle.close < prevEMA20 * 1.06;
+   533→   533→
+   534→   534→    // Nifty check
+   535→   535→    let regimeSafe = true;
+   536→   536→    if (niftyCandles.length >= 200) {
+   537→   537→      const niftyIdx = Math.min(niftyCandles.length - 1, barIdx);
+   538→   538→      const nifty200 = nifty200Full[niftyIdx];
+   539→   539→      if (nifty200) regimeSafe = niftyCandles[niftyIdx].close > nifty200;
+   540→   540→    }
+   541→   541→
+   542→   542→    if (!trending || !validVol || !notExt || !regimeSafe) continue;
+   543→   543→
+   544→   544→    // Score calculation on prev bar
+   545→   545→    let score = 0;
+   546→   546→    if (prevCandle.close > prevSMA200 && prevRSI > 52) score++;
+   547→   547→    const low4 = Math.min(...lows.slice(Math.max(0, i1 - 4), i1 + 1));
+   548→   548→    if (low4 < prevEMA20 * 1.02 && prevCandle.close > prevEMA20) score++;
+   549→   549→    if (prevCandle.close > candles[i1 - 1]?.high) score++;
+   550→   550→    const vm = calcSMA(volumes.slice(Math.max(0, i1 - 20), i1 + 1), 20);
+   551→   551→    if (prevCandle.volume > vm * 1.05) score++;
+   552→   552→    
+   553→   553→    const gapPct = Math.abs(prevCandle.open - candles[i1 - 1]?.close) / (candles[i1 - 1]?.close || 1) * 100;
+   554→   554→    if (gapPct < 3.5) score++;
+   555→   555→
+   556→   556→    if (score >= config.minScore) {
+   557→   557→      const theoreticalEP = Math.max(bar.open, prevCandle.high);
+   558→   558→      const stopLow5 = Math.min(...lows.slice(Math.max(0, i - 5), i));
+   559→   559→      const rawSL = stopLow5 - (prevATR * 0.8);
+   560→   560→      const riskPerShare = theoreticalEP - rawSL;
+   561→   561→
+   562→   562→      if (riskPerShare <= 0) continue;
+   563→   563→
+   564→   564→      const structRange = Math.max(...highs.slice(Math.max(0, i - 60), i)) - Math.min(...lows.slice(Math.max(0, i - 60), i));
+   565→   565→      const rr = structRange / riskPerShare;
+   566→   566→      if (rr < config.minRR && score < 6) continue;
+   567→   567→
+   568→   568→      // Size calculation
+   569→   569→      const ddPenalty = Math.max(0.25, Math.min(1.0, 1.0 - (maxDD / 20.0)));
+   570→   570→      const baseRisk = score === 6 ? riskPct : riskPct * 0.5;
+   571→   571→      const appliedRisk = baseRisk * ddPenalty;
+   572→   572→      const maxRisk = capital * (appliedRisk / 100);
+   573→   573→      
+   574→   574→      const qtyRisk = Math.floor(maxRisk / riskPerShare);
+   575→   575→      const slotMultiplier = score === 6 ? 1.0 : 0.6;
+   576→   576→      const targetAlloc = (capital / maxSlots) * slotMultiplier;
+   577→   577→      const qtyCap = Math.floor(targetAlloc / theoreticalEP);
+   578→   578→      const qty = Math.max(1, Math.min(qtyRisk, qtyCap));
+   579→   579→
+   580→   580→      const tp1 = theoreticalEP + (riskPerShare * 1.5);
+   581→   581→
+   582→   582→      if (capital < qty * theoreticalEP) continue;
+   583→   583→
+   584→   584→      openPositions.push({
+   585→   585→        entryBar: barIdx,
+   586→   586→        entryPrice: theoreticalEP,
+   587→   587→        qty,
+   588→   588→        stopLoss: rawSL,
+   589→   589→        tp1,
+   590→   590→        score,
+   591→   591→        setupType: score === 6 ? 'A+' : 'B',
+   592→   592→        partialTaken: false,
+   593→   593→        trailActive: false,
+   594→   594→        totalQty: qty,
+   595→   595→        avgPrice: theoreticalEP,
+   596→   596→        blendedSL: rawSL,
+   597→   597→      });
+   598→   598→
+   599→   599→      capital -= qty * theoreticalEP;
+   600→   600→      lastTradeBar = barIdx;
+   601→   601→    }
+   602→   602→  }
+   603→   603→
+   604→   604→  // Close remaining open positions at last bar price
+   605→   605→  for (const pos of openPositions) {
+   606→   606→    const lastPrice = candles[candles.length - 1].close;
+   607→   607→    const pnl = pos.totalQty * (lastPrice - pos.avgPrice);
+   608→   608→    capital += pnl + pos.totalQty * pos.avgPrice;
+   609→   609→    trades.push({
+   610→   610→      symbol,
+   611→   611→      entryDate: candles[pos.entryBar].date,
+   612→   612→      entryPrice: pos.avgPrice,
+   613→   613→      exitDate: candles[candles.length - 1].date,
+   614→   614→      exitPrice: lastPrice,
+   615→   615→      qty: pos.totalQty,
+   616→   616→      pnl: Math.round(pnl * 100) / 100,
+   617→   617→      pnlPercent: Math.round((pnl / (pos.totalQty * pos.avgPrice)) * 10000) / 100,
+   618→   618→      score: pos.score,
+   619→   619→      setupType: pos.setupType,
+   620→   620→      exitReason: 'BACKTEST_END',
+   621→   621→    });
+   622→   622→  }
+   623→   623→
+   624→   624→  // Calculate stats
+   625→   625→  const wins = trades.filter(t => t.pnl > 0);
+   626→   626→  const losses = trades.filter(t => t.pnl <= 0);
+   627→   627→  const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
+   628→   628→  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+   629→   629→
+   630→   630→  // Sharpe ratio (simplified)
+   631→   631→  const returns = trades.map(t => t.pnlPercent);
+   632→   632→  const avgReturn = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
+   633→   633→  const stdReturn = returns.length > 1
+   634→   634→    ? Math.sqrt(returns.reduce((s, r) => s + Math.pow(r - avgReturn, 2), 0) / (returns.length - 1))
+   635→   635→    : 1;
+   636→   636→  const sharpeRatio = stdReturn > 0 ? (avgReturn / stdReturn) * Math.sqrt(252) : 0;
+   637→   637→
+   638→   638→  return {
+   639→   639→    trades,
+   640→   640→    equityCurve,
+   641→   641→    stats: {
+   642→   642→      totalTrades: trades.length,
+   643→   643→      winTrades: wins.length,
+   644→   644→      lossTrades: losses.length,
+   645→   645→      winRate: trades.length > 0 ? Math.round((wins.length / trades.length) * 10000) / 100 : 0,
+   646→   646→      profitFactor: grossLoss > 0 ? Math.round((grossProfit / grossLoss) * 100) / 100 : 0,
+   647→   647→      maxDrawdown: Math.round(maxDD * 100) / 100,
+   648→   648→      avgWin: wins.length > 0 ? Math.round((grossProfit / wins.length) * 100) / 100 : 0,
+   649→   649→      avgLoss: losses.length > 0 ? Math.round((grossLoss / losses.length) * 100) / 100 : 0,
+   650→   650→      bestTrade: trades.length > 0 ? Math.round(Math.max(...trades.map(t => t.pnl)) * 100) / 100 : 0,
+   651→   651→      worstTrade: trades.length > 0 ? Math.round(Math.min(...trades.map(t => t.pnl)) * 100) / 100 : 0,
+   652→   652→      finalCapital: Math.round(capital * 100) / 100,
+   653→   653→      sharpeRatio: Math.round(sharpeRatio * 100) / 100,
+   654→   654→    },
+   655→   655→  };
+   656→   656→}
+   657→   657→
+   658→   658→// ── Utilities ──────────────────────────────────────────────
+   659→   659→
+   660→   660→function padArray(arr: (number | undefined)[], targetLen: number): (number | null)[] {
+   661→   661→  const padding = targetLen - arr.length;
+   662→   662→  const padded: (number | null)[] = new Array(padding).fill(null);
+   663→   663→  return [...padded, ...arr.map(v => v ?? null)];
+   664→   664→}
+   665→   665→
+   666→   666→function calcSMA(values: (number | null | undefined)[], period: number): number {
+   667→   667→  const valid = values.filter(v => v != null) as number[];
+   668→   668→  const slice = valid.slice(-period);
+   669→   669→  if (slice.length === 0) return 0;
+   670→   670→  return slice.reduce((a, b) => a + b, 0) / slice.length;
+   671→   671→}
+   672→   672→
+   673→   673→// ── Default NSE Watchlist ──────────────────────────────────
+   674→   674→
+   675→   675→export const DEFAULT_WATCHLIST: { symbol: string; name: string; sector: string }[] = [
+   676→   676→  { symbol: 'RELIANCE', name: 'Reliance Industries', sector: 'Energy' },
+   677→   677→  { symbol: 'TCS', name: 'Tata Consultancy Services', sector: 'IT' },
+   678→   678→  { symbol: 'HDFCBANK', name: 'HDFC Bank', sector: 'Banking' },
+   679→   679→  { symbol: 'INFY', name: 'Infosys', sector: 'IT' },
+   680→   680→  { symbol: 'ICICIBANK', name: 'ICICI Bank', sector: 'Banking' },
+   681→   681→  { symbol: 'HINDUNILVR', name: 'Hindustan Unilever', sector: 'FMCG' },
+   682→   682→  { symbol: 'SBIN', name: 'State Bank of India', sector: 'Banking' },
+   683→   683→  { symbol: 'BHARTIARTL', name: 'Bharti Airtel', sector: 'Telecom' },
+   684→   684→  { symbol: 'ITC', name: 'ITC Limited', sector: 'FMCG' },
+   685→   685→  { symbol: 'KOTAKBANK', name: 'Kotak Mahindra Bank', sector: 'Banking' },
+   686→   686→  { symbol: 'LT', name: 'Larsen & Toubro', sector: 'Infrastructure' },
+   687→   687→  { symbol: 'WIPRO', name: 'Wipro', sector: 'IT' },
+   688→   688→  { symbol: 'AXISBANK', name: 'Axis Bank', sector: 'Banking' },
+   689→   689→  { symbol: 'TATAMOTORS', name: 'Tata Motors', sector: 'Auto' },
+   690→   690→  { symbol: 'BAJFINANCE', name: 'Bajaj Finance', sector: 'Finance' },
+   691→   691→  { symbol: 'MARUTI', name: 'Maruti Suzuki', sector: 'Auto' },
+   692→   692→  { symbol: 'SUNPHARMA', name: 'Sun Pharma', sector: 'Pharma' },
+   693→   693→  { symbol: 'TATASTEEL', name: 'Tata Steel', sector: 'Metals' },
+   694→   694→  { symbol: 'ADANIENT', name: 'Adani Enterprises', sector: 'Conglomerate' },
+   695→   695→  { symbol: 'ASIANPAINT', name: 'Asian Paints', sector: 'Consumer' },
+   696→   696→  { symbol: 'HCLTECH', name: 'HCL Technologies', sector: 'IT' },
+   697→   697→  { symbol: 'BAJAJFINSV', name: 'Bajaj Finserv', sector: 'Finance' },
+   698→   698→  { symbol: 'DMART', name: 'Avenue Supermarts', sector: 'Retail' },
+   699→   699→  { symbol: 'DIVISLAB', name: 'Divi Laboratories', sector: 'Pharma' },
+   700→   700→  { symbol: 'TITAN', name: 'Titan Company', sector: 'Consumer' },
+   701→   701→  { symbol: 'POWERGRID', name: 'Power Grid Corp', sector: 'Power' },
+   702→   702→  { symbol: 'NTPC', name: 'NTPC Limited', sector: 'Power' },
+   703→   703→  { symbol: 'ULTRACEMCO', name: 'UltraTech Cement', sector: 'Cement' },
+   704→   704→  { symbol: 'TECHM', name: 'Tech Mahindra', sector: 'IT' },
+   705→   705→  { symbol: 'HINDALCO', name: 'Hindalco Industries', sector: 'Metals' },
+   706→   706→  { symbol: 'DRREDDY', name: "Dr Reddy's Labs", sector: 'Pharma' },
+   707→   707→];
