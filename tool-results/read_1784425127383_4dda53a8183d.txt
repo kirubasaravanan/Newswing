@@ -1,0 +1,750 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→import { useState, useEffect, useCallback, useRef } from 'react';
+     4→     4→import { Button } from '@/components/ui/button';
+     5→     5→import { Card, CardContent } from '@/components/ui/card';
+     6→     6→import { Input } from '@/components/ui/input';
+     7→     7→import { Label } from '@/components/ui/label';
+     8→     8→import { Badge } from '@/components/ui/badge';
+     9→     9→import { ScrollArea } from '@/components/ui/scroll-area';
+    10→    10→import { Switch } from '@/components/ui/switch';
+    11→    11→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    12→    12→import {
+    13→    13→  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogClose,
+    14→    14→} from '@/components/ui/dialog';
+    15→    15→import {
+    16→    16→  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+    17→    17→} from '@/components/ui/select';
+    18→    18→import {
+    19→    19→  Bot, Play, Wallet, Settings, TrendingUp, TrendingDown, Clock,
+    20→    20→  ArrowRightLeft, Shield, AlertTriangle, CheckCircle2, XCircle,
+    21→    21→  Wifi, WifiOff, Loader2, Plus, Minus, RefreshCw, Zap, Timer,
+    22→    22→  ChevronDown, ChevronUp, Eye, FileText, Activity,
+    23→    23→} from 'lucide-react';
+    24→    24→import { cn } from '@/lib/utils';
+    25→    25→import { toast } from 'sonner';
+    26→    26→import { useTradeStore } from '@/store/trade-store';
+    27→    27→import { TradingViewChart } from './tradingview-chart';
+    28→    28→
+    29→    29→// ── Types ───────────────────────────────────────────────
+    30→    30→interface WalletData {
+    31→    31→  id: string; totalCapital: number; deployed: number; available: number;
+    32→    32→  realizedPnl: number; unrealizedPnl: number;
+    33→    33→}
+    34→    34→
+    35→    35→interface PositionRules {
+    36→    36→  maxPerStock: number; maxBuysPerMonth: number; maxHoldingDays: number;
+    37→    37→  maxTotalPositions: number; riskPerTradePct: number;
+    38→    38→  trailingStopR: number; trailToR: number; partialBookR: number; partialBookPct: number;
+    39→    39→  cooldownDays: number; maxSectorPct: number; timeExitMins: number;
+    40→    40→}
+    41→    41→
+    42→    42→interface SchedulerState {
+    43→    43→  enabled: boolean; scanIntervalMin: number; exitIntervalMin: number;
+    44→    44→  lastScanAt: string | null; lastExitAt: string | null;
+    45→    45→  todayEntries: number; todayExits: number; todayPnl: number; scanCount: number;
+    46→    46→}
+    47→    47→
+    48→    48→interface AutoTradeLog {
+    49→    49→  id: string; action: string; symbol: string; executed: boolean;
+    50→    50→  reason: string; createdAt: string; signal?: string;
+    51→    51→}
+    52→    52→
+    53→    53→interface OpenPosition {
+    54→    54→  id: string; symbol: string; stockName: string | null;
+    55→    55→  entryPrice: number; qty: number; stopLoss: number; targetPrice: number;
+    56→    56→  entryDate: string; autoTraded: boolean; tags?: string;
+    57→    57→}
+    58→    58→
+    59→    59→export function AutoTradeTab() {
+    60→    60→  const { config } = useTradeStore();
+    61→    61→  const [wallet, setWallet] = useState<WalletData | null>(null);
+    62→    62→  const [rules, setRules] = useState<PositionRules>({
+    63→    63→    maxPerStock: 50000, maxBuysPerMonth: 3, maxHoldingDays: 25,
+    64→    64→    maxTotalPositions: 8, riskPerTradePct: 1.0,
+    65→    65→    trailingStopR: 1.5, trailToR: 0.5, partialBookR: 2.0, partialBookPct: 30,
+    66→    66→    cooldownDays: 3, maxSectorPct: 35, timeExitMins: 30,
+    67→    67→  });
+    68→    68→  const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
+    69→    69→  const [logs, setLogs] = useState<AutoTradeLog[]>([]);
+    70→    70→  const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
+    71→    71→  const [marketHours, setMarketHours] = useState(false);
+    72→    72→  const [timeToClose, setTimeToClose] = useState(0);
+    73→    73→  const [scanning, setScanning] = useState(false);
+    74→    74→  const [checkingExits, setCheckingExits] = useState(false);
+    75→    75→  const [editingWallet, setEditingWallet] = useState(false);
+    76→    76→  const [walletInput, setWalletInput] = useState('200000');
+    77→    77→  const [editingRules, setEditingRules] = useState(false);
+    78→    78→  const [ruleEdits, setRuleEdits] = useState<PositionRules>({ ...rules });
+    79→    79→  const [chartSymbol, setChartSymbol] = useState<string | null>(null);
+    80→    80→  const [exitWarnings, setExitWarnings] = useState<any[]>([]);
+    81→    81→  const [selectedLog, setSelectedLog] = useState<AutoTradeLog | null>(null);
+    82→    82→  const [showAllLogs, setShowAllLogs] = useState(false);
+    83→    83→
+    84→    84→  // ── Data Fetching ─────────────────────────────────────
+    85→    85→  const fetchStatus = useCallback(async () => {
+    86→    86→    try {
+    87→    87→      const res = await fetch('/api/auto-trade');
+    88→    88→      const data = await res.json();
+    89→    89→      if (data.success) {
+    90→    90→        setWallet(data.wallet);
+    91→    91→        setRules(data.rules);
+    92→    92→        setOpenPositions(data.openTrades);
+    93→    93→        setLogs(data.recentLogs || []);
+    94→    94→        setScheduler(data.scheduler);
+    95→    95→        setMarketHours(data.marketHours);
+    96→    96→        setTimeToClose(data.timeToClose);
+    97→    97→      }
+    98→    98→    } catch (err) { console.error('Fetch status error:', err); }
+    99→    99→  }, []);
+   100→   100→
+   101→   101→  useEffect(() => {
+   102→   102→    fetchStatus();
+   103→   103→    const interval = setInterval(fetchStatus, 30000);
+   104→   104→    return () => clearInterval(interval);
+   105→   105→  }, [fetchStatus]);
+   106→   106→
+   107→   107→  // ── Scheduler Tick (called periodically) ──────────────
+   108→   108→  const schedulerTickRef = useRef<NodeJS.Timeout | null>(null);
+   109→   109→  useEffect(() => {
+   110→   110→    if (scheduler?.enabled && marketHours) {
+   111→   111→      schedulerTickRef.current = setInterval(async () => {
+   112→   112→        try {
+   113→   113→          await fetch('/api/auto-trade', {
+   114→   114→            method: 'POST', headers: { 'Content-Type': 'application/json' },
+   115→   115→            body: JSON.stringify({ action: 'scheduler_tick' }),
+   116→   116→          });
+   117→   117→          fetchStatus(); // Refresh UI
+   118→   118→        } catch { /* ignore */ }
+   119→   119→      }, 60000); // Check every minute
+   120→   120→    }
+   121→   121→    return () => { if (schedulerTickRef.current) clearInterval(schedulerTickRef.current); };
+   122→   122→  }, [scheduler?.enabled, marketHours, fetchStatus]);
+   123→   123→
+   124→   124→  // ── Actions ───────────────────────────────────────────
+   125→   125→  const handleScanAndTrade = async () => {
+   126→   126→    setScanning(true);
+   127→   127→    try {
+   128→   128→      const res = await fetch('/api/auto-trade', {
+   129→   129→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   130→   130→        body: JSON.stringify({ action: 'scan_and_trade', config }),
+   131→   131→      });
+   132→   132→      const data = await res.json();
+   133→   133→      if (data.success) {
+   134→   134→        toast.success(`Scan Complete`, {
+   135→   135→          description: `${data.totalScanned} scanned → ${data.l1Passed} L1 pass → ${data.l2Signals} entries, ${data.skipped.length} skipped`,
+   136→   136→        });
+   137→   137→        fetchStatus();
+   138→   138→      } else {
+   139→   139→        toast.error('Auto-trade failed', { description: data.error });
+   140→   140→      }
+   141→   141→    } catch { toast.error('Auto-trade failed'); }
+   142→   142→    finally { setScanning(false); }
+   143→   143→  };
+   144→   144→
+   145→   145→  const handleCheckExits = async () => {
+   146→   146→    setCheckingExits(true);
+   147→   147→    try {
+   148→   148→      const res = await fetch('/api/auto-trade', {
+   149→   149→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   150→   150→        body: JSON.stringify({ action: 'check_exits' }),
+   151→   151→      });
+   152→   152→      const data = await res.json();
+   153→   153→      if (data.success) {
+   154→   154→        if (data.exits.length > 0) {
+   155→   155→          toast.success(`Exit Check: ${data.exits.length} closed`, {
+   156→   156→            description: data.exits.map((e: any) => `${e.symbol} (${e.exitReason})`).join(', '),
+   157→   157→          });
+   158→   158→        }
+   159→   159→        if (data.partialBooks?.length > 0) {
+   160→   160→          toast.info(`Partial Book: ${data.partialBooks.length} positions`, {
+   161→   161→            description: data.partialBooks.map((p: any) => `${p.symbol}: ${p.bookedQty}qty at ${p.rMultiple}R`).join(', '),
+   162→   162→          });
+   163→   163→        }
+   164→   164→        if (data.exits.length === 0 && (!data.partialBooks || data.partialBooks.length === 0)) {
+   165→   165→          toast.info('No exits triggered', { description: `${data.holding?.length || 0} positions holding` });
+   166→   166→        }
+   167→   167→        if (data.warnings?.length > 0) setExitWarnings(data.warnings);
+   168→   168→        fetchStatus();
+   169→   169→      }
+   170→   170→    } catch { toast.error('Exit check failed'); }
+   171→   171→    finally { setCheckingExits(false); }
+   172→   172→  };
+   173→   173→
+   174→   174→  const handleSchedulerToggle = async (enabled: boolean) => {
+   175→   175→    try {
+   176→   176→      const res = await fetch('/api/auto-trade', {
+   177→   177→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   178→   178→        body: JSON.stringify({
+   179→   179→          action: 'scheduler_toggle', enabled,
+   180→   180→          scanIntervalMin: ruleEdits.scanIntervalMin || 30,
+   181→   181→          exitIntervalMin: ruleEdits.exitIntervalMin || 5,
+   182→   182→        }),
+   183→   183→      });
+   184→   184→      const data = await res.json();
+   185→   185→      if (data.success) {
+   186→   186→        setScheduler(data.scheduler);
+   187→   187→        toast.success(enabled ? 'Auto-Mode Armed' : 'Auto-Mode Disarmed');
+   188→   188→        fetchStatus();
+   189→   189→      }
+   190→   190→    } catch { toast.error('Scheduler toggle failed'); }
+   191→   191→  };
+   192→   192→
+   193→   193→  const saveWallet = async () => {
+   194→   194→    try {
+   195→   195→      const res = await fetch('/api/auto-trade', {
+   196→   196→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   197→   197→        body: JSON.stringify({ action: 'update_wallet', totalCapital: parseFloat(walletInput) }),
+   198→   198→      });
+   199→   199→      const data = await res.json();
+   200→   200→      if (data.success) { setWallet(data.wallet); setEditingWallet(false); toast.success('Wallet updated'); }
+   201→   201→    } catch { toast.error('Failed to update wallet'); }
+   202→   202→  };
+   203→   203→
+   204→   204→  const saveRules = async () => {
+   205→   205→    try {
+   206→   206→      const res = await fetch('/api/auto-trade', {
+   207→   207→        method: 'POST', headers: { 'Content-Type': 'application/json' },
+   208→   208→        body: JSON.stringify({ action: 'update_rules', rules: ruleEdits }),
+   209→   209→      });
+   210→   210→      const data = await res.json();
+   211→   211→      if (data.success) { setRules(data.rules); setEditingRules(false); toast.success('Rules updated'); }
+   212→   212→    } catch { toast.error('Failed to update rules'); }
+   213→   213→  };
+   214→   214→
+   215→   215→  const totalPnl = (wallet?.realizedPnl || 0) + (wallet?.unrealizedPnl || 0);
+   216→   216→  const pnlPct = wallet?.totalCapital ? (totalPnl / (wallet.totalCapital - wallet.realizedPnl)) * 100 : 0;
+   217→   217→
+   218→   218→  return (
+   219→   219→    <div className="space-y-4">
+   220→   220→      {/* ── Top Bar ─────────────────────────────────────── */}
+   221→   221→      <div className="flex items-center justify-between flex-wrap gap-3">
+   222→   222→        <div className="flex items-center gap-3">
+   223→   223→          <h2 className="text-lg font-bold flex items-center gap-2">
+   224→   224→            <Bot className="h-5 w-5 text-primary" />
+   225→   225→            Auto-Trade Engine
+   226→   226→          </h2>
+   227→   227→          {/* Market Status */}
+   228→   228→          <div className={cn(
+   229→   229→            'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
+   230→   230→            marketHours ? 'bg-emerald-500/10 text-emerald-400' : 'bg-muted text-muted-foreground'
+   231→   231→          )}>
+   232→   232→            <div className={cn('h-1.5 w-1.5 rounded-full', marketHours ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
+   233→   233→            {marketHours ? `Market Open — ${timeToClose}m to close` : 'Market Closed'}
+   234→   234→          </div>
+   235→   235→          {/* Scheduler Armed Status */}
+   236→   236→          <div className={cn(
+   237→   237→            'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
+   238→   238→            scheduler?.enabled ? 'bg-indigo-500/10 text-indigo-400' : 'bg-muted text-muted-foreground'
+   239→   239→          )}>
+   240→   240→            <Shield className="h-3 w-3" />
+   241→   241→            {scheduler?.enabled ? 'Auto-Mode Armed' : 'Manual'}
+   242→   242→          </div>
+   243→   243→        </div>
+   244→   244→        <div className="flex items-center gap-2">
+   245→   245→          <Button variant="outline" size="sm" onClick={handleCheckExits}
+   246→   246→            disabled={checkingExits || openPositions.length === 0}
+   247→   247→            className="h-8 gap-1.5 text-xs">
+   248→   248→            {checkingExits ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRightLeft className="h-3 w-3" />}
+   249→   249→            Check Exits
+   250→   250→          </Button>
+   251→   251→          <Button onClick={handleScanAndTrade} disabled={scanning || !marketHours}
+   252→   252→            className={cn('gap-1.5', scheduler?.enabled ? 'bg-emerald-600 hover:bg-emerald-700' : '')}
+   253→   253→            size="sm">
+   254→   254→            {scanning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+   255→   255→            {scanning ? 'Scanning Universe...' : 'Scan & Auto-Trade'}
+   256→   256→          </Button>
+   257→   257→        </div>
+   258→   258→      </div>
+   259→   259→
+   260→   260→      <Tabs defaultValue="engine" className="space-y-4">
+   261→   261→        <TabsList className="bg-secondary/50">
+   262→   262→          <TabsTrigger value="engine" className="text-xs gap-1.5"><Bot className="h-3 w-3" /> Engine</TabsTrigger>
+   263→   263→          <TabsTrigger value="scheduler" className="text-xs gap-1.5"><Timer className="h-3 w-3" /> Scheduler</TabsTrigger>
+   264→   264→          <TabsTrigger value="positions" className="text-xs gap-1.5"><TrendingUp className="h-3 w-3" /> Positions</TabsTrigger>
+   265→   265→          <TabsTrigger value="audit" className="text-xs gap-1.5"><FileText className="h-3 w-3" /> Audit Log</TabsTrigger>
+   266→   266→          <TabsTrigger value="rules" className="text-xs gap-1.5"><Settings className="h-3 w-3" /> Rules</TabsTrigger>
+   267→   267→        </TabsList>
+   268→   268→
+   269→   269→        {/* ── ENGINE TAB ──────────────────────────────────── */}
+   270→   270→        <TabsContent value="engine" className="space-y-4">
+   271→   271→          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+   272→   272→            {/* Wallet Card */}
+   273→   273→            <Card className="lg:col-span-2 border-border">
+   274→   274→              <CardContent className="p-4">
+   275→   275→                <div className="flex items-center justify-between mb-4">
+   276→   276→                  <h3 className="text-sm font-semibold flex items-center gap-2">
+   277→   277→                    <Wallet className="h-4 w-4 text-primary" /> Capital Wallet
+   278→   278→                  </h3>
+   279→   279→                  {!editingWallet ? (
+   280→   280→                    <Button variant="ghost" size="sm" onClick={() => { setWalletInput(String(wallet?.totalCapital || 200000)); setEditingWallet(true); }} className="h-7 text-xs">Edit</Button>
+   281→   281→                  ) : (
+   282→   282→                    <div className="flex items-center gap-2">
+   283→   283→                      <Input value={walletInput} onChange={e => setWalletInput(e.target.value)} className="h-7 w-32 text-xs" />
+   284→   284→                      <Button size="sm" onClick={saveWallet} className="h-7 text-xs">Save</Button>
+   285→   285→                      <Button size="sm" variant="ghost" onClick={() => setEditingWallet(false)} className="h-7 text-xs">Cancel</Button>
+   286→   286→                    </div>
+   287→   287→                  )}
+   288→   288→                </div>
+   289→   289→                {wallet && (
+   290→   290→                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+   291→   291→                    <div className="rounded-lg bg-secondary/50 p-3">
+   292→   292→                      <div className="text-[10px] text-muted-foreground uppercase">Total Capital</div>
+   293→   293→                      <div className="text-lg font-bold font-mono mt-0.5">₹{wallet.totalCapital.toLocaleString()}</div>
+   294→   294→                    </div>
+   295→   295→                    <div className="rounded-lg bg-blue-500/10 p-3">
+   296→   296→                      <div className="text-[10px] text-blue-400 uppercase">Deployed</div>
+   297→   297→                      <div className="text-lg font-bold font-mono mt-0.5 text-blue-400">₹{wallet.deployed.toLocaleString()}</div>
+   298→   298→                      <div className="text-[10px] text-muted-foreground">{wallet.totalCapital > 0 ? ((wallet.deployed / wallet.totalCapital) * 100).toFixed(1) : 0}%</div>
+   299→   299→                    </div>
+   300→   300→                    <div className="rounded-lg bg-emerald-500/10 p-3">
+   301→   301→                      <div className="text-[10px] text-emerald-400 uppercase">Available</div>
+   302→   302→                      <div className="text-lg font-bold font-mono mt-0.5 text-emerald-400">₹{wallet.available.toLocaleString()}</div>
+   303→   303→                    </div>
+   304→   304→                    <div className={cn('rounded-lg p-3', totalPnl >= 0 ? 'bg-emerald-500/10' : 'bg-red-500/10')}>
+   305→   305→                      <div className={cn('text-[10px] uppercase', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>Total P&L</div>
+   306→   306→                      <div className={cn('text-lg font-bold font-mono mt-0.5', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   307→   307→                        {totalPnl >= 0 ? '+' : ''}₹{totalPnl.toLocaleString()}
+   308→   308→                      </div>
+   309→   309→                      <div className="text-[10px] text-muted-foreground">
+   310→   310→                        R: {wallet.realizedPnl.toLocaleString()} | U: {wallet.unrealizedPnl.toLocaleString()}
+   311→   311→                      </div>
+   312→   312→                    </div>
+   313→   313→                  </div>
+   314→   314→                )}
+   315→   315→              </CardContent>
+   316→   316→            </Card>
+   317→   317→
+   318→   318→            {/* Today's Summary */}
+   319→   319→            <Card className="border-border">
+   320→   320→              <CardContent className="p-4">
+   321→   321→                <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+   322→   322→                  <Activity className="h-4 w-4 text-primary" /> Today&apos;s Summary
+   323→   323→                </h3>
+   324→   324→                {scheduler && (
+   325→   325→                  <div className="space-y-2">
+   326→   326→                    <div className="flex justify-between text-xs">
+   327→   327→                      <span className="text-muted-foreground">Total Scans</span>
+   328→   328→                      <span className="font-mono font-bold">{scheduler.scanCount}</span>
+   329→   329→                    </div>
+   330→   330→                    <div className="flex justify-between text-xs">
+   331→   331→                      <span className="text-muted-foreground">Entries Today</span>
+   332→   332→                      <span className="font-mono font-bold text-emerald-400">{scheduler.todayEntries}</span>
+   333→   333→                    </div>
+   334→   334→                    <div className="flex justify-between text-xs">
+   335→   335→                      <span className="text-muted-foreground">Exits Today</span>
+   336→   336→                      <span className="font-mono font-bold text-red-400">{scheduler.todayExits}</span>
+   337→   337→                    </div>
+   338→   338→                    <div className="flex justify-between text-xs pt-2 border-t border-border/50">
+   339→   339→                      <span className="text-muted-foreground">Today P&L</span>
+   340→   340→                      <span className={cn('font-mono font-bold', scheduler.todayPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   341→   341→                        {scheduler.todayPnl >= 0 ? '+' : ''}₹{Math.round(scheduler.todayPnl).toLocaleString()}
+   342→   342→                      </span>
+   343→   343→                    </div>
+   344→   344→                    {scheduler.lastScanAt && (
+   345→   345→                      <div className="text-[10px] text-muted-foreground pt-1">
+   346→   346→                        Last scan: {new Date(scheduler.lastScanAt).toLocaleTimeString()}
+   347→   347→                      </div>
+   348→   348→                    )}
+   349→   349→                    {scheduler.lastExitAt && (
+   350→   350→                      <div className="text-[10px] text-muted-foreground">
+   351→   351→                        Last exit check: {new Date(scheduler.lastExitAt).toLocaleTimeString()}
+   352→   352→                      </div>
+   353→   353→                    )}
+   354→   354→                  </div>
+   355→   355→                )}
+   356→   356→              </CardContent>
+   357→   357→            </Card>
+   358→   358→          </div>
+   359→   359→
+   360→   360→          {/* Position Health Warnings */}
+   361→   361→          {exitWarnings.length > 0 && (
+   362→   362→            <Card className="border-amber-500/30 bg-amber-500/5">
+   363→   363→              <CardContent className="p-4">
+   364→   364→                <h3 className="text-sm font-semibold flex items-center gap-2 mb-2">
+   365→   365→                  <AlertTriangle className="h-4 w-4 text-amber-400" />
+   366→   366→                  Position Warnings ({exitWarnings.length})
+   367→   367→                </h3>
+   368→   368→                <div className="space-y-1.5">
+   369→   369→                  {exitWarnings.map((w: any, i: number) => (
+   370→   370→                    <div key={i} className={cn(
+   371→   371→                      'flex items-center gap-2 text-xs px-3 py-2 rounded-lg',
+   372→   372→                      w.type === 'SL_PROXIMITY' ? 'bg-red-500/10' : 'bg-amber-500/10'
+   373→   373→                    )}>
+   374→   374→                      <Badge variant="outline" className={cn('text-[9px] h-4',
+   375→   375→                        w.type === 'SL_PROXIMITY' ? 'text-red-400 border-red-500/30' : 'text-amber-400 border-amber-500/30'
+   376→   376→                      )}>{w.type === 'SL_PROXIMITY' ? 'SL RISK' : 'AGING'}</Badge>
+   377→   377→                      <span className="font-semibold">{w.symbol}</span>
+   378→   378→                      <span className="text-muted-foreground">{w.message}</span>
+   379→   379→                      <span className={cn('ml-auto font-mono', (w.pnlPercent || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+   380→   380→                        {w.pnlPercent >= 0 ? '+' : ''}{w.pnlPercent?.toFixed(2)}%
+   381→   381→                      </span>
+   382→   382→                    </div>
+   383→   383→                  ))}
+   384→   384→                </div>
+   385→   385→              </CardContent>
+   386→   386→            </Card>
+   387→   387→          )}
+   388→   388→        </TabsContent>
+   389→   389→
+   390→   390→        {/* ── SCHEDULER TAB ──────────────────────────────── */}
+   391→   391→        <TabsContent value="scheduler" className="space-y-4">
+   392→   392→          <Card className="border-border">
+   393→   393→            <CardContent className="p-4">
+   394→   394→              <div className="flex items-center justify-between mb-4">
+   395→   395→                <div>
+   396→   396→                  <h3 className="text-sm font-semibold flex items-center gap-2">
+   397→   397→                    <Timer className="h-4 w-4 text-primary" /> Automation Scheduler
+   398→   398→                  </h3>
+   399→   399→                  <p className="text-[10px] text-muted-foreground mt-1">
+   400→   400→                    Automatically scans for entries and manages exits during market hours (9:15 AM - 3:30 PM IST)
+   401→   401→                  </p>
+   402→   402→                </div>
+   403→   403→                <div className="flex items-center gap-3">
+   404→   404→                  <span className={cn('text-xs', marketHours ? 'text-emerald-400' : 'text-muted-foreground')}>
+   405→   405→                    {marketHours ? 'Market is OPEN' : 'Market is CLOSED'}
+   406→   406→                  </span>
+   407→   407→                  <Switch
+   408→   408→                    checked={scheduler?.enabled || false}
+   409→   409→                    onCheckedChange={handleSchedulerToggle}
+   410→   410→                  />
+   411→   411→                </div>
+   412→   412→              </div>
+   413→   413→
+   414→   414→              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+   415→   415→                <div className="rounded-lg bg-secondary/50 p-4 space-y-3">
+   416→   416→                  <h4 className="text-xs font-semibold flex items-center gap-2">
+   417→   417→                    <Zap className="h-3 w-3 text-emerald-400" /> Entry Scan Settings
+   418→   418→                  </h4>
+   419→   419→                  <div className="flex items-center justify-between text-xs">
+   420→   420→                    <Label className="text-muted-foreground">Scan every (minutes)</Label>
+   421→   421→                    <Input type="number" value={ruleEdits.scanIntervalMin || 30}
+   422→   422→                      onChange={e => setRuleEdits({ ...ruleEdits, scanIntervalMin: parseInt(e.target.value) || 30 })}
+   423→   423→                      className="h-7 w-20 text-xs text-right" />
+   424→   424→                  </div>
+   425→   425→                  <p className="text-[10px] text-muted-foreground">
+   426→   426→                    V-Swing universe scan will run automatically. New A+/B signals will be entered if rules permit.
+   427→   427→                  </p>
+   428→   428→                </div>
+   429→   429→
+   430→   430→                <div className="rounded-lg bg-secondary/50 p-4 space-y-3">
+   431→   431→                  <h4 className="text-xs font-semibold flex items-center gap-2">
+   432→   432→                    <ArrowRightLeft className="h-3 w-3 text-red-400" /> Exit Check Settings
+   433→   433→                  </h4>
+   434→   434→                  <div className="flex items-center justify-between text-xs">
+   435→   435→                    <Label className="text-muted-foreground">Check every (minutes)</Label>
+   436→   436→                    <Input type="number" value={ruleEdits.exitIntervalMin || 5}
+   437→   437→                      onChange={e => setRuleEdits({ ...ruleEdits, exitIntervalMin: parseInt(e.target.value) || 5 })}
+   438→   438→                      className="h-7 w-20 text-xs text-right" />
+   439→   439→                  </div>
+   440→   440→                  <p className="text-[10px] text-muted-foreground">
+   441→   441→                    Monitors SL/TP hits, trailing stops, time-based exits, and partial bookings.
+   442→   442→                  </p>
+   443→   443→                </div>
+   444→   444→              </div>
+   445→   445→
+   446→   446→              {/* Scheduler Timeline */}
+   447→   447→              {scheduler && (
+   448→   448→                <div className="mt-4 rounded-lg bg-secondary/30 p-3">
+   449→   449→                  <h4 className="text-[10px] text-muted-foreground uppercase mb-2">Timeline</h4>
+   450→   450→                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+   451→   451→                    <div>
+   452→   452→                      <span className="text-muted-foreground">Last Scan</span>
+   453→   453→                      <div className="font-mono text-[11px]">{scheduler.lastScanAt ? new Date(scheduler.lastScanAt).toLocaleTimeString() : '--'}</div>
+   454→   454→                    </div>
+   455→   455→                    <div>
+   456→   456→                      <span className="text-muted-foreground">Last Exit Check</span>
+   457→   457→                      <div className="font-mono text-[11px]">{scheduler.lastExitAt ? new Date(scheduler.lastExitAt).toLocaleTimeString() : '--'}</div>
+   458→   458→                    </div>
+   459→   459→                    <div>
+   460→   460→                      <span className="text-muted-foreground">Status</span>
+   461→   461→                      <div className={cn('font-mono text-[11px]', scheduler.enabled ? 'text-emerald-400' : 'text-muted-foreground')}>
+   462→   462→                        {scheduler.enabled ? 'ARMED' : 'DISARMED'}
+   463→   463→                      </div>
+   464→   464→                    </div>
+   465→   465→                    <div>
+   466→   466→                      <span className="text-muted-foreground">Market</span>
+   467→   467→                      <div className={cn('font-mono text-[11px]', marketHours ? 'text-emerald-400' : 'text-red-400')}>
+   468→   468→                        {marketHours ? 'OPEN' : 'CLOSED'}
+   469→   469→                      </div>
+   470→   470→                    </div>
+   471→   471→                  </div>
+   472→   472→                </div>
+   473→   473→              )}
+   474→   474→            </CardContent>
+   475→   475→          </Card>
+   476→   476→        </TabsContent>
+   477→   477→
+   478→   478→        {/* ── POSITIONS TAB ──────────────────────────────── */}
+   479→   479→        <TabsContent value="positions" className="space-y-4">
+   480→   480→          <Card className="border-border">
+   481→   481→            <CardContent className="p-4">
+   482→   482→              <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+   483→   483→                <TrendingUp className="h-4 w-4" /> Open Auto-Positions ({openPositions.length})
+   484→   484→              </h3>
+   485→   485→              {openPositions.length === 0 ? (
+   486→   486→                <div className="text-center py-8">
+   487→   487→                  <p className="text-xs text-muted-foreground">No open positions. Run Scan & Auto-Trade to find entries.</p>
+   488→   488→                </div>
+   489→   489→              ) : (
+   490→   490→                <ScrollArea className="max-h-[400px]">
+   491→   491→                  <div className="space-y-2 pr-2">
+   492→   492→                    {openPositions.map(pos => {
+   493→   493→                      const days = Math.floor((Date.now() - new Date(pos.entryDate).getTime()) / 86400000);
+   494→   494→                      const risk = pos.entryPrice - pos.stopLoss;
+   495→   495→                      const agePct = rules.maxHoldingDays > 0 ? (days / rules.maxHoldingDays) * 100 : 0;
+   496→   496→                      const isPartial = pos.tags?.includes('partial-booked');
+   497→   497→                      return (
+   498→   498→                        <div key={pos.id}
+   499→   499→                          className={cn(
+   500→   500→                            'rounded-lg p-3 cursor-pointer hover:bg-secondary/80 transition',
+   501→   501→                            agePct >= 80 ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-secondary/50'
+   502→   502→                          )}
+   503→   503→                          onClick={() => setChartSymbol(pos.symbol)}>
+   504→   504→                          <div className="flex items-center justify-between">
+   505→   505→                            <div className="flex items-center gap-2">
+   506→   506→                              <span className="font-semibold text-sm">{pos.symbol}</span>
+   507→   507→                              <Badge variant="outline" className="text-[10px] h-4">AUTO</Badge>
+   508→   508→                              {isPartial && <Badge variant="outline" className="text-[10px] h-4 text-amber-400 border-amber-500/30">PARTIAL</Badge>}
+   509→   509→                            </div>
+   510→   510→                            <div className="flex items-center gap-2">
+   511→   511→                              <span className={cn('text-[10px]', agePct >= 80 ? 'text-amber-400 font-bold' : 'text-muted-foreground')}>
+   512→   512→                                {days}/{rules.maxHoldingDays}d
+   513→   513→                              </span>
+   514→   514→                              <span className="text-xs font-mono">₹{pos.entryPrice}</span>
+   515→   515→                              <span className="text-[10px] text-muted-foreground">x{pos.qty}</span>
+   516→   516→                            </div>
+   517→   517→                          </div>
+   518→   518→                          <div className="mt-2 flex items-center gap-4 text-[10px]">
+   519→   519→                            <span className="text-red-400">SL: ₹{pos.stopLoss}</span>
+   520→   520→                            <span className="text-emerald-400">TP: ₹{pos.targetPrice}</span>
+   521→   521→                            <span className="text-muted-foreground">
+   522→   522→                              Risk: ₹{risk > 0 ? (risk * pos.qty).toLocaleString() : 'N/A'}
+   523→   523→                            </span>
+   524→   524→                            <span className="text-muted-foreground">
+   525→   525→                              {risk > 0 ? `R:R ${(Math.abs(pos.targetPrice - pos.entryPrice) / risk).toFixed(1)}x` : ''}
+   526→   526→                            </span>
+   527→   527→                          </div>
+   528→   528→                          {/* Aging bar */}
+   529→   529→                          {agePct >= 50 && (
+   530→   530→                            <div className="mt-2 h-1 rounded-full bg-secondary overflow-hidden">
+   531→   531→                              <div className={cn('h-full rounded-full transition-all', agePct >= 80 ? 'bg-amber-400' : 'bg-blue-400')}
+   532→   532→                                style={{ width: `${Math.min(100, agePct)}%` }} />
+   533→   533→                            </div>
+   534→   534→                          )}
+   535→   535→                        </div>
+   536→   536→                      );
+   537→   537→                    })}
+   538→   538→                  </div>
+   539→   539→                </ScrollArea>
+   540→   540→              )}
+   541→   541→            </CardContent>
+   542→   542→          </Card>
+   543→   543→
+   544→   544→          {/* Chart */}
+   545→   545→          {chartSymbol && (
+   546→   546→            <Card className="border-border">
+   547→   547→              <CardContent className="p-4">
+   548→   548→                <div className="flex items-center justify-between mb-3">
+   549→   549→                  <h3 className="text-sm font-semibold">{chartSymbol} — TradingView Chart</h3>
+   550→   550→                  <Button variant="ghost" size="sm" onClick={() => setChartSymbol(null)} className="h-7 text-xs">Close</Button>
+   551→   551→                </div>
+   552→   552→                <TradingViewChart symbol={chartSymbol} height={450} />
+   553→   553→              </CardContent>
+   554→   554→            </Card>
+   555→   555→          )}
+   556→   556→        </TabsContent>
+   557→   557→
+   558→   558→        {/* ── AUDIT LOG TAB ──────────────────────────────── */}
+   559→   559→        <TabsContent value="audit" className="space-y-4">
+   560→   560→          <Card className="border-border">
+   561→   561→            <CardContent className="p-4">
+   562→   562→              <div className="flex items-center justify-between mb-3">
+   563→   563→                <h3 className="text-sm font-semibold flex items-center gap-2">
+   564→   564→                  <FileText className="h-4 w-4 text-primary" /> Execution Audit Log
+   565→   565→                </h3>
+   566→   566→                <div className="flex items-center gap-2">
+   567→   567→                  <Button variant="ghost" size="sm" onClick={() => setShowAllLogs(!showAllLogs)} className="h-7 text-xs gap-1">
+   568→   568→                    {showAllLogs ? 'Show Recent' : 'Show All'}
+   569→   569→                  </Button>
+   570→   570→                  <Button variant="ghost" size="sm" onClick={fetchStatus} className="h-7 text-xs gap-1">
+   571→   571→                    <RefreshCw className="h-3 w-3" /> Refresh
+   572→   572→                  </Button>
+   573→   573→                </div>
+   574→   574→              </div>
+   575→   575→              <ScrollArea className="max-h-[500px]">
+   576→   576→                <div className="space-y-1 pr-2">
+   577→   577→                  {(showAllLogs ? logs : logs.slice(0, 30)).map((log) => {
+   578→   578→                    const isEntry = log.action.includes('ENTRY');
+   579→   579→                    const isExit = log.action.includes('EXIT');
+   580→   580→                    const isPartial = log.action === 'PARTIAL_BOOK';
+   581→   581→                    return (
+   582→   582→                      <div key={log.id}
+   583→   583→                        className={cn(
+   584→   584→                          'flex items-start gap-2 text-xs py-2 px-2 rounded-lg hover:bg-secondary/30 cursor-pointer border-b border-border/30 last:border-0',
+   585→   585→                        )}
+   586→   586→                        onClick={() => setSelectedLog(log)}>
+   587→   587→                        <div className="mt-0.5 shrink-0">
+   588→   588→                          {isEntry ? <Plus className="h-3 w-3 text-emerald-400" /> :
+   589→   589→                           isPartial ? <Minus className="h-3 w-3 text-amber-400" /> :
+   590→   590→                           isExit ? <XCircle className="h-3 w-3 text-red-400" /> :
+   591→   591→                           <RefreshCw className="h-3 w-3 text-muted-foreground" />}
+   592→   592→                        </div>
+   593→   593→                        <div className="flex-1 min-w-0">
+   594→   594→                          <div className="flex items-center gap-1.5">
+   595→   595→                            <span className="font-semibold">{log.symbol}</span>
+   596→   596→                            <Badge variant="outline" className={cn('text-[9px] h-3.5 px-1',
+   597→   597→                              isEntry ? 'text-emerald-400' : isPartial ? 'text-amber-400' : isExit ? 'text-red-400' : 'text-muted-foreground'
+   598→   598→                            )}>
+   599→   599→                              {log.action.replace('AUTO_', '')}
+   600→   600→                            </Badge>
+   601→   601→                            {log.executed ? <CheckCircle2 className="h-3 w-3 text-emerald-400/50" /> : <XCircle className="h-3 w-3 text-red-400/50" />}
+   602→   602→                          </div>
+   603→   603→                          <p className="text-muted-foreground truncate">{log.reason}</p>
+   604→   604→                        </div>
+   605→   605→                        <span className="text-muted-foreground shrink-0 text-[10px]">
+   606→   606→                          {new Date(log.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+   607→   607→                        </span>
+   608→   608→                      </div>
+   609→   609→                    );
+   610→   610→                  })}
+   611→   611→                </div>
+   612→   612→              </ScrollArea>
+   613→   613→            </CardContent>
+   614→   614→          </Card>
+   615→   615→        </TabsContent>
+   616→   616→
+   617→   617→        {/* ── RULES TAB ──────────────────────────────────── */}
+   618→   618→        <TabsContent value="rules" className="space-y-4">
+   619→   619→          <Card className="border-border">
+   620→   620→            <CardContent className="p-4">
+   621→   621→              <div className="flex items-center justify-between mb-4">
+   622→   622→                <h3 className="text-sm font-semibold flex items-center gap-2">
+   623→   623→                  <Settings className="h-4 w-4" /> Position Rules
+   624→   624→                </h3>
+   625→   625→                {!editingRules ? (
+   626→   626→                  <Button variant="ghost" size="sm" onClick={() => { setRuleEdits({ ...rules }); setEditingRules(true); }} className="h-7 text-xs">Edit</Button>
+   627→   627→                ) : (
+   628→   628→                  <div className="flex gap-2">
+   629→   629→                    <Button size="sm" onClick={saveRules} className="h-7 text-xs">Save</Button>
+   630→   630→                    <Button size="sm" variant="ghost" onClick={() => setEditingRules(false)} className="h-7 text-xs">Cancel</Button>
+   631→   631→                  </div>
+   632→   632→                )}
+   633→   633→              </div>
+   634→   634→
+   635→   635→              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+   636→   636→                {/* Position Sizing Rules */}
+   637→   637→                <div className="space-y-2">
+   638→   638→                  <h4 className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Position Sizing</h4>
+   639→   639→                  {editingRules ? [
+   640→   640→                    { key: 'maxPerStock', label: 'Max per Stock (₹)', type: 'number' },
+   641→   641→                    { key: 'maxTotalPositions', label: 'Max Total Positions', type: 'number' },
+   642→   642→                    { key: 'riskPerTradePct', label: 'Risk per Trade (%)', type: 'number' },
+   643→   643→                    { key: 'maxBuysPerMonth', label: 'Max Buys/Month/Stock', type: 'number' },
+   644→   644→                    { key: 'maxSectorPct', label: 'Max Sector Concentration (%)', type: 'number' },
+   645→   645→                  ].map(f => (
+   646→   646→                    <div key={f.key} className="flex items-center justify-between text-xs">
+   647→   647→                      <Label className="text-muted-foreground">{f.label}</Label>
+   648→   648→                      <Input type={f.type} value={(ruleEdits as any)[f.key]}
+   649→   649→                        onChange={e => setRuleEdits({ ...ruleEdits, [f.key]: f.type === 'number' ? (parseFloat(e.target.value) || 0) : e.target.value })}
+   650→   650→                        className="h-7 w-24 text-xs text-right" />
+   651→   651→                    </div>
+   652→   652→                  )) : [
+   653→   653→                    { l: 'Max/Stock', v: `₹${rules.maxPerStock.toLocaleString()}` },
+   654→   654→                    { l: 'Max Positions', v: String(rules.maxTotalPositions) },
+   655→   655→                    { l: 'Risk/Trade', v: `${rules.riskPerTradePct}%` },
+   656→   656→                    { l: 'Buys/Month', v: String(rules.maxBuysPerMonth) },
+   657→   657→                    { l: 'Sector Cap', v: `${rules.maxSectorPct}%` },
+   658→   658→                  ].map(r => (
+   659→   659→                    <div key={r.l} className="flex justify-between text-xs">
+   660→   660→                      <span className="text-muted-foreground">{r.l}</span><span className="font-mono">{r.v}</span>
+   661→   661→                    </div>
+   662→   662→                  ))}
+   663→   663→                </div>
+   664→   664→
+   665→   665→                {/* Exit Management Rules */}
+   666→   666→                <div className="space-y-2">
+   667→   667→                  <h4 className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Exit Management</h4>
+   668→   668→                  {editingRules ? [
+   669→   669→                    { key: 'maxHoldingDays', label: 'Max Holding Days' },
+   670→   670→                    { key: 'trailingStopR', label: 'Trail Start (R-multiple)' },
+   671→   671→                    { key: 'trailToR', label: 'Trail To (R-multiple)' },
+   672→   672→                    { key: 'partialBookR', label: 'Partial Book At (R)' },
+   673→   673→                    { key: 'partialBookPct', label: 'Partial Book %' },
+   674→   674→                    { key: 'cooldownDays', label: 'Re-entry Cooldown (days)' },
+   675→   675→                    { key: 'timeExitMins', label: 'Time Exit Before Close (min)' },
+   676→   676→                  ].map(f => (
+   677→   677→                    <div key={f.key} className="flex items-center justify-between text-xs">
+   678→   678→                      <Label className="text-muted-foreground">{f.label}</Label>
+   679→   679→                      <Input type="number" value={(ruleEdits as any)[f.key]}
+   680→   680→                        onChange={e => setRuleEdits({ ...ruleEdits, [f.key]: parseFloat(e.target.value) || 0 })}
+   681→   681→                        className="h-7 w-24 text-xs text-right" />
+   682→   682→                    </div>
+   683→   683→                  )) : [
+   684→   684→                    { l: 'Max Holding', v: `${rules.maxHoldingDays} days` },
+   685→   685→                    { l: 'Trail Start', v: `${rules.trailingStopR}R profit` },
+   686→   686→                    { l: 'Trail To', v: `${rules.trailToR}R level` },
+   687→   687→                    { l: 'Partial Book', v: `${rules.partialBookPct}% at ${rules.partialBookR}R` },
+   688→   688→                    { l: 'Cooldown', v: `${rules.cooldownDays} days` },
+   689→   689→                    { l: 'Time Exit', v: `${rules.timeExitMins}min before close` },
+   690→   690→                  ].map(r => (
+   691→   691→                    <div key={r.l} className="flex justify-between text-xs">
+   692→   692→                      <span className="text-muted-foreground">{r.l}</span><span className="font-mono">{r.v}</span>
+   693→   693→                    </div>
+   694→   694→                  ))}
+   695→   695→                </div>
+   696→   696→              </div>
+   697→   697→            </CardContent>
+   698→   698→          </Card>
+   699→   699→        </TabsContent>
+   700→   700→      </Tabs>
+   701→   701→
+   702→   702→      {/* Log Detail Dialog */}
+   703→   703→      <Dialog open={!!selectedLog} onOpenChange={() => setSelectedLog(null)}>
+   704→   704→        <DialogContent className="sm:max-w-lg">
+   705→   705→          <DialogHeader>
+   706→   706→            <DialogTitle className="flex items-center gap-2">
+   707→   707→              <FileText className="h-4 w-4" />
+   708→   708→              {selectedLog?.symbol} — {selectedLog?.action.replace('AUTO_', '')}
+   709→   709→            </DialogTitle>
+   710→   710→          </DialogHeader>
+   711→   711→          {selectedLog && (
+   712→   712→            <div className="space-y-3 text-xs">
+   713→   713→              <div className="grid grid-cols-2 gap-2">
+   714→   714→                <div className="rounded bg-secondary/50 p-2">
+   715→   715→                  <div className="text-[10px] text-muted-foreground">Action</div>
+   716→   716→                  <div className="font-mono">{selectedLog.action}</div>
+   717→   717→                </div>
+   718→   718→                <div className="rounded bg-secondary/50 p-2">
+   719→   719→                  <div className="text-[10px] text-muted-foreground">Executed</div>
+   720→   720→                  <div className={selectedLog.executed ? 'text-emerald-400' : 'text-red-400'}>
+   721→   721→                    {selectedLog.executed ? 'Yes' : 'No'}
+   722→   722→                  </div>
+   723→   723→                </div>
+   724→   724→                <div className="rounded bg-secondary/50 p-2 col-span-2">
+   725→   725→                  <div className="text-[10px] text-muted-foreground">Time</div>
+   726→   726→                  <div className="font-mono">{new Date(selectedLog.createdAt).toLocaleString()}</div>
+   727→   727→                </div>
+   728→   728→              </div>
+   729→   729→              <div className="rounded bg-secondary/50 p-2">
+   730→   730→                <div className="text-[10px] text-muted-foreground mb-1">Reason</div>
+   731→   731→                <div className="text-[11px]">{selectedLog.reason}</div>
+   732→   732→              </div>
+   733→   733→              {selectedLog.signal && (
+   734→   734→                <div className="rounded bg-secondary/50 p-2">
+   735→   735→                  <div className="text-[10px] text-muted-foreground mb-1">Signal Details</div>
+   736→   736→                  <pre className="text-[10px] text-muted-foreground overflow-auto max-h-[200px] whitespace-pre-wrap">
+   737→   737→                    {JSON.stringify(JSON.parse(selectedLog.signal), null, 2)}
+   738→   738→                  </pre>
+   739→   739→                </div>
+   740→   740→              )}
+   741→   741→            </div>
+   742→   742→          )}
+   743→   743→          <DialogFooter>
+   744→   744→            <DialogClose asChild><Button variant="ghost" size="sm">Close</Button></DialogClose>
+   745→   745→          </DialogFooter>
+   746→   746→        </DialogContent>
+   747→   747→      </Dialog>
+   748→   748→    </div>
+   749→   749→  );
+   750→   750→}

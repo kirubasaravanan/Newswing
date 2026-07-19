@@ -19,7 +19,8 @@ import {
   Bot, Play, Wallet, Settings, TrendingUp, TrendingDown, Clock,
   ArrowRightLeft, Shield, AlertTriangle, CheckCircle2, XCircle,
   Wifi, WifiOff, Loader2, Plus, Minus, RefreshCw, Zap, Timer,
-  ChevronDown, ChevronUp, Eye, FileText, Activity,
+  ChevronDown, ChevronUp, Eye, FileText, Activity, ShieldAlert,
+  Thermometer, Flame, RotateCcw, BarChart3, Target, Skull,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -37,12 +38,18 @@ interface PositionRules {
   maxTotalPositions: number; riskPerTradePct: number;
   trailingStopR: number; trailToR: number; partialBookR: number; partialBookPct: number;
   cooldownDays: number; maxSectorPct: number; timeExitMins: number;
+  // v2
+  maxDrawdownPct: number; dailyLossLimit: number; niftyRegimeFilter: boolean;
+  atrTrailMultiplier: number; adaptiveSizing: boolean; streakPenaltyPct: number;
 }
 
 interface SchedulerState {
   enabled: boolean; scanIntervalMin: number; exitIntervalMin: number;
   lastScanAt: string | null; lastExitAt: string | null;
   todayEntries: number; todayExits: number; todayPnl: number; scanCount: number;
+  // v2
+  circuitBreaker: boolean; circuitBreakerReason: string;
+  niftyRegime: string; consecutiveLosses: number; lastAdaptiveFactor: number;
 }
 
 interface AutoTradeLog {
@@ -56,6 +63,10 @@ interface OpenPosition {
   entryDate: string; autoTraded: boolean; tags?: string;
 }
 
+interface DrawdownData {
+  drawdownPct: number; peakCapital: number; currentCapital: number;
+}
+
 export function AutoTradeTab() {
   const { config } = useTradeStore();
   const [wallet, setWallet] = useState<WalletData | null>(null);
@@ -64,6 +75,8 @@ export function AutoTradeTab() {
     maxTotalPositions: 8, riskPerTradePct: 1.0,
     trailingStopR: 1.5, trailToR: 0.5, partialBookR: 2.0, partialBookPct: 30,
     cooldownDays: 3, maxSectorPct: 35, timeExitMins: 30,
+    maxDrawdownPct: 8, dailyLossLimit: 5000, niftyRegimeFilter: true,
+    atrTrailMultiplier: 2.0, adaptiveSizing: true, streakPenaltyPct: 20,
   });
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
   const [logs, setLogs] = useState<AutoTradeLog[]>([]);
@@ -75,11 +88,12 @@ export function AutoTradeTab() {
   const [editingWallet, setEditingWallet] = useState(false);
   const [walletInput, setWalletInput] = useState('200000');
   const [editingRules, setEditingRules] = useState(false);
-  const [ruleEdits, setRuleEdits] = useState<PositionRules>({ ...rules });
+  const [ruleEdits, setRuleEdits] = useState<PositionRules & { scanIntervalMin?: number; exitIntervalMin?: number }>({ ...rules });
   const [chartSymbol, setChartSymbol] = useState<string | null>(null);
   const [exitWarnings, setExitWarnings] = useState<any[]>([]);
   const [selectedLog, setSelectedLog] = useState<AutoTradeLog | null>(null);
   const [showAllLogs, setShowAllLogs] = useState(false);
+  const [drawdown, setDrawdown] = useState<DrawdownData | null>(null);
 
   // ── Data Fetching ─────────────────────────────────────
   const fetchStatus = useCallback(async () => {
@@ -94,6 +108,7 @@ export function AutoTradeTab() {
         setScheduler(data.scheduler);
         setMarketHours(data.marketHours);
         setTimeToClose(data.timeToClose);
+        if (data.drawdown) setDrawdown(data.drawdown);
       }
     } catch (err) { console.error('Fetch status error:', err); }
   }, []);
@@ -104,22 +119,22 @@ export function AutoTradeTab() {
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
-  // ── Scheduler Tick (called periodically) ──────────────
+  // ── Scheduler Tick ─────────────────────────────────────
   const schedulerTickRef = useRef<NodeJS.Timeout | null>(null);
   useEffect(() => {
-    if (scheduler?.enabled && marketHours) {
+    if (scheduler?.enabled && marketHours && !scheduler?.circuitBreaker) {
       schedulerTickRef.current = setInterval(async () => {
         try {
           await fetch('/api/auto-trade', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'scheduler_tick' }),
           });
-          fetchStatus(); // Refresh UI
+          fetchStatus();
         } catch { /* ignore */ }
-      }, 60000); // Check every minute
+      }, 60000);
     }
     return () => { if (schedulerTickRef.current) clearInterval(schedulerTickRef.current); };
-  }, [scheduler?.enabled, marketHours, fetchStatus]);
+  }, [scheduler?.enabled, marketHours, scheduler?.circuitBreaker, fetchStatus]);
 
   // ── Actions ───────────────────────────────────────────
   const handleScanAndTrade = async () => {
@@ -131,9 +146,16 @@ export function AutoTradeTab() {
       });
       const data = await res.json();
       if (data.success) {
-        toast.success(`Scan Complete`, {
-          description: `${data.totalScanned} scanned → ${data.l1Passed} L1 pass → ${data.l2Signals} entries, ${data.skipped.length} skipped`,
+        const extra = data.circuitBreaker ? ' [CIRCUIT BREAKER]' :
+          data.niftyRegime === 'BEARISH' ? ' [BEARISH REGIME]' : '';
+        toast.success(`Scan Complete${extra}`, {
+          description: `${data.totalScanned} scanned | ${data.l1Passed} L1 | ${data.l2Signals} entries | ${data.skipped.length} skipped`,
         });
+        if (data.adaptiveFactor && data.adaptiveFactor < 1) {
+          toast.info('Adaptive Sizing Active', {
+            description: `Factor: ${(data.adaptiveFactor * 100).toFixed(0)}% (${data.consecutiveLosses} consecutive losses)`,
+          });
+        }
         fetchStatus();
       } else {
         toast.error('Auto-trade failed', { description: data.error });
@@ -190,6 +212,20 @@ export function AutoTradeTab() {
     } catch { toast.error('Scheduler toggle failed'); }
   };
 
+  const handleResetCircuitBreaker = async () => {
+    try {
+      const res = await fetch('/api/auto-trade', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset_circuit_breaker' }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setScheduler(data.scheduler);
+        toast.success('Circuit Breaker Reset');
+      }
+    } catch { toast.error('Reset failed'); }
+  };
+
   const saveWallet = async () => {
     try {
       const res = await fetch('/api/auto-trade', {
@@ -203,9 +239,11 @@ export function AutoTradeTab() {
 
   const saveRules = async () => {
     try {
+      // Separate scheduler settings from rules
+      const { scanIntervalMin, exitIntervalMin, ...rulesOnly } = ruleEdits;
       const res = await fetch('/api/auto-trade', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'update_rules', rules: ruleEdits }),
+        body: JSON.stringify({ action: 'update_rules', rules: rulesOnly }),
       });
       const data = await res.json();
       if (data.success) { setRules(data.rules); setEditingRules(false); toast.success('Rules updated'); }
@@ -213,7 +251,7 @@ export function AutoTradeTab() {
   };
 
   const totalPnl = (wallet?.realizedPnl || 0) + (wallet?.unrealizedPnl || 0);
-  const pnlPct = wallet?.totalCapital ? (totalPnl / (wallet.totalCapital - wallet.realizedPnl)) * 100 : 0;
+  const pnlPct = wallet?.initialCapital ? (totalPnl / wallet.initialCapital) * 100 : 0;
 
   return (
     <div className="space-y-4">
@@ -223,6 +261,7 @@ export function AutoTradeTab() {
           <h2 className="text-lg font-bold flex items-center gap-2">
             <Bot className="h-5 w-5 text-primary" />
             Auto-Trade Engine
+            <Badge variant="outline" className="text-[9px] h-4 text-muted-foreground">v2</Badge>
           </h2>
           {/* Market Status */}
           <div className={cn(
@@ -230,15 +269,34 @@ export function AutoTradeTab() {
             marketHours ? 'bg-emerald-500/10 text-emerald-400' : 'bg-muted text-muted-foreground'
           )}>
             <div className={cn('h-1.5 w-1.5 rounded-full', marketHours ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground')} />
-            {marketHours ? `Market Open — ${timeToClose}m to close` : 'Market Closed'}
+            {marketHours ? `${timeToClose}m to close` : 'Market Closed'}
           </div>
-          {/* Scheduler Armed Status */}
+          {/* Circuit Breaker */}
+          {scheduler?.circuitBreaker && (
+            <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs bg-red-500/15 text-red-400 border border-red-500/20">
+              <ShieldAlert className="h-3 w-3" />
+              CIRCUIT BREAKER
+              <Button variant="ghost" size="sm" onClick={handleResetCircuitBreaker} className="h-4 w-4 p-0 ml-1 text-red-400 hover:text-red-300">
+                <RotateCcw className="h-2.5 w-2.5" />
+              </Button>
+            </div>
+          )}
+          {/* Nifty Regime */}
+          <div className={cn(
+            'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
+            scheduler?.niftyRegime === 'BULLISH' ? 'bg-emerald-500/10 text-emerald-400' :
+            scheduler?.niftyRegime === 'BEARISH' ? 'bg-red-500/10 text-red-400' : 'bg-muted text-muted-foreground'
+          )}>
+            <TrendingUp className={cn('h-3 w-3', scheduler?.niftyRegime === 'BEARISH' && 'rotate-180')} />
+            {scheduler?.niftyRegime || 'UNKNOWN'}
+          </div>
+          {/* Auto-Mode */}
           <div className={cn(
             'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
             scheduler?.enabled ? 'bg-indigo-500/10 text-indigo-400' : 'bg-muted text-muted-foreground'
           )}>
             <Shield className="h-3 w-3" />
-            {scheduler?.enabled ? 'Auto-Mode Armed' : 'Manual'}
+            {scheduler?.enabled ? 'Armed' : 'Manual'}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -248,11 +306,11 @@ export function AutoTradeTab() {
             {checkingExits ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRightLeft className="h-3 w-3" />}
             Check Exits
           </Button>
-          <Button onClick={handleScanAndTrade} disabled={scanning || !marketHours}
+          <Button onClick={handleScanAndTrade} disabled={scanning || !marketHours || !!scheduler?.circuitBreaker}
             className={cn('gap-1.5', scheduler?.enabled ? 'bg-emerald-600 hover:bg-emerald-700' : '')}
             size="sm">
             {scanning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-            {scanning ? 'Scanning Universe...' : 'Scan & Auto-Trade'}
+            {scanning ? 'Scanning...' : 'Scan & Trade'}
           </Button>
         </div>
       </div>
@@ -262,11 +320,11 @@ export function AutoTradeTab() {
           <TabsTrigger value="engine" className="text-xs gap-1.5"><Bot className="h-3 w-3" /> Engine</TabsTrigger>
           <TabsTrigger value="scheduler" className="text-xs gap-1.5"><Timer className="h-3 w-3" /> Scheduler</TabsTrigger>
           <TabsTrigger value="positions" className="text-xs gap-1.5"><TrendingUp className="h-3 w-3" /> Positions</TabsTrigger>
-          <TabsTrigger value="audit" className="text-xs gap-1.5"><FileText className="h-3 w-3" /> Audit Log</TabsTrigger>
+          <TabsTrigger value="audit" className="text-xs gap-1.5"><FileText className="h-3 w-3" /> Audit</TabsTrigger>
           <TabsTrigger value="rules" className="text-xs gap-1.5"><Settings className="h-3 w-3" /> Rules</TabsTrigger>
         </TabsList>
 
-        {/* ── ENGINE TAB ──────────────────────────────────── */}
+        {/* ═══ ENGINE TAB ═════════════════════════════════ */}
         <TabsContent value="engine" className="space-y-4">
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             {/* Wallet Card */}
@@ -287,7 +345,7 @@ export function AutoTradeTab() {
                   )}
                 </div>
                 {wallet && (
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                     <div className="rounded-lg bg-secondary/50 p-3">
                       <div className="text-[10px] text-muted-foreground uppercase">Total Capital</div>
                       <div className="text-lg font-bold font-mono mt-0.5">₹{wallet.totalCapital.toLocaleString()}</div>
@@ -306,60 +364,133 @@ export function AutoTradeTab() {
                       <div className={cn('text-lg font-bold font-mono mt-0.5', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                         {totalPnl >= 0 ? '+' : ''}₹{totalPnl.toLocaleString()}
                       </div>
-                      <div className="text-[10px] text-muted-foreground">
-                        R: {wallet.realizedPnl.toLocaleString()} | U: {wallet.unrealizedPnl.toLocaleString()}
+                      <div className="text-[10px] text-muted-foreground">R: {wallet.realizedPnl.toLocaleString()} | U: {wallet.unrealizedPnl.toLocaleString()}</div>
+                    </div>
+                    {/* v2: Drawdown Card */}
+                    <div className={cn('rounded-lg p-3', (drawdown?.drawdownPct || 0) >= rules.maxDrawdownPct * 0.7 ? 'bg-red-500/10' : 'bg-orange-500/10')}>
+                      <div className="text-[10px] text-orange-400 uppercase flex items-center gap-1">
+                        <Skull className="h-3 w-3" /> Drawdown
                       </div>
+                      <div className={cn('text-lg font-bold font-mono mt-0.5',
+                        (drawdown?.drawdownPct || 0) >= rules.maxDrawdownPct ? 'text-red-400' : 'text-orange-400'
+                      )}>
+                        {(drawdown?.drawdownPct || 0).toFixed(2)}%
+                      </div>
+                      <div className="text-[10px] text-muted-foreground">Limit: {rules.maxDrawdownPct}%</div>
                     </div>
                   </div>
                 )}
               </CardContent>
             </Card>
 
-            {/* Today's Summary */}
-            <Card className="border-border">
-              <CardContent className="p-4">
-                <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
-                  <Activity className="h-4 w-4 text-primary" /> Today&apos;s Summary
-                </h3>
-                {scheduler && (
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Total Scans</span>
-                      <span className="font-mono font-bold">{scheduler.scanCount}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Entries Today</span>
-                      <span className="font-mono font-bold text-emerald-400">{scheduler.todayEntries}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Exits Today</span>
-                      <span className="font-mono font-bold text-red-400">{scheduler.todayExits}</span>
-                    </div>
-                    <div className="flex justify-between text-xs pt-2 border-t border-border/50">
-                      <span className="text-muted-foreground">Today P&L</span>
-                      <span className={cn('font-mono font-bold', scheduler.todayPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {scheduler.todayPnl >= 0 ? '+' : ''}₹{Math.round(scheduler.todayPnl).toLocaleString()}
-                      </span>
-                    </div>
-                    {scheduler.lastScanAt && (
-                      <div className="text-[10px] text-muted-foreground pt-1">
-                        Last scan: {new Date(scheduler.lastScanAt).toLocaleTimeString()}
+            {/* Today's Summary + Engine State */}
+            <div className="space-y-4">
+              <Card className="border-border">
+                <CardContent className="p-4">
+                  <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+                    <Activity className="h-4 w-4 text-primary" /> Today
+                  </h3>
+                  {scheduler && (
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-muted-foreground">Scans</span>
+                        <span className="font-mono font-bold">{scheduler.scanCount}</span>
                       </div>
-                    )}
-                    {scheduler.lastExitAt && (
-                      <div className="text-[10px] text-muted-foreground">
-                        Last exit check: {new Date(scheduler.lastExitAt).toLocaleTimeString()}
+                      <div className="flex justify-between text-xs">
+                        <span className="text-muted-foreground">Entries</span>
+                        <span className="font-mono font-bold text-emerald-400">{scheduler.todayEntries}</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-muted-foreground">Exits</span>
+                        <span className="font-mono font-bold text-red-400">{scheduler.todayExits}</span>
+                      </div>
+                      <div className="flex justify-between text-xs pt-2 border-t border-border/50">
+                        <span className="text-muted-foreground">Today P&L</span>
+                        <span className={cn('font-mono font-bold', scheduler.todayPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                          {scheduler.todayPnl >= 0 ? '+' : ''}₹{Math.round(scheduler.todayPnl).toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-muted-foreground">Daily Limit</span>
+                        <span className={cn('font-mono',
+                          scheduler.todayPnl < 0 && Math.abs(scheduler.todayPnl) >= rules.dailyLossLimit * 0.8 ? 'text-red-400 font-bold' : 'text-muted-foreground'
+                        )}>
+                          ₹{rules.dailyLossLimit.toLocaleString()}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* v2: Engine State Card */}
+              <Card className="border-border">
+                <CardContent className="p-4">
+                  <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+                    <Thermometer className="h-4 w-4 text-primary" /> Engine State
+                  </h3>
+                  <div className="space-y-2">
+                    {/* Nifty Regime */}
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground">Nifty Regime</span>
+                      <Badge variant="outline" className={cn('text-[10px] h-5',
+                        scheduler?.niftyRegime === 'BULLISH' ? 'text-emerald-400 border-emerald-500/30' :
+                        scheduler?.niftyRegime === 'BEARISH' ? 'text-red-400 border-red-500/30' : 'text-muted-foreground'
+                      )}>
+                        {scheduler?.niftyRegime || 'UNKNOWN'}
+                      </Badge>
+                    </div>
+                    {/* Adaptive Factor */}
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground">Size Factor</span>
+                      <div className="flex items-center gap-2">
+                        <div className="w-16 h-1.5 rounded-full bg-secondary overflow-hidden">
+                          <div className={cn('h-full rounded-full transition-all',
+                            (scheduler?.lastAdaptiveFactor || 1) >= 0.8 ? 'bg-emerald-400' :
+                            (scheduler?.lastAdaptiveFactor || 1) >= 0.5 ? 'bg-amber-400' : 'bg-red-400'
+                          )} style={{ width: `${((scheduler?.lastAdaptiveFactor || 1) * 100)}%` }} />
+                        </div>
+                        <span className={cn('font-mono w-8 text-right',
+                          (scheduler?.lastAdaptiveFactor || 1) < 1 ? 'text-amber-400' : ''
+                        )}>{((scheduler?.lastAdaptiveFactor || 1) * 100).toFixed(0)}%</span>
+                      </div>
+                    </div>
+                    {/* Consecutive Losses */}
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground flex items-center gap-1">
+                        <Flame className="h-3 w-3" /> Loss Streak
+                      </span>
+                      <span className={cn('font-mono font-bold',
+                        (scheduler?.consecutiveLosses || 0) >= 3 ? 'text-red-400' :
+                        (scheduler?.consecutiveLosses || 0) >= 1 ? 'text-amber-400' : 'text-emerald-400'
+                      )}>{scheduler?.consecutiveLosses || 0}</span>
+                    </div>
+                    {/* Circuit Breaker */}
+                    {scheduler?.circuitBreaker && (
+                      <div className="mt-2 rounded-lg bg-red-500/10 p-2 border border-red-500/20">
+                        <div className="text-[10px] text-red-400 font-bold uppercase flex items-center gap-1">
+                          <ShieldAlert className="h-3 w-3" /> Circuit Breaker Active
+                        </div>
+                        <div className="text-[10px] text-muted-foreground mt-0.5">
+                          {scheduler.circuitBreakerReason}
+                        </div>
+                        <Button variant="outline" size="sm" onClick={handleResetCircuitBreaker}
+                          className="mt-1.5 h-6 text-[10px] gap-1 text-red-400 border-red-500/30 hover:bg-red-500/10">
+                          <RotateCcw className="h-2.5 w-2.5" /> Reset
+                        </Button>
                       </div>
                     )}
                   </div>
-                )}
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            </div>
           </div>
 
           {/* Position Health Warnings */}
           {exitWarnings.length > 0 && (
-            <Card className="border-amber-500/30 bg-amber-500/5">
+            <Card className={cn('border-amber-500/30 bg-amber-500/5',
+              exitWarnings.some((w: any) => w.healthUrgency === 'CRITICAL') ? 'border-red-500/30 bg-red-500/5' : ''
+            )}>
               <CardContent className="p-4">
                 <h3 className="text-sm font-semibold flex items-center gap-2 mb-2">
                   <AlertTriangle className="h-4 w-4 text-amber-400" />
@@ -369,14 +500,24 @@ export function AutoTradeTab() {
                   {exitWarnings.map((w: any, i: number) => (
                     <div key={i} className={cn(
                       'flex items-center gap-2 text-xs px-3 py-2 rounded-lg',
-                      w.type === 'SL_PROXIMITY' ? 'bg-red-500/10' : 'bg-amber-500/10'
+                      w.healthUrgency === 'CRITICAL' ? 'bg-red-500/10' : 'bg-amber-500/10'
                     )}>
                       <Badge variant="outline" className={cn('text-[9px] h-4',
-                        w.type === 'SL_PROXIMITY' ? 'text-red-400 border-red-500/30' : 'text-amber-400 border-amber-500/30'
-                      )}>{w.type === 'SL_PROXIMITY' ? 'SL RISK' : 'AGING'}</Badge>
+                        w.healthUrgency === 'CRITICAL' ? 'text-red-400 border-red-500/30' : 'text-amber-400 border-amber-500/30'
+                      )}>{w.healthUrgency === 'CRITICAL' ? 'CRITICAL' : 'WARNING'}</Badge>
                       <span className="font-semibold">{w.symbol}</span>
-                      <span className="text-muted-foreground">{w.message}</span>
-                      <span className={cn('ml-auto font-mono', (w.pnlPercent || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      {/* Health Score Bar */}
+                      <div className="flex items-center gap-1.5 flex-1">
+                        <div className="flex-1 max-w-[80px] h-1.5 rounded-full bg-secondary overflow-hidden">
+                          <div className={cn('h-full rounded-full transition-all',
+                            w.healthScore >= 70 ? 'bg-emerald-400' :
+                            w.healthScore >= 40 ? 'bg-amber-400' : 'bg-red-400'
+                          )} style={{ width: `${w.healthScore}%` }} />
+                        </div>
+                        <span className="font-mono text-[10px] text-muted-foreground">{w.healthScore}/100</span>
+                      </div>
+                      <span className="text-muted-foreground truncate max-w-[200px]">{w.message}</span>
+                      <span className={cn('ml-auto font-mono shrink-0', (w.pnlPercent || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                         {w.pnlPercent >= 0 ? '+' : ''}{w.pnlPercent?.toFixed(2)}%
                       </span>
                     </div>
@@ -387,7 +528,7 @@ export function AutoTradeTab() {
           )}
         </TabsContent>
 
-        {/* ── SCHEDULER TAB ──────────────────────────────── */}
+        {/* ═══ SCHEDULER TAB ══════════════════════════════ */}
         <TabsContent value="scheduler" className="space-y-4">
           <Card className="border-border">
             <CardContent className="p-4">
@@ -397,16 +538,17 @@ export function AutoTradeTab() {
                     <Timer className="h-4 w-4 text-primary" /> Automation Scheduler
                   </h3>
                   <p className="text-[10px] text-muted-foreground mt-1">
-                    Automatically scans for entries and manages exits during market hours (9:15 AM - 3:30 PM IST)
+                    V-Swing universe scan + PMS risk-managed exits during 9:15 AM - 3:30 PM IST
                   </p>
                 </div>
                 <div className="flex items-center gap-3">
                   <span className={cn('text-xs', marketHours ? 'text-emerald-400' : 'text-muted-foreground')}>
-                    {marketHours ? 'Market is OPEN' : 'Market is CLOSED'}
+                    {marketHours ? 'OPEN' : 'CLOSED'}
                   </span>
                   <Switch
                     checked={scheduler?.enabled || false}
                     onCheckedChange={handleSchedulerToggle}
+                    disabled={!!scheduler?.circuitBreaker}
                   />
                 </div>
               </div>
@@ -414,53 +556,67 @@ export function AutoTradeTab() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="rounded-lg bg-secondary/50 p-4 space-y-3">
                   <h4 className="text-xs font-semibold flex items-center gap-2">
-                    <Zap className="h-3 w-3 text-emerald-400" /> Entry Scan Settings
+                    <Zap className="h-3 w-3 text-emerald-400" /> Entry Scan
                   </h4>
                   <div className="flex items-center justify-between text-xs">
-                    <Label className="text-muted-foreground">Scan every (minutes)</Label>
+                    <Label className="text-muted-foreground">Interval (min)</Label>
                     <Input type="number" value={ruleEdits.scanIntervalMin || 30}
                       onChange={e => setRuleEdits({ ...ruleEdits, scanIntervalMin: parseInt(e.target.value) || 30 })}
                       className="h-7 w-20 text-xs text-right" />
                   </div>
-                  <p className="text-[10px] text-muted-foreground">
-                    V-Swing universe scan will run automatically. New A+/B signals will be entered if rules permit.
-                  </p>
+                  <div className="text-[10px] text-muted-foreground space-y-1">
+                    <p>Full universe L1→L2 scan with regime filter, circuit breaker, and adaptive sizing.</p>
+                    {scheduler?.circuitBreaker && (
+                      <p className="text-red-400 font-semibold">BLOCKED by circuit breaker</p>
+                    )}
+                    {scheduler?.niftyRegime === 'BEARISH' && rules.niftyRegimeFilter && (
+                      <p className="text-amber-400">BLOCKED by bearish regime filter</p>
+                    )}
+                  </div>
                 </div>
-
                 <div className="rounded-lg bg-secondary/50 p-4 space-y-3">
                   <h4 className="text-xs font-semibold flex items-center gap-2">
-                    <ArrowRightLeft className="h-3 w-3 text-red-400" /> Exit Check Settings
+                    <ArrowRightLeft className="h-3 w-3 text-red-400" /> Exit Check
                   </h4>
                   <div className="flex items-center justify-between text-xs">
-                    <Label className="text-muted-foreground">Check every (minutes)</Label>
+                    <Label className="text-muted-foreground">Interval (min)</Label>
                     <Input type="number" value={ruleEdits.exitIntervalMin || 5}
                       onChange={e => setRuleEdits({ ...ruleEdits, exitIntervalMin: parseInt(e.target.value) || 5 })}
                       className="h-7 w-20 text-xs text-right" />
                   </div>
                   <p className="text-[10px] text-muted-foreground">
-                    Monitors SL/TP hits, trailing stops, time-based exits, and partial bookings.
+                    SL/TP, {rules.atrTrailMultiplier > 0 ? 'ATR-based' : 'R-based'} trailing stop, stale loser exit, time exit, partial booking.
                   </p>
                 </div>
               </div>
 
-              {/* Scheduler Timeline */}
+              {/* Timeline */}
               {scheduler && (
                 <div className="mt-4 rounded-lg bg-secondary/30 p-3">
                   <h4 className="text-[10px] text-muted-foreground uppercase mb-2">Timeline</h4>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
                     <div>
                       <span className="text-muted-foreground">Last Scan</span>
                       <div className="font-mono text-[11px]">{scheduler.lastScanAt ? new Date(scheduler.lastScanAt).toLocaleTimeString() : '--'}</div>
                     </div>
                     <div>
-                      <span className="text-muted-foreground">Last Exit Check</span>
+                      <span className="text-muted-foreground">Last Exit</span>
                       <div className="font-mono text-[11px]">{scheduler.lastExitAt ? new Date(scheduler.lastExitAt).toLocaleTimeString() : '--'}</div>
                     </div>
                     <div>
                       <span className="text-muted-foreground">Status</span>
-                      <div className={cn('font-mono text-[11px]', scheduler.enabled ? 'text-emerald-400' : 'text-muted-foreground')}>
-                        {scheduler.enabled ? 'ARMED' : 'DISARMED'}
+                      <div className={cn('font-mono text-[11px]',
+                        scheduler.circuitBreaker ? 'text-red-400' : scheduler.enabled ? 'text-emerald-400' : 'text-muted-foreground'
+                      )}>
+                        {scheduler.circuitBreaker ? 'HALTED' : scheduler.enabled ? 'ARMED' : 'DISARMED'}
                       </div>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Regime</span>
+                      <div className={cn('font-mono text-[11px]',
+                        scheduler.niftyRegime === 'BULLISH' ? 'text-emerald-400' :
+                        scheduler.niftyRegime === 'BEARISH' ? 'text-red-400' : 'text-muted-foreground'
+                      )}>{scheduler.niftyRegime}</div>
                     </div>
                     <div>
                       <span className="text-muted-foreground">Market</span>
@@ -475,7 +631,7 @@ export function AutoTradeTab() {
           </Card>
         </TabsContent>
 
-        {/* ── POSITIONS TAB ──────────────────────────────── */}
+        {/* ═══ POSITIONS TAB ══════════════════════════════ */}
         <TabsContent value="positions" className="space-y-4">
           <Card className="border-border">
             <CardContent className="p-4">
@@ -484,7 +640,7 @@ export function AutoTradeTab() {
               </h3>
               {openPositions.length === 0 ? (
                 <div className="text-center py-8">
-                  <p className="text-xs text-muted-foreground">No open positions. Run Scan & Auto-Trade to find entries.</p>
+                  <p className="text-xs text-muted-foreground">No open positions. Run Scan & Trade to find entries.</p>
                 </div>
               ) : (
                 <ScrollArea className="max-h-[400px]">
@@ -494,6 +650,7 @@ export function AutoTradeTab() {
                       const risk = pos.entryPrice - pos.stopLoss;
                       const agePct = rules.maxHoldingDays > 0 ? (days / rules.maxHoldingDays) * 100 : 0;
                       const isPartial = pos.tags?.includes('partial-booked');
+                      const rMultiple = risk > 0 ? ((pos.entryPrice - pos.entryPrice) / risk) : 0; // Will be calculated live
                       return (
                         <div key={pos.id}
                           className={cn(
@@ -524,6 +681,16 @@ export function AutoTradeTab() {
                             <span className="text-muted-foreground">
                               {risk > 0 ? `R:R ${(Math.abs(pos.targetPrice - pos.entryPrice) / risk).toFixed(1)}x` : ''}
                             </span>
+                            {/* v2: Show which factors are in tags */}
+                            {pos.tags && (
+                              <div className="flex gap-1 ml-auto">
+                                {pos.tags.split(',').filter(t => ['aplus', 'b'].includes(t)).map(t => (
+                                  <Badge key={t} variant="outline" className={cn('text-[9px] h-4',
+                                    t === 'aplus' ? 'text-emerald-400 border-emerald-500/30' : 'text-blue-400 border-blue-500/30'
+                                  )}>{t.toUpperCase()}</Badge>
+                                ))}
+                              </div>
+                            )}
                           </div>
                           {/* Aging bar */}
                           {agePct >= 50 && (
@@ -541,12 +708,11 @@ export function AutoTradeTab() {
             </CardContent>
           </Card>
 
-          {/* Chart */}
           {chartSymbol && (
             <Card className="border-border">
               <CardContent className="p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold">{chartSymbol} — TradingView Chart</h3>
+                  <h3 className="text-sm font-semibold">{chartSymbol} — TradingView</h3>
                   <Button variant="ghost" size="sm" onClick={() => setChartSymbol(null)} className="h-7 text-xs">Close</Button>
                 </div>
                 <TradingViewChart symbol={chartSymbol} height={450} />
@@ -555,7 +721,7 @@ export function AutoTradeTab() {
           )}
         </TabsContent>
 
-        {/* ── AUDIT LOG TAB ──────────────────────────────── */}
+        {/* ═══ AUDIT LOG TAB ══════════════════════════════ */}
         <TabsContent value="audit" className="space-y-4">
           <Card className="border-border">
             <CardContent className="p-4">
@@ -565,7 +731,7 @@ export function AutoTradeTab() {
                 </h3>
                 <div className="flex items-center gap-2">
                   <Button variant="ghost" size="sm" onClick={() => setShowAllLogs(!showAllLogs)} className="h-7 text-xs gap-1">
-                    {showAllLogs ? 'Show Recent' : 'Show All'}
+                    {showAllLogs ? 'Recent' : 'All'}
                   </Button>
                   <Button variant="ghost" size="sm" onClick={fetchStatus} className="h-7 text-xs gap-1">
                     <RefreshCw className="h-3 w-3" /> Refresh
@@ -580,9 +746,7 @@ export function AutoTradeTab() {
                     const isPartial = log.action === 'PARTIAL_BOOK';
                     return (
                       <div key={log.id}
-                        className={cn(
-                          'flex items-start gap-2 text-xs py-2 px-2 rounded-lg hover:bg-secondary/30 cursor-pointer border-b border-border/30 last:border-0',
-                        )}
+                        className="flex items-start gap-2 text-xs py-2 px-2 rounded-lg hover:bg-secondary/30 cursor-pointer border-b border-border/30 last:border-0"
                         onClick={() => setSelectedLog(log)}>
                         <div className="mt-0.5 shrink-0">
                           {isEntry ? <Plus className="h-3 w-3 text-emerald-400" /> :
@@ -614,13 +778,13 @@ export function AutoTradeTab() {
           </Card>
         </TabsContent>
 
-        {/* ── RULES TAB ──────────────────────────────────── */}
+        {/* ═══ RULES TAB ══════════════════════════════════ */}
         <TabsContent value="rules" className="space-y-4">
           <Card className="border-border">
             <CardContent className="p-4">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-semibold flex items-center gap-2">
-                  <Settings className="h-4 w-4" /> Position Rules
+                  <Settings className="h-4 w-4" /> Position & Risk Rules
                 </h3>
                 {!editingRules ? (
                   <Button variant="ghost" size="sm" onClick={() => { setRuleEdits({ ...rules }); setEditingRules(true); }} className="h-7 text-xs">Edit</Button>
@@ -632,16 +796,16 @@ export function AutoTradeTab() {
                 )}
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Position Sizing Rules */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Position Sizing */}
                 <div className="space-y-2">
                   <h4 className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Position Sizing</h4>
                   {editingRules ? [
-                    { key: 'maxPerStock', label: 'Max per Stock (₹)', type: 'number' },
-                    { key: 'maxTotalPositions', label: 'Max Total Positions', type: 'number' },
-                    { key: 'riskPerTradePct', label: 'Risk per Trade (%)', type: 'number' },
-                    { key: 'maxBuysPerMonth', label: 'Max Buys/Month/Stock', type: 'number' },
-                    { key: 'maxSectorPct', label: 'Max Sector Concentration (%)', type: 'number' },
+                    { key: 'maxPerStock', label: 'Max/Stock (₹)', type: 'number' as const },
+                    { key: 'maxTotalPositions', label: 'Max Positions', type: 'number' as const },
+                    { key: 'riskPerTradePct', label: 'Risk/Trade (%)', type: 'number' as const },
+                    { key: 'maxBuysPerMonth', label: 'Buys/Month/Stock', type: 'number' as const },
+                    { key: 'maxSectorPct', label: 'Sector Cap (%)', type: 'number' as const },
                   ].map(f => (
                     <div key={f.key} className="flex items-center justify-between text-xs">
                       <Label className="text-muted-foreground">{f.label}</Label>
@@ -662,17 +826,18 @@ export function AutoTradeTab() {
                   ))}
                 </div>
 
-                {/* Exit Management Rules */}
+                {/* Exit Management */}
                 <div className="space-y-2">
                   <h4 className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Exit Management</h4>
                   {editingRules ? [
-                    { key: 'maxHoldingDays', label: 'Max Holding Days' },
-                    { key: 'trailingStopR', label: 'Trail Start (R-multiple)' },
-                    { key: 'trailToR', label: 'Trail To (R-multiple)' },
-                    { key: 'partialBookR', label: 'Partial Book At (R)' },
+                    { key: 'maxHoldingDays', label: 'Max Holding (d)' },
+                    { key: 'trailingStopR', label: 'Trail Start (R)' },
+                    { key: 'trailToR', label: 'Trail To (R)' },
+                    { key: 'atrTrailMultiplier', label: 'ATR Trail Mult' },
+                    { key: 'partialBookR', label: 'Partial At (R)' },
                     { key: 'partialBookPct', label: 'Partial Book %' },
-                    { key: 'cooldownDays', label: 'Re-entry Cooldown (days)' },
-                    { key: 'timeExitMins', label: 'Time Exit Before Close (min)' },
+                    { key: 'cooldownDays', label: 'Cooldown (d)' },
+                    { key: 'timeExitMins', label: 'Time Exit (min)' },
                   ].map(f => (
                     <div key={f.key} className="flex items-center justify-between text-xs">
                       <Label className="text-muted-foreground">{f.label}</Label>
@@ -681,15 +846,53 @@ export function AutoTradeTab() {
                         className="h-7 w-24 text-xs text-right" />
                     </div>
                   )) : [
-                    { l: 'Max Holding', v: `${rules.maxHoldingDays} days` },
-                    { l: 'Trail Start', v: `${rules.trailingStopR}R profit` },
-                    { l: 'Trail To', v: `${rules.trailToR}R level` },
-                    { l: 'Partial Book', v: `${rules.partialBookPct}% at ${rules.partialBookR}R` },
-                    { l: 'Cooldown', v: `${rules.cooldownDays} days` },
-                    { l: 'Time Exit', v: `${rules.timeExitMins}min before close` },
+                    { l: 'Max Holding', v: `${rules.maxHoldingDays}d` },
+                    { l: 'Trail Start', v: `${rules.trailingStopR}R` },
+                    { l: 'Trail To', v: `${rules.trailToR}R` },
+                    { l: 'ATR Trail', v: `${rules.atrTrailMultiplier}x ATR` },
+                    { l: 'Partial', v: `${rules.partialBookPct}% @ ${rules.partialBookR}R` },
+                    { l: 'Cooldown', v: `${rules.cooldownDays}d` },
+                    { l: 'Time Exit', v: `${rules.timeExitMins}m` },
                   ].map(r => (
                     <div key={r.l} className="flex justify-between text-xs">
                       <span className="text-muted-foreground">{r.l}</span><span className="font-mono">{r.v}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* v2: Risk Controls */}
+                <div className="space-y-2">
+                  <h4 className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold flex items-center gap-1">
+                    <ShieldAlert className="h-3 w-3" /> v2 Risk Controls
+                  </h4>
+                  {editingRules ? [
+                    { key: 'maxDrawdownPct', label: 'Max Drawdown (%)', type: 'number' as const },
+                    { key: 'dailyLossLimit', label: 'Daily Loss (₹)', type: 'number' as const },
+                    { key: 'niftyRegimeFilter', label: 'Nifty Regime', type: 'toggle' as const },
+                    { key: 'adaptiveSizing', label: 'Adaptive Sizing', type: 'toggle' as const },
+                    { key: 'streakPenaltyPct', label: 'Streak Penalty (%)', type: 'number' as const },
+                  ].map(f => (
+                    <div key={f.key} className="flex items-center justify-between text-xs">
+                      <Label className="text-muted-foreground">{f.label}</Label>
+                      {f.type === 'toggle' ? (
+                        <Switch checked={(ruleEdits as any)[f.key] as boolean}
+                          onCheckedChange={v => setRuleEdits({ ...ruleEdits, [f.key]: v })} className="scale-75" />
+                      ) : (
+                        <Input type="number" value={(ruleEdits as any)[f.key]}
+                          onChange={e => setRuleEdits({ ...ruleEdits, [f.key]: parseFloat(e.target.value) || 0 })}
+                          className="h-7 w-24 text-xs text-right" />
+                      )}
+                    </div>
+                  )) : [
+                    { l: 'Max DD', v: `${rules.maxDrawdownPct}%`, warn: (drawdown?.drawdownPct || 0) >= rules.maxDrawdownPct * 0.7 },
+                    { l: 'Daily Limit', v: `₹${rules.dailyLossLimit.toLocaleString()}` },
+                    { l: 'Regime Filter', v: rules.niftyRegimeFilter ? 'ON' : 'OFF', active: rules.niftyRegimeFilter },
+                    { l: 'Adaptive', v: rules.adaptiveSizing ? 'ON' : 'OFF', active: rules.adaptiveSizing },
+                    { l: 'Streak Penalty', v: `${rules.streakPenaltyPct}%/loss` },
+                  ].map(r => (
+                    <div key={r.l} className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">{r.l}</span>
+                      <span className={cn('font-mono', r.warn ? 'text-red-400 font-bold' : r.active ? 'text-emerald-400' : '')}>{r.v}</span>
                     </div>
                   ))}
                 </div>
@@ -734,7 +937,7 @@ export function AutoTradeTab() {
                 <div className="rounded bg-secondary/50 p-2">
                   <div className="text-[10px] text-muted-foreground mb-1">Signal Details</div>
                   <pre className="text-[10px] text-muted-foreground overflow-auto max-h-[200px] whitespace-pre-wrap">
-                    {JSON.stringify(JSON.parse(selectedLog.signal), null, 2)}
+                    {(() => { try { return JSON.stringify(JSON.parse(selectedLog.signal), null, 2); } catch { return selectedLog.signal; } })()}
                   </pre>
                 </div>
               )}

@@ -125,3 +125,42 @@ Stage Summary:
 - R-multiple distribution for strategy evaluation
 - Screener → Auto-Trade integration complete (single + bulk A+)
 - initialCapital tracking preserves base capital across P&L recalculation
+
+---
+Task ID: 16
+Agent: Main Agent
+Task: PMS Auto-Trade Engine v2 — Professional Risk Management Upgrades
+
+Work Log:
+- Rewrote /api/auto-trade/route.ts with 9 new PMS-grade features:
+  1. Drawdown Circuit Breaker — halts all new entries when portfolio DD exceeds threshold (default 8%)
+  2. Daily Loss Limit — stops entries if today's realized loss exceeds ₹5000
+  3. Nifty Regime Filter — only takes longs when Nifty > EMA200 (bullish regime detection)
+  4. ATR-based Trailing Stop — uses 2x ATR trailing instead of fixed R-multiple trail
+  5. Adaptive Position Sizing — reduces qty after 3+ consecutive losses (20% per loss, min 20%)
+  6. Stale Loser Acceleration — exits losing positions at 70% of max holding days (vs 100%)
+  7. Position Health Scoring (0-100) — multi-factor: R-multiple, SL proximity, age, TP progress
+  8. Circuit Breaker auto-reset on new trading day
+  9. Manual circuit breaker reset endpoint (POST reset_circuit_breaker)
+- Added 6 new fields to PositionRules type: maxDrawdownPct, dailyLossLimit, niftyRegimeFilter, atrTrailMultiplier, adaptiveSizing, streakPenaltyPct
+- Added 5 new fields to SchedulerState: circuitBreaker, circuitBreakerReason, niftyRegime, consecutiveLosses, lastAdaptiveFactor
+- GET /api/auto-trade now returns: drawdown object, consecutiveLosses, adaptiveFactor
+- POST /api/auto-trade now supports: reset_circuit_breaker action
+- Rewrote auto-trade-tab.tsx with v2 UI:
+  - Top bar: Circuit Breaker badge (red), Nifty Regime indicator, v2 badge
+  - Engine tab: 5-column wallet grid (added Drawdown card), Engine State card (regime, size factor, loss streak, CB reset)
+  - Scheduler tab: Shows regime filter and ATR trail status, blocked state messaging
+  - Rules tab: 3-column layout (added "v2 Risk Controls" column with toggle switches)
+  - Warnings: Health score bars (0-100) with CRITICAL/WARNING urgency levels
+  - Signal dialog: safe JSON.parse with fallback for malformed signals
+- Build verified: 25 routes, 0 errors
+- API verified: all 18 rule keys and 16 scheduler keys returned correctly, drawdown=0%, circuitBreaker=false, regime=UNKNOWN, adaptiveFactor=1
+
+Stage Summary:
+- Auto-trade engine upgraded from v1 to v2 with institutional-grade risk controls
+- Circuit breaker prevents catastrophic drawdowns (8% DD or ₹5000 daily loss)
+- Nifty EMA200 regime filter prevents counter-trend entries in bear markets
+- ATR trailing stop adapts to each stock's volatility instead of one-size-fits-all R
+- Adaptive sizing automatically reduces exposure during losing streaks
+- Position health scoring provides at-a-glance risk assessment (0-100 scale)
+- All features configurable via Rules tab, no code changes needed
