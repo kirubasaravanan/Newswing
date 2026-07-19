@@ -1,12 +1,17 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // output: "standalone", -- disabled, using next start directly
+  output: "standalone",
   serverExternalPackages: ["technicalindicators"],
   typescript: {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  allowedDevOrigins: [
+    /\.space-z\.ai$/,
+    /preview-.*\.space-z\.ai$/,
+    /localhost$/,
+  ],
   experimental: {
     optimizePackageImports: [
       'lucide-react',
