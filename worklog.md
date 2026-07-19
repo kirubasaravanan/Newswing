@@ -164,3 +164,27 @@ Stage Summary:
 - Adaptive sizing automatically reduces exposure during losing streaks
 - Position health scoring provides at-a-glance risk assessment (0-100 scale)
 - All features configurable via Rules tab, no code changes needed
+---
+Task ID: 17
+Agent: Main Agent
+Task: Options Trading Module — All 3 Phases (Chain, Trading, Strategies, Analytics, Greeks Risk)
+
+Work Log:
+- Added Prisma models: OptionTrade (30+ fields incl. Greeks at entry), OptionStrategy (multi-leg)
+- Pushed schema: npx prisma db push — successful
+- Created src/lib/options/black-scholes.ts — Full BS engine (normalCDF, normalPDF, blackScholes, impliedVolatility Newton-Raphson, calculateGreeksSL, getOptionLotSize, daysToExpiry)
+- Created src/lib/options/option-chain.ts — Yahoo Finance spot + theoretical chain via BS, IV smile model, 23 lot sizes
+- Created 5 API routes: /api/options/chain, /api/options/trades, /api/options/strategies, /api/options/positions, /api/options/greeks
+- Created src/components/trading/options-tab.tsx — 1503 lines, 5 sub-tabs (Chain, New Trade, Positions, Strategies, Analytics)
+- Updated trade-store.ts: Added 'options' to AppTab type
+- Updated sidebar.tsx: Added Options nav with GitBranch icon, open position badge
+- Updated page.tsx: Added OptionsTab rendering
+- Production build: 30 routes compiled (25 existing + 5 options), 0 errors
+
+Stage Summary:
+- Phase 1: Option Chain + BUY/SELL with premium, lot size, SL, TP — DONE
+- Phase 2: Strategy builder (Straddle, Strangle, Iron Condor, Covered Call, Calendar) — DONE
+- Phase 3: Options analytics (OI sentiment, P&L by strategy, Greeks risk) — DONE
+- Greeks-based SL/TP: Theta decay buffer (1.5x × min(DTE,5)), Gamma adverse move buffer (0.5 × gamma × (2%×spot)²), Delta-adjusted TP
+- 23 Indian instruments with correct lot sizes
+- All API calls use safe .catch(() => null) pattern

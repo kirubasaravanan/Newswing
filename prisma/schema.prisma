@@ -252,3 +252,58 @@ model WatchlistFolder {
   createdAt     DateTime @default(now())
   stocks        WatchlistStock[]
 }
+
+model OptionTrade {
+  id            String   @id @default(cuid())
+  symbol        String
+  underlyingPrice Float
+  optionType    String
+  action        String
+  strikePrice   Float
+  expiryDate    String
+  lotSize       Int
+  qty           Int
+  entryPremium  Float
+  currentPremium Float?
+  stopLoss      Float?
+  takeProfit    Float?
+  status        String   @default("OPEN")
+  entryDate     DateTime @default(now())
+  exitDate      DateTime?
+  exitPremium   Float?
+  pnl           Float?
+  pnlPercent    Float?
+  marginUsed    Float?
+  strategyId    String?
+  strategy      OptionStrategy? @relation(fields: [strategyId], references: [id])
+  entryDelta    Float?
+  entryGamma    Float?
+  entryTheta    Float?
+  entryVega     Float?
+  entryIV       Float?
+  slReasoning   String?
+  tpReasoning   String?
+  exitReason    String?
+  notes         String?
+  tags          String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model OptionStrategy {
+  id            String   @id @default(cuid())
+  name          String
+  symbol        String
+  underlyingPrice Float
+  status        String   @default("OPEN")
+  totalMargin   Float
+  totalPnl      Float   @default(0)
+  legs          String
+  entryDate     DateTime @default(now())
+  exitDate      DateTime?
+  expiryDate    String
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  trades        OptionTrade[]
+}

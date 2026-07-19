@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type AppTab = 'dashboard' | 'holdings' | 'auto-trade' | 'scanner' | 'journal' | 'analytics' | 'backtest' | 'settings';
+export type AppTab = 'dashboard' | 'holdings' | 'options' | 'auto-trade' | 'scanner' | 'journal' | 'analytics' | 'backtest' | 'settings';
 
 interface TradeStore {
   activeTab: AppTab;
@@ -13,6 +13,11 @@ interface TradeStore {
   setLastScanTime: (t: string | null) => void;
   config: any;
   setConfig: (c: any) => void;
+  // Options state
+  optionTrades: any[];
+  setOptionTrades: (trades: any[]) => void;
+  optionStrategies: any[];
+  setOptionStrategies: (strategies: any[]) => void;
 }
 
 export const useTradeStore = create<TradeStore>((set) => ({
@@ -37,4 +42,9 @@ export const useTradeStore = create<TradeStore>((set) => ({
     minTurnoverCr: 25.0,
   },
   setConfig: (c) => set((state) => ({ config: { ...state.config, ...c } })),
+  // Options state
+  optionTrades: [] as any[],
+  optionStrategies: [] as any[],
+  setOptionTrades: (trades: any[]) => set({ optionTrades: trades }),
+  setOptionStrategies: (strategies: any[]) => set({ optionStrategies: strategies }),
 }));

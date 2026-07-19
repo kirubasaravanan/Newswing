@@ -3,7 +3,7 @@
 import { useTradeStore, type AppTab } from '@/store/trade-store';
 import {
   LayoutDashboard, Briefcase, Bot, Radar, BookOpen, BarChart3, LineChart, Settings,
-  Menu, X, Wifi, WifiOff, Shield,
+  Menu, X, Wifi, WifiOff, Shield, GitBranch,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState, useEffect } from 'react';
@@ -11,6 +11,7 @@ import { useState, useEffect } from 'react';
 const NAV_ITEMS: { id: AppTab; label: string; icon: React.ElementType; badge?: string }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'holdings', label: 'Holdings', icon: Briefcase },
+  { id: 'options', label: 'Options', icon: GitBranch },
   { id: 'auto-trade', label: 'Auto Trade', icon: Bot },
   { id: 'scanner', label: 'Scanner', icon: Radar },
   { id: 'journal', label: 'Journal', icon: BookOpen },
@@ -26,14 +27,16 @@ export function Sidebar() {
   const [openCount, setOpenCount] = useState(0);
   const [universeCount, setUniverseCount] = useState(0);
   const [schedulerArmed, setSchedulerArmed] = useState(false);
+  const [optionCount, setOptionCount] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     const fetchData = async () => {
       try {
-        const [statusRes, tradesRes] = await Promise.all([
+        const [statusRes, tradesRes, optPosRes] = await Promise.all([
           fetch('/api/data-status').catch(() => null),
           fetch('/api/trades').catch(() => null),
+          fetch('/api/options/positions').catch(() => null),
         ]);
         if (cancelled) return;
         if (statusRes?.ok) {
@@ -43,6 +46,10 @@ export function Sidebar() {
         if (tradesRes?.ok) {
           const trades = await tradesRes.json();
           if (trades.success) setOpenCount((trades.trades || []).filter((t: any) => t.status === 'OPEN').length);
+        }
+        if (optPosRes?.ok && !cancelled) {
+          const optData = await optPosRes.json();
+          if (optData.success) setOptionCount(optData.summary?.positionCount || 0);
         }
         try {
           const { getUniverseStats } = await import('@/lib/trading/universe-scanner');
@@ -84,6 +91,11 @@ export function Sidebar() {
             {item.id === 'holdings' && openCount > 0 && (
               <span className="ml-auto hidden h-5 min-w-5 items-center justify-center rounded-full bg-indigo-500/20 px-1.5 text-[10px] font-bold text-indigo-400 lg:flex">
                 {openCount}
+              </span>
+            )}
+            {item.id === 'options' && optionCount > 0 && (
+              <span className="ml-auto hidden h-5 min-w-5 items-center justify-center rounded-full bg-indigo-500/20 px-1.5 text-[10px] font-bold text-indigo-400 lg:flex">
+                {optionCount}
               </span>
             )}
             {item.id === 'auto-trade' && schedulerArmed && (
