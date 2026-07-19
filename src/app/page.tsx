@@ -10,6 +10,7 @@ import { AnalyticsTab } from '@/components/trading/analytics-tab';
 import { BacktestTab } from '@/components/trading/backtest-tab';
 import { AutoTradeTab } from '@/components/trading/auto-trade-tab';
 import { SettingsTab } from '@/components/trading/settings-tab';
+import { TabGuard } from '@/components/error-boundary';
 import { useTradeStore } from '@/store/trade-store';
 import type { ScreeningResult } from '@/lib/trading/screening-engine';
 
@@ -29,14 +30,14 @@ export default function Home() {
       <Sidebar />
       <main className="pl-16 lg:pl-56">
         <div className="mx-auto max-w-7xl px-4 pt-16 pb-6 lg:px-8 lg:pt-8 lg:pb-8">
-          {activeTab === 'dashboard' && <DashboardTab />}
-          {activeTab === 'holdings' && <HoldingsTab />}
-          {activeTab === 'auto-trade' && <AutoTradeTab />}
-          {activeTab === 'scanner' && <ScreenerTab onAddPaperTrade={handleAddPaperTrade} />}
-          {activeTab === 'journal' && <JournalTab prefillTrade={prefillTrade} onPrefillConsumed={consumePrefill} />}
-          {activeTab === 'analytics' && <AnalyticsTab />}
-          {activeTab === 'backtest' && <BacktestTab />}
-          {activeTab === 'settings' && <SettingsTab />}
+          {activeTab === 'dashboard' && <TabGuard><DashboardTab /></TabGuard>}
+          {activeTab === 'holdings' && <TabGuard><HoldingsTab /></TabGuard>}
+          {activeTab === 'auto-trade' && <TabGuard><AutoTradeTab /></TabGuard>}
+          {activeTab === 'scanner' && <TabGuard><ScreenerTab onAddPaperTrade={handleAddPaperTrade} /></TabGuard>}
+          {activeTab === 'journal' && <TabGuard><JournalTab prefillTrade={prefillTrade} onPrefillConsumed={consumePrefill} /></TabGuard>}
+          {activeTab === 'analytics' && <TabGuard><AnalyticsTab /></TabGuard>}
+          {activeTab === 'backtest' && <TabGuard><BacktestTab /></TabGuard>}
+          {activeTab === 'settings' && <TabGuard><SettingsTab /></TabGuard>}
         </div>
       </main>
     </div>

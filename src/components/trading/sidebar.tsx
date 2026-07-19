@@ -28,32 +28,39 @@ export function Sidebar() {
   const [schedulerArmed, setSchedulerArmed] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     const fetchData = async () => {
       try {
         const [statusRes, tradesRes] = await Promise.all([
-          fetch('/api/data-status'),
-          fetch('/api/trades'),
+          fetch('/api/data-status').catch(() => null),
+          fetch('/api/trades').catch(() => null),
         ]);
-        const status = await statusRes.json();
-        const trades = await tradesRes.json();
-        if (status.success) setYahooOk(status.yahoo?.available ?? null);
-        if (trades.success) setOpenCount((trades.trades || []).filter((t: any) => t.status === 'OPEN').length);
+        if (cancelled) return;
+        if (statusRes?.ok) {
+          const status = await statusRes.json();
+          if (status.success) setYahooOk(status.yahoo?.available ?? null);
+        }
+        if (tradesRes?.ok) {
+          const trades = await tradesRes.json();
+          if (trades.success) setOpenCount((trades.trades || []).filter((t: any) => t.status === 'OPEN').length);
+        }
         try {
           const { getUniverseStats } = await import('@/lib/trading/universe-scanner');
           const stats = getUniverseStats();
-          setUniverseCount(stats.total);
+          if (!cancelled) setUniverseCount(stats.total);
         } catch { /* skip */ }
-        // Check if scheduler is armed
         try {
-          const atRes = await fetch('/api/auto-trade');
-          const atData = await atRes.json();
-          if (atData.success) setSchedulerArmed(atData.scheduler?.enabled || false);
+          const atRes = await fetch('/api/auto-trade').catch(() => null);
+          if (atRes?.ok && !cancelled) {
+            const atData = await atRes.json();
+            if (atData.success) setSchedulerArmed(atData.scheduler?.enabled || false);
+          }
         } catch { /* skip */ }
       } catch { /* ignore */ }
     };
     fetchData();
-    const iv = setInterval(fetchData, 30000); // Faster refresh for PMS
-    return () => clearInterval(iv);
+    const iv = setInterval(fetchData, 30000);
+    return () => { cancelled = true; clearInterval(iv); };
   }, []);
 
   const navContent = (
