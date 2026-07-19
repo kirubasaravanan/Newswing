@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { z } from 'zod';
 import { getCurrentPrice } from '@/lib/trading/data-provider';
+
+const createAlertSchema = z.object({
+  symbol: z.string().min(1).max(20),
+  condition: z.enum(['ABOVE', 'BELOW']),
+  targetPrice: z.coerce.number().positive('Target price must be positive'),
+  notes: z.string().max(200).optional(),
+});
 
 // GET /api/portfolio/alerts — list all alerts
 export async function GET() {
@@ -19,21 +27,25 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { symbol, condition, targetPrice, notes } = body;
-    if (!symbol || !condition || !targetPrice) {
-      return NextResponse.json({ success: false, error: 'symbol, condition, targetPrice required' }, { status: 400 });
+    const parsed = createAlertSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { success: false, error: 'Validation failed', details: parsed.error.flatten().fieldErrors },
+        { status: 400 }
+      );
     }
     const alert = await db.priceAlert.create({
       data: {
-        symbol: symbol.toUpperCase(),
-        condition, // ABOVE / BELOW
-        targetPrice: parseFloat(targetPrice),
-        notes: notes || null,
+        symbol: parsed.data.symbol.toUpperCase(),
+        condition: parsed.data.condition,
+        targetPrice: parsed.data.targetPrice,
+        notes: parsed.data.notes || null,
       },
     });
     return NextResponse.json({ success: true, alert });
-  } catch (error) {
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
 
@@ -67,7 +79,7 @@ export async function PUT() {
       } catch { /* skip */ }
     }
 
-    const triggered: any[] = [];
+    const triggered: Array<{ id: string; symbol: string; condition: string; targetPrice: number; currentPrice: number; notes: string | null }> = [];
     for (const alert of activeAlerts) {
       const price = priceMap[alert.symbol];
       if (!price) continue;
@@ -81,12 +93,13 @@ export async function PUT() {
           where: { id: alert.id },
           data: { triggered: true, triggeredAt: new Date(), triggeredPrice: price },
         });
-        triggered.push({ ...alert, currentPrice: price });
+        triggered.push({ id: alert.id, symbol: alert.symbol, condition: alert.condition, targetPrice: alert.targetPrice, currentPrice: price, notes: alert.notes });
       }
     }
 
     return NextResponse.json({ success: true, triggered });
-  } catch (error) {
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { z } from 'zod';
-import { blackScholes, impliedVolatility, calculateGreeksSL, getOptionLotSize, timeToExpiryYears, daysToExpiry as dte, getDividendYield } from '@/lib/options/black-scholes';
+import { createOptionTrade, closeOptionTrade } from '@/services/options.service';
 
 // ── Zod Schemas ───────────────────────────────────────────────
 
@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const status = searchParams.get('status');
 
-    const where: any = {};
+    const where: Record<string, string> = {};
     if (status && status !== 'ALL') {
       where.status = status;
     }
@@ -46,12 +46,13 @@ export async function GET(request: NextRequest) {
     });
 
     return NextResponse.json({ success: true, trades });
-  } catch (error) {
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
 
-// POST create new option trade
+// POST create new option trade (delegates to service)
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -63,102 +64,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const {
-      symbol, optionType, action, strikePrice, expiryDate,
-      lotSize, qty, entryPremium,
-      stopLoss, takeProfit, notes, tags,
-      underlyingPrice, strategyId,
-    } = parsed.data;
-
-    // Get spot price
-    const spot = underlyingPrice || 0;
-    const r = 0.07;
-    const T = timeToExpiryYears(expiryDate);
-    const d = dte(expiryDate);
-
-    // Calculate Greeks from premium (with dividend yield for stocks)
-    let iv: number;
-    const q = getDividendYield(symbol);
-    try {
-      iv = impliedVolatility(spot, strikePrice, T, r, entryPremium, optionType);
-    } catch {
-      iv = 0.15; // fallback
-    }
-
-    const bs = blackScholes(spot, strikePrice, T, r, iv, optionType, q);
-
-    // Auto-calculate SL/TP if not provided
-    let sl = stopLoss;
-    let tp = takeProfit;
-    let slReasoning: string | undefined;
-    let tpReasoning: string | undefined;
-    let marginUsed: number | undefined;
-
-    if (!sl || !tp) {
-      const slResult = calculateGreeksSL({
-        entryPremium,
-        delta: bs.delta,
-        gamma: bs.gamma,
-        theta: bs.theta,
-        vega: bs.vega,
-        iv,
-        daysToExpiry: d,
-        strike: strikePrice,
-        spot,
-        action,
-        lotSize: lotSize || getOptionLotSize(symbol),
-        qty: qty || 1,
-        underlyingSymbol: symbol,
-        optionType,
-      });
-
-      if (!sl) sl = slResult.stopLoss;
-      if (!tp) tp = slResult.takeProfit;
-      slReasoning = slResult.slReasoning;
-      tpReasoning = slResult.tpReasoning;
-      marginUsed = slResult.marginEstimate;
-    } else {
-      // Simple margin estimate
-      const totalShares = (lotSize || getOptionLotSize(symbol)) * (qty || 1);
-      marginUsed = action === 'BUY'
-        ? entryPremium * totalShares
-        : entryPremium * totalShares * 3;
-    }
-
-    const trade = await db.optionTrade.create({
-      data: {
-        symbol,
-        underlyingPrice: spot,
-        optionType,
-        action,
-        strikePrice: parseFloat(strikePrice),
-        expiryDate,
-        lotSize: lotSize || getOptionLotSize(symbol),
-        qty: qty || 1,
-        entryPremium: parseFloat(entryPremium),
-        stopLoss: sl ? parseFloat(sl) : null,
-        takeProfit: tp ? parseFloat(tp) : null,
-        entryDelta: bs.delta,
-        entryGamma: bs.gamma,
-        entryTheta: bs.theta,
-        entryVega: bs.vega,
-        entryIV: iv,
-        slReasoning,
-        tpReasoning,
-        marginUsed,
-        notes: notes || null,
-        tags: tags || null,
-        strategyId: strategyId || null,
-      },
-    });
-
+    const trade = await createOptionTrade(parsed.data);
     return NextResponse.json({ success: true, trade });
-  } catch (error) {
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
 
-// PUT close a trade
+// PUT close a trade (delegates to service with transaction)
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json();
@@ -169,35 +83,15 @@ export async function PUT(request: NextRequest) {
         { status: 400 }
       );
     }
-    const { id, exitPremium, exitReason } = parsed.data;
 
-    const trade = await db.optionTrade.findUnique({ where: { id } });
-    if (!trade) {
+    const updated = await closeOptionTrade(parsed.data);
+    return NextResponse.json({ success: true, trade: updated });
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'Trade not found') {
       return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
     }
-
-    const exitPrem = exitPremium || trade.currentPremium || trade.entryPremium;
-    const direction = trade.action === 'BUY' ? 1 : -1;
-    const pnl = (exitPrem - trade.entryPremium) * trade.qty * trade.lotSize * direction;
-    const pnlPct = trade.marginUsed && trade.marginUsed > 0
-      ? (pnl / trade.marginUsed) * 100
-      : 0;
-
-    const updated = await db.optionTrade.update({
-      where: { id },
-      data: {
-        status: exitReason === 'EXPIRED' ? 'EXPIRED' : exitReason === 'SL_HIT' ? 'SL_HIT' : exitReason === 'TP_HIT' ? 'TP_HIT' : 'CLOSED',
-        exitDate: new Date(),
-        exitPremium: parseFloat(exitPrem),
-        pnl: Math.round(pnl * 100) / 100,
-        pnlPercent: Math.round(pnlPct * 100) / 100,
-        exitReason: exitReason || 'MANUAL',
-      },
-    });
-
-    return NextResponse.json({ success: true, trade: updated });
-  } catch (error) {
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+    const msg = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
 
@@ -211,7 +105,8 @@ export async function DELETE(request: NextRequest) {
     }
     await db.optionTrade.delete({ where: { id } });
     return NextResponse.json({ success: true });
-  } catch (error) {
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }

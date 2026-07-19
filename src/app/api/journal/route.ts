@@ -1,5 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { z } from 'zod';
+
+const journalSchema = z.object({
+  tradeId: z.string().min(1, 'Trade ID required'),
+  mood: z.enum(['CONFIDENT', 'NEUTRAL', 'ANXIOUS', 'FOMO', 'GREED', 'FEAR']).optional().default('NEUTRAL'),
+  marketContext: z.string().max(500).optional(),
+  emotions: z.string().max(300).optional(),
+  lessonsLearned: z.string().max(1000).optional(),
+  rating: z.number().int().min(1).max(5).optional(),
+});
 
 // GET all journal entries
 export async function GET() {
@@ -9,8 +19,9 @@ export async function GET() {
       include: { trade: true },
     });
     return NextResponse.json({ success: true, entries });
-  } catch (error) {
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
 
@@ -18,35 +29,42 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { tradeId, mood, marketContext, emotions, lessonsLearned, rating } = body;
+    const parsed = journalSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { success: false, error: 'Validation failed', details: parsed.error.flatten().fieldErrors },
+        { status: 400 }
+      );
+    }
 
     // Verify trade exists
-    const trade = await db.paperTrade.findUnique({ where: { id: tradeId } });
+    const trade = await db.paperTrade.findUnique({ where: { id: parsed.data.tradeId } });
     if (!trade) {
       return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
     }
 
     const entry = await db.tradeJournalEntry.upsert({
-      where: { tradeId },
+      where: { tradeId: parsed.data.tradeId },
       create: {
-        tradeId,
-        mood: mood || 'NEUTRAL',
-        marketContext: marketContext || null,
-        emotions: emotions || null,
-        lessonsLearned: lessonsLearned || null,
-        rating: rating || null,
+        tradeId: parsed.data.tradeId,
+        mood: parsed.data.mood,
+        marketContext: parsed.data.marketContext || null,
+        emotions: parsed.data.emotions || null,
+        lessonsLearned: parsed.data.lessonsLearned || null,
+        rating: parsed.data.rating || null,
       },
       update: {
-        mood: mood || undefined,
-        marketContext: marketContext || undefined,
-        emotions: emotions || undefined,
-        lessonsLearned: lessonsLearned || undefined,
-        rating: rating || undefined,
+        mood: parsed.data.mood,
+        marketContext: parsed.data.marketContext ?? undefined,
+        emotions: parsed.data.emotions ?? undefined,
+        lessonsLearned: parsed.data.lessonsLearned ?? undefined,
+        rating: parsed.data.rating ?? undefined,
       },
     });
 
     return NextResponse.json({ success: true, entry });
-  } catch (error) {
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
