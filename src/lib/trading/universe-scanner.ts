@@ -114,7 +114,7 @@ export function runL1Filter(
   if (currentClose <= sma50) {
     return { ...baseResult, failReason: 'Below SMA 50' };
   }
-  if (rsi14 < 40 || rsi14 > 75) {
+  if (rsi14 < 35 || rsi14 > 80) {
     return { ...baseResult, failReason: `RSI ${rsi14.toFixed(1)} out of range` };
   }
   if (currentClose <= ema20) {
@@ -122,7 +122,7 @@ export function runL1Filter(
   }
 
   const adxRising = adx > prevAdx;
-  if (adx < 18 && !adxRising) {
+  if (adx < 14 && !adxRising) {
     return { ...baseResult, failReason: `Low ADX: ${adx.toFixed(1)}` };
   }
 

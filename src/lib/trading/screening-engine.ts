@@ -451,14 +451,12 @@ export function runBacktest(
         pos.partialTaken = true;
       }
 
-      // Trailing stop
+      // Trailing stop — only ratchet UP, never down
       if (pos.trailActive) {
-        const trailLow5 = Math.min(...lows.slice(Math.max(0, barIdx - 5), barIdx + 1));
-        const dynamicTrail = Math.max(
-          (ema10Full[barIdx] ?? pos.avgPrice) - (atr14Full[barIdx] ?? 0),
-          trailLow5
-        );
-        pos.blendedSL = Math.max(pos.blendedSL, pos.avgPrice, dynamicTrail);
+        const trailATR = atr14Full[barIdx] ?? 1;
+        const dynamicTrail = (ema10Full[barIdx] ?? pos.avgPrice) - (trailATR * 1.5);
+        // Only move SL up, never down
+        pos.blendedSL = Math.max(pos.blendedSL, dynamicTrail);
       }
 
       // SL hit
@@ -505,11 +503,16 @@ export function runBacktest(
     // Remove closed positions (and fully exited ones)
     openPositions = openPositions.filter((_, idx) => !closedIndices.includes(idx)).filter(p => p.totalQty > 0);
 
-    // Track equity
-    peakEquity = Math.max(peakEquity, capital);
-    const dd = ((peakEquity - capital) / peakEquity) * 100;
+    // Track equity (include unrealized P&L from open positions)
+    let unrealizedPnl = 0;
+    for (const pos of openPositions) {
+      unrealizedPnl += pos.totalQty * (bar.close - pos.avgPrice);
+    }
+    const totalEquity = capital + unrealizedPnl;
+    peakEquity = Math.max(peakEquity, totalEquity);
+    const dd = ((peakEquity - totalEquity) / peakEquity) * 100;
     maxDD = Math.max(maxDD, dd);
-    equityCurve.push({ date: bar.date, equity: Math.round(capital * 100) / 100 });
+    equityCurve.push({ date: bar.date, equity: Math.round(totalEquity * 100) / 100 });
 
     // Check for new entry (simplified - using previous bar's signal)
     if (barIdx < 2 || barIdx - lastTradeBar <= config.cooldownBars) continue;
@@ -528,14 +531,14 @@ export function runBacktest(
 
     if (!prevSMA200 || !prevEMA20 || !prevRSI || !prevATR || !prevADX) continue;
 
-    // Simplified confluence check (mirroring the screening logic)
+    // Simplified confluence check (mirroring the relaxed screening logic)
     const prevADX1 = adxFull[i1 - 1] ?? 0;
-    const trending = prevADX > 18 || (prevADX > prevADX1 && prevADX > 15);
+    const trending = prevADX > 15 || (prevADX > prevADX1 && prevADX > 12);
     const atrSma20 = calcSMA(atr14Full.slice(Math.max(0, i - 20), i).filter(v => v != null), 20);
-    const validVol = prevATR > atrSma20 * 0.6 && prevATR < atrSma20 * 1.8;
-    const notExt = prevCandle.close < prevEMA20 * 1.06;
+    const validVol = prevATR > atrSma20 * 0.4 && prevATR < atrSma20 * 2.5;
+    const notExt = prevCandle.close < prevEMA20 * 1.10;
 
-    // Nifty check
+    // Nifty regime check (fixed: Nifty close vs Nifty SMA200)
     let regimeSafe = true;
     if (niftyCandles.length >= 200) {
       const niftyIdx = Math.min(niftyCandles.length - 1, barIdx);
@@ -543,21 +546,21 @@ export function runBacktest(
       if (nifty200) regimeSafe = niftyCandles[niftyIdx].close > nifty200;
     }
 
-    // Only require 2 of 4 regime filters (instead of all 4)
-    const regimePassCount = [trending, validVol, notExt, regimeSafe].filter(Boolean).length;
-    if (regimePassCount < 2) continue;
+    // Require 3 of 5 regime filters (relaxed)
+    const regimePassCount = [trending, validVol, notExt, regimeSafe, prevCandle.close > prevEMA20].filter(Boolean).length;
+    if (regimePassCount < 3) continue;
 
-    // Score calculation on prev bar
+    // Score calculation on prev bar (relaxed to match screening engine)
     let score = 0;
-    if (prevCandle.close > prevSMA200 && prevRSI > 52) score++;
-    const low4 = Math.min(...lows.slice(Math.max(0, i1 - 4), i1 + 1));
-    if (low4 < prevEMA20 * 1.02 && prevCandle.close > prevEMA20) score++;
-    if (prevCandle.close > candles[i1 - 1]?.high) score++;
+    if (prevCandle.close > prevSMA200 && prevRSI > 45) score++;
+    const low5 = Math.min(...lows.slice(Math.max(0, i1 - 5), i1 + 1));
+    if (low5 < prevEMA20 * 1.04 && prevCandle.close > prevEMA20 * 0.98) score++;
+    if (prevCandle.close > (candles[i1 - 1]?.high ?? 0)) score++;
     const vm = calcSMA(volumes.slice(Math.max(0, i1 - 20), i1 + 1), 20);
-    if (prevCandle.volume > vm * 1.05) score++;
+    if (prevCandle.volume > vm * 0.9) score++;
     
-    const gapPct = Math.abs(prevCandle.open - candles[i1 - 1]?.close) / (candles[i1 - 1]?.close || 1) * 100;
-    if (gapPct < 3.5) score++;
+    const gapPct = Math.abs(prevCandle.open - (candles[i1 - 1]?.close ?? prevCandle.close)) / (candles[i1 - 1]?.close || 1) * 100;
+    if (gapPct < 5.0) score++;
 
     // Score 6: Relative Strength (vs Nifty)
     if (niftyCandles.length >= 25) {
@@ -586,8 +589,8 @@ export function runBacktest(
 
     if (score >= config.minScore) {
       const theoreticalEP = Math.max(bar.open, prevCandle.high);
-      const stopLow5 = Math.min(...lows.slice(Math.max(0, i - 5), i));
-      const rawSL = stopLow5 - (prevATR * 0.8);
+      const stopLow10 = Math.min(...lows.slice(Math.max(0, i - 10), i));
+      const rawSL = stopLow10 - (prevATR * 0.5);
       const riskPerShare = theoreticalEP - rawSL;
 
       if (riskPerShare <= 0) continue;
@@ -597,18 +600,18 @@ export function runBacktest(
       if (rr < config.minRR && score < 6) continue;
 
       // Size calculation
-      const ddPenalty = Math.max(0.25, Math.min(1.0, 1.0 - (maxDD / 20.0)));
-      const baseRisk = score === 6 ? riskPct : riskPct * 0.5;
+      const ddPenalty = Math.max(0.5, Math.min(1.0, 1.0 - (maxDD / 25.0)));
+      const baseRisk = score >= 5 ? riskPct : riskPct * 0.6;
       const appliedRisk = baseRisk * ddPenalty;
       const maxRisk = capital * (appliedRisk / 100);
       
       const qtyRisk = Math.floor(maxRisk / riskPerShare);
-      const slotMultiplier = score === 6 ? 1.0 : 0.6;
+      const slotMultiplier = score >= 5 ? 1.0 : 0.6;
       const targetAlloc = (capital / maxSlots) * slotMultiplier;
       const qtyCap = Math.floor(targetAlloc / theoreticalEP);
       const qty = Math.max(1, Math.min(qtyRisk, qtyCap));
 
-      const tp1 = theoreticalEP + (riskPerShare * 1.5);
+      const tp1 = theoreticalEP + (riskPerShare * 2.0);
 
       if (capital < qty * theoreticalEP) continue;
 
