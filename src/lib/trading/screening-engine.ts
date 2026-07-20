@@ -39,12 +39,12 @@ export const DEFAULT_CONFIG: ScreeningConfig = {
   riskPct: 1.0,
   maxSlots: 8,
   maxOpenTrades: 3,
-  maxHoldBars: 25,
-  minScore: 2,
-  minRR: 1.0,
-  cooldownBars: 0,
+  maxHoldBars: 30,
+  minScore: 3,
+  minRR: 0.8,
+  cooldownBars: 3,
   useMacro: true,
-  minTurnoverCr: 25.0,
+  minTurnoverCr: 5.0,
 };
 
 export interface ConfluenceScores {
@@ -170,21 +170,24 @@ export function runScreening(
   // ── ADX / Trending check ──────────────────────────────
   const prevAdx = get(adx, i1, 0);
   const adxRising = adx[i]! > prevAdx;
-  const adxHealthy = adx[i]! > 15;
-  const marketTrending = (adx[i]! > 18) || (adxRising && adxHealthy);
+  const adxHealthy = adx[i]! > 12;
+  const marketTrending = (adx[i]! > 15) || (adxRising && adxHealthy);
 
   // ── Volatility check ───────────────────────────────────
-  const volLo = marketTrending ? 0.6 : 0.8;
-  const volHi = marketTrending ? 1.8 : 1.3;
+  const volLo = 0.4;
+  const volHi = marketTrending ? 2.5 : 2.0;
   const validVolatility = currentAtr > (atrSma20 * volLo) && currentAtr < (atrSma20 * volHi);
 
   // ── Macro / Nifty check ────────────────────────────────
+  // BUG FIX: Was comparing stock close against Nifty SMA200.
+  // Correct: compare Nifty close against Nifty SMA200 (bullish regime).
   let regimeSafe = true;
   if (config.useMacro && niftyCandles.length >= 200) {
     const niftyCloses = niftyCandles.map(c => c.close);
     const nifty200Arr = SMA.calculate({ period: 200, values: niftyCloses });
     const nifty200 = nifty200Arr[nifty200Arr.length - 1];
-    regimeSafe = nifty200 != null && currentClose > nifty200;
+    const niftyClose = niftyCloses[niftyCloses.length - 1];
+    regimeSafe = nifty200 != null && niftyClose > nifty200;
   }
 
   // ── Liquidity check ────────────────────────────────────
@@ -200,23 +203,23 @@ export function runScreening(
   const minLiquidityCheck = currentVolume > volMA20;
 
   // ── Not extended check ─────────────────────────────────
-  const notExtended = currentClose < (ema20[i]! * 1.06);
+  const notExtended = currentClose < (ema20[i]! * 1.10);
 
   // ── Confluence Scores (exact Pine Script logic) ────────
 
-  // Score 1: Trend
-  const scoreTrend = (currentClose > sma200[i]! && rsi14[i]! > 52) ? 1 : 0;
+  // Score 1: Trend (relaxed: RSI > 45 instead of > 52)
+  const scoreTrend = (currentClose > sma200[i]! && rsi14[i]! > 45) ? 1 : 0;
 
-  // Score 2: Pullback
-  const lowest4 = Math.min(...lows.slice(Math.max(0, i - 4), i + 1));
-  const scorePullback = (lowest4 < ema20[i]! * 1.02 && currentClose > ema20[i]!) ? 1 : 0;
+  // Score 2: Pullback (relaxed: allow 4% below EMA20, close above OR near EMA20)
+  const lowest5 = Math.min(...lows.slice(Math.max(0, i - 5), i + 1));
+  const scorePullback = (lowest5 < ema20[i]! * 1.04 && currentClose > ema20[i]! * 0.98) ? 1 : 0;
 
   // Score 3: Trigger
   const scoreTrigger = currentClose > prevHigh ? 1 : 0;
 
-  // Score 4: Volume
+  // Score 4: Volume (relaxed: current OR yesterday above 0.9x average)
   const prevVolMA20 = calcSMA(volumes.slice(Math.max(0, i1 - 20), i1 + 1), 20);
-  const scoreVolume = (currentVolume > volMA20 * 1.05 || get(volumes, i1, 0) > prevVolMA20 * 1.1) ? 1 : 0;
+  const scoreVolume = (currentVolume > volMA20 * 0.9 || get(volumes, i1, 0) > prevVolMA20 * 0.9) ? 1 : 0;
 
   // Score 5: Relative Strength (vs Nifty)
   let scoreRS = 0;
@@ -239,20 +242,21 @@ export function runScreening(
     }
   }
 
-  // Score 6: Gap
+  // Score 6: Gap (relaxed: allow up to 5% gap)
   const prevClose = get(closes, i1, currentClose);
   const gapPct = Math.abs(currentOpen - prevClose) / prevClose * 100;
-  const scoreGap = gapPct < 3.5 ? 1 : 0;
+  const scoreGap = gapPct < 5.0 ? 1 : 0;
 
   const totalScore = scoreTrend + scorePullback + scoreTrigger + scoreVolume + scoreRS + scoreGap;
 
-  // ── Regime Clear check ─────────────────────────────────
-  const regimeClear = regimeSafe && liquid && minLiquidityCheck && marketTrending && validVolatility && notExtended;
+  // ── Regime Clear check (relaxed: require 4 of 6 filters, NOT all)
+  const filterPasses = [regimeSafe, liquid, minLiquidityCheck, marketTrending, validVolatility, notExtended].filter(Boolean).length;
+  const regimeClear = filterPasses >= 4;
 
   // ── Entry / SL / TP calculation ────────────────────────
   const theoreticalEP = Math.max(currentOpen, prevHigh);
-  const stopLow5 = Math.min(...lows.slice(Math.max(0, i - 5), i));
-  const rawSL = stopLow5 - (get(atr14, i1, currentAtr) * 0.8);
+  const stopLow10 = Math.min(...lows.slice(Math.max(0, i - 10), i));
+  const rawSL = stopLow10 - (get(atr14, i1, currentAtr) * 0.5);
   const riskPerShare = theoreticalEP - rawSL;
 
   if (riskPerShare <= 0) return null;
@@ -282,9 +286,9 @@ export function runScreening(
   if (totalScore < config.minScore) return null;
   if (!regimeClear) return null;
 
-  // Strong momentum check (gap < 5% for score 6)
-  const strongMomentum = totalScore === 6 && gapPct < 5.0;
-  const withinGap = currentOpen <= (prevHigh * 1.03);
+  // Gap-up limit: allow up to 5% gap (relaxed from 3%)
+  const strongMomentum = totalScore >= 5 && gapPct < 6.0;
+  const withinGap = currentOpen <= (prevHigh * 1.05);
   if (!withinGap && !strongMomentum) return null;
 
   return {
