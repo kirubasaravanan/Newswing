@@ -40,9 +40,9 @@ export const DEFAULT_CONFIG: ScreeningConfig = {
   maxSlots: 8,
   maxOpenTrades: 3,
   maxHoldBars: 25,
-  minScore: 3,
-  minRR: 1.5,
-  cooldownBars: 1,
+  minScore: 2,
+  minRR: 1.0,
+  cooldownBars: 0,
   useMacro: true,
   minTurnoverCr: 25.0,
 };
@@ -539,7 +539,9 @@ export function runBacktest(
       if (nifty200) regimeSafe = niftyCandles[niftyIdx].close > nifty200;
     }
 
-    if (!trending || !validVol || !notExt || !regimeSafe) continue;
+    // Only require 2 of 4 regime filters (instead of all 4)
+    const regimePassCount = [trending, validVol, notExt, regimeSafe].filter(Boolean).length;
+    if (regimePassCount < 2) continue;
 
     // Score calculation on prev bar
     let score = 0;
@@ -552,6 +554,31 @@ export function runBacktest(
     
     const gapPct = Math.abs(prevCandle.open - candles[i1 - 1]?.close) / (candles[i1 - 1]?.close || 1) * 100;
     if (gapPct < 3.5) score++;
+
+    // Score 6: Relative Strength (vs Nifty)
+    if (niftyCandles.length >= 25) {
+      const niftyIdx = Math.min(niftyCandles.length - 1, i1);
+      const niftyClose = niftyCandles[niftyIdx]?.close ?? 0;
+      if (niftyClose > 0) {
+        const rsWindow = Math.min(25, i1 + 1, niftyCandles.length);
+        const rsStart = Math.max(0, i1 - rsWindow + 1);
+        const niftyStart = Math.max(0, niftyIdx - rsWindow + 1);
+        const rsValues: number[] = [];
+        for (let j = 0; j < rsWindow; j++) {
+          const cj = rsStart + j;
+          const nj = niftyStart + j;
+          if (closes[cj] && niftyCandles[nj]?.close) {
+            rsValues.push(closes[cj] / niftyCandles[nj].close);
+          }
+        }
+        if (rsValues.length > 5) {
+          const rsMA = calcSMA(rsValues, 20);
+          const currentRS = rsValues[rsValues.length - 1];
+          const rs5ago = rsValues[rsValues.length - 6];
+          if (currentRS > rsMA || currentRS > rs5ago) score++;
+        }
+      }
+    }
 
     if (score >= config.minScore) {
       const theoreticalEP = Math.max(bar.open, prevCandle.high);
