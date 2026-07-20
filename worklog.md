@@ -188,3 +188,24 @@ Stage Summary:
 - Greeks-based SL/TP: Theta decay buffer (1.5x × min(DTE,5)), Gamma adverse move buffer (0.5 × gamma × (2%×spot)²), Delta-adjusted TP
 - 23 Indian instruments with correct lot sizes
 - All API calls use safe .catch(() => null) pattern
+---
+Task ID: 1-7
+Agent: main
+Task: Component decomposition check + NSE India free data source integration
+
+Work Log:
+- Verified component decomposition was already done in a previous session (options/, auto-trade/, analytics/ directories exist with well-structured sub-components)
+- Created src/lib/nse-data.ts — NSE India API client with session management, cookie handling, rate limiting (1.5s between calls), expiry normalization, and 5s timeout
+- Modified src/lib/options/option-chain.ts to try NSE live data first (real premiums, OI, volume, IV, bid/ask) with graceful fallback to theoretical BSM pricing. Added buildChainFromNSE() function.
+- Updated src/components/trading/options/types.ts — added ChainLeg type, changeInOI/pChangeInOI fields, dataSource, lotSize, pcr, maxPain to ChainData
+- Updated src/components/trading/options/options-chain-tab.tsx — added NSE Live/Theoretical BSM badge, per-lot price columns, Change in OI columns, PCR/Max Pain summary bar, lot size display
+- Updated src/components/trading/options/new-trade-tab.tsx — loads lotSize from API response, prefill passes lotSize
+- Verified TypeScript compilation (no errors in modified files) and Next.js build (successful)
+- Committed and pushed to GitHub
+
+Stage Summary:
+- Component decomposition: Already complete from previous session
+- NSE India integration: Fully implemented with server-side proxying (avoids CORS), session management, and theoretical fallback
+- Key files: src/lib/nse-data.ts (new), src/lib/options/option-chain.ts (modified), options-chain-tab.tsx (modified), types.ts (modified), new-trade-tab.tsx (modified)
+- Pushed to https://github.com/kirubasaravanan/Newswing.git (commit cd5404a)
+
