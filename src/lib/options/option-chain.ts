@@ -217,7 +217,7 @@ const STOCKS_WITH_WEEKLY_OPTIONS = new Set([
   'SBILIFE', 'DIVISLAB', 'DRREDDY', 'CIPLA', 'EICHERMOT', 'HEROMOTOCO',
   'ULTRACEMCO', 'NESTLEIND', 'BPCL', 'POWERGRID', 'NTPC', 'COALINDIA',
   'ONGC', 'IOC', 'HPCL', 'GRASIM', 'INDUSINDBK', 'TATACONSUM',
-  'BAJAJFINSV', 'M_M', 'DIXON', 'VEDL', 'HAL', 'BEL',
+  'BAJAJFINSV', 'M&M', 'DIXON', 'VEDL', 'HAL', 'BEL',
 ]);
 
 function hasWeeklyOptions(symbol: string): boolean {

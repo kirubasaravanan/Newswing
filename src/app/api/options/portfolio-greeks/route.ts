@@ -54,7 +54,7 @@ export async function GET() {
       try {
         spot = await fetchSpotPrice(trade.symbol);
       } catch {
-        spot = trade.strike; // Fallback to strike
+        spot = trade.strikePrice; // Fallback to strike
       }
 
       const T = timeToExpiryYears(trade.expiryDate);
@@ -77,6 +77,7 @@ export async function GET() {
       netGamma += positionGamma;
       netTheta += positionTheta;
       netVega += positionVega;
+      totalLots += trade.qty; // Track total lots for per-lot delta
 
       // Margin: BUY = premium × shares, SELL = margin estimate
       if (isBuy) {
@@ -88,11 +89,11 @@ export async function GET() {
       // Track largest theta/vega positions
       if (Math.abs(positionTheta) > largestThetaAbs) {
         largestThetaAbs = Math.abs(positionTheta);
-        largestThetaPos = `${trade.action} ${trade.qty}x ${trade.symbol} ${trade.strike}${trade.optionType}`;
+        largestThetaPos = `${trade.action} ${trade.qty}x ${trade.symbol} ${trade.strikePrice}${trade.optionType}`;
       }
       if (Math.abs(positionVega) > largestVegaAbs) {
         largestVegaAbs = Math.abs(positionVega);
-        largestVegaPos = `${trade.action} ${trade.qty}x ${trade.symbol} ${trade.strike}${trade.optionType}`;
+        largestVegaPos = `${trade.action} ${trade.qty}x ${trade.symbol} ${trade.strikePrice}${trade.optionType}`;
       }
     }
 

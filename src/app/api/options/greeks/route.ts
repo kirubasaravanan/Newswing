@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
 
     if (premium > 0) {
       try {
-        iv = impliedVolatility(spot, strike, T, r, premium, type);
+        iv = impliedVolatility(spot, strike, T, r, premium, type).iv;
       } catch {
         iv = 0.15;
       }

@@ -66,6 +66,10 @@ export function blackScholes(
   type: 'CE' | 'PE',
   q: number = 0
 ): BlackScholesResult {
+  // Guard against NaN/Infinity from bad data
+  if (!isFinite(S) || !isFinite(K) || !isFinite(sigma) || !isFinite(T) || !isFinite(r)) {
+    return { premium: 0, delta: 0, gamma: 0, theta: 0, vega: 0, iv: sigma };
+  }
   if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) {
     // At expiry or invalid: intrinsic value only
     const intrinsic = type === 'CE' ? Math.max(S - K, 0) : Math.max(K - S, 0);
@@ -121,6 +125,16 @@ export function blackScholes(
 /**
  * Solve for IV given market price using Newton-Raphson.
  */
+export interface IVResult {
+  iv: number;
+  converged: boolean;
+  iterations: number;
+}
+
+/**
+ * Solve for IV given market price using Newton-Raphson.
+ * Returns both the IV and whether the solver converged.
+ */
 export function impliedVolatility(
   S: number,
   K: number,
@@ -130,17 +144,28 @@ export function impliedVolatility(
   type: 'CE' | 'PE',
   maxIterations: number = 50,
   tolerance: number = 1e-6
-): number {
-  // Initial guess: use a simple approximation
-  let sigma = 0.3; // 30% starting guess
+): IVResult {
+  // Guard against invalid inputs
+  if (!isFinite(S) || !isFinite(K) || !isFinite(marketPrice) || S <= 0 || K <= 0 || marketPrice <= 0 || T <= 0) {
+    return { iv: 0.15, converged: false, iterations: 0 };
+  }
+
+  // If market price is below intrinsic value, IV is effectively infinite
+  const intrinsic = type === 'CE' ? Math.max(S - K, 0) : Math.max(K - S, 0);
+  if (marketPrice < intrinsic) {
+    return { iv: 0.01, converged: false, iterations: 0 };
+  }
+
+  // Initial guess
+  let sigma = 0.3;
 
   for (let i = 0; i < maxIterations; i++) {
     const result = blackScholes(S, K, T, r, sigma, type);
     const diff = result.premium - marketPrice;
 
-    // If close enough, return
+    // If close enough, return converged
     if (Math.abs(diff) < tolerance) {
-      return sigma;
+      return { iv: sigma, converged: true, iterations: i + 1 };
     }
 
     // Vega is per 1% — convert to per decimal
@@ -159,7 +184,8 @@ export function impliedVolatility(
     sigma = Math.max(0.01, Math.min(sigma, 5.0));
   }
 
-  return sigma;
+  // Did not converge — return best estimate but flag it
+  return { iv: sigma, converged: false, iterations: maxIterations };
 }
 
 // ── Greeks-based SL/TP Calculator ────────────────────────────

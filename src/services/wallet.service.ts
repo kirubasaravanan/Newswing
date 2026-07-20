@@ -39,7 +39,7 @@ export async function creditRealizedPnl(
   pnl: number
 ): Promise<void> {
   const wallet = await tx.capitalWallet.findFirst();
-  if (!wallet) return;
+  if (!wallet) throw new Error('Wallet not found. Initialize capital first.');
   const newRealized = Math.round((wallet.realizedPnl + pnl) * 100) / 100;
   const newTotal = Math.round((wallet.initialCapital + newRealized) * 100) / 100;
   await tx.capitalWallet.update({
@@ -59,7 +59,7 @@ export async function updateDeployed(
   amountDelta: number // positive = more deployed, negative = less
 ): Promise<void> {
   const wallet = await tx.capitalWallet.findFirst();
-  if (!wallet) return;
+  if (!wallet) throw new Error('Wallet not found. Initialize capital first.');
   const newDeployed = Math.round((wallet.deployed + amountDelta) * 100) / 100;
   const newAvailable = Math.round((wallet.totalCapital - newDeployed) * 100) / 100;
   await tx.capitalWallet.update({
@@ -73,14 +73,26 @@ export async function updateDeployed(
 
 /**
  * Recalculate wallet from all closed trades (audit/reconciliation).
+ * Includes both equity PaperTrade and OptionTrade P&L.
  */
 export async function reconcileWallet(): Promise<WalletData> {
   const wallet = await getWallet();
-  const closedTrades = await db.paperTrade.findMany({
+
+  // Equity paper trades
+  const closedEquityTrades = await db.paperTrade.findMany({
     where: { status: { in: ['CLOSED', 'AUTO'] } },
     select: { pnl: true },
   });
-  const totalRealized = closedTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
+  const equityPnl = closedEquityTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
+
+  // Option trades
+  const closedOptionTrades = await db.optionTrade.findMany({
+    where: { status: { in: ['CLOSED', 'SL_HIT', 'TP_HIT', 'EXPIRED'] } },
+    select: { pnl: true },
+  });
+  const optionPnl = closedOptionTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
+
+  const totalRealized = equityPnl + optionPnl;
   const corrected = Math.round(totalRealized * 100) / 100;
 
   if (Math.abs(wallet.realizedPnl - corrected) > 1) {

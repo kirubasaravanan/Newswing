@@ -6,6 +6,10 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  // Use Webpack instead of Turbopack to avoid panics
+  webpack: (config, { isServer }) => {
+    return config;
+  },
   experimental: {
     optimizePackageImports: [
       'lucide-react',

@@ -49,7 +49,11 @@ export async function createOptionTrade(dto: CreateOptionTradeDTO) {
   // Solve IV from premium
   let iv: number;
   try {
-    iv = impliedVolatility(spot, dto.strikePrice, T, r, dto.entryPremium, dto.optionType);
+    const ivResult = impliedVolatility(spot, dto.strikePrice, T, r, dto.entryPremium, dto.optionType);
+    iv = ivResult.iv;
+    if (!ivResult.converged) {
+      console.warn(`IV solver did not converge for ${dto.symbol} ${dto.strikePrice}${dto.optionType} (took ${ivResult.iterations} iterations)`);
+    }
   } catch {
     iv = 0.15;
   }
@@ -245,7 +249,8 @@ export async function createStrategy(data: {
       const lotSize = leg.lotSize || getOptionLotSize(data.symbol);
       let iv = 0.15;
       try {
-        iv = impliedVolatility(spot, leg.strikePrice, T, r, leg.entryPremium, leg.optionType);
+        const ivResult = impliedVolatility(spot, leg.strikePrice, T, r, leg.entryPremium, leg.optionType);
+        iv = ivResult.iv;
       } catch { /* default */ }
 
       const bs = blackScholes(spot, leg.strikePrice, T, r, iv, leg.optionType, q);

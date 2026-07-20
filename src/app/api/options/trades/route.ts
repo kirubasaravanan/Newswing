@@ -7,8 +7,8 @@ import { createOptionTrade, closeOptionTrade } from '@/services/options.service'
 
 const createOptionTradeSchema = z.object({
   symbol: z.string().min(1, 'Symbol is required'),
-  optionType: z.enum(['CE', 'PE'], { errorMap: () => ({ message: 'optionType must be CE or PE' }) }),
-  action: z.enum(['BUY', 'SELL'], { errorMap: () => ({ message: 'action must be BUY or SELL' }) }),
+  optionType: z.enum(['CE', 'PE'], { message: 'optionType must be CE or PE' }),
+  action: z.enum(['BUY', 'SELL'], { message: 'action must be BUY or SELL' }),
   strikePrice: z.coerce.number().positive('Strike must be positive'),
   expiryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expiry must be YYYY-MM-DD'),
   lotSize: z.coerce.number().int().positive().optional(),
@@ -95,7 +95,7 @@ export async function PUT(request: NextRequest) {
   }
 }
 
-// DELETE trade
+// DELETE trade — frees deployed capital if trade was OPEN
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -103,9 +103,32 @@ export async function DELETE(request: NextRequest) {
     if (!id) {
       return NextResponse.json({ success: false, error: 'ID required' }, { status: 400 });
     }
-    await db.optionTrade.delete({ where: { id } });
+
+    await db.$transaction(async (tx) => {
+      const trade = await tx.optionTrade.findUnique({ where: { id } });
+      if (!trade) throw new Error('Trade not found');
+
+      // If trade was OPEN, free up deployed capital from wallet
+      if (trade.status === 'OPEN' && trade.marginUsed) {
+        const wallet = await tx.capitalWallet.findFirst();
+        if (wallet) {
+          const newDeployed = Math.max(0, Math.round((wallet.deployed - trade.marginUsed) * 100) / 100);
+          const newAvailable = Math.max(0, Math.round((wallet.totalCapital - newDeployed) * 100) / 100);
+          await tx.capitalWallet.update({
+            where: { id: wallet.id },
+            data: { deployed: newDeployed, available: newAvailable },
+          });
+        }
+      }
+
+      await tx.optionTrade.delete({ where: { id } });
+    });
+
     return NextResponse.json({ success: true });
   } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'Trade not found') {
+      return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
+    }
     const msg = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
