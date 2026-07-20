@@ -343,5 +343,3 @@ export function clearCache(): void {
   yahooHealthy = null;
   symbolFailures.clear();
 }
-
-export { fromYahooSymbol };
