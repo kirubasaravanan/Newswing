@@ -1,0 +1,781 @@
+     1→/**
+     2→ * Option Chain Generator (V2 — VIX-Aware)
+     3→ * 
+     4→ * Key improvements over V1:
+     5→ * - VIX-based IV estimation (not flat hardcoded values)
+     6→ * - IV term structure (near-week > far-week for indices)
+     7→ * - Dividend yield support via BSM model for stocks
+     8→ * - Proper index/stock differentiation (NIFTY, BANKNIFTY, FINNIFTY, NIFTYIT, MIDCPNIFTY)
+     9→ * - Stock weekly options support (50+ F&O stocks now have weekly expiries)
+    10→ * - Expiry classification (near-week, mid-week, far-week, monthly)
+    11→ * - Settlement type awareness (cash vs physical)
+    12→ * - PCR and max pain calculations
+    13→ * - Bid/ask spread based on liquidity tier
+    14→ */
+    15→
+    16→import {
+    17→  blackScholes,
+    18→  getOptionLotSize,
+    19→  getDividendYield,
+    20→  getSymbolType,
+    21→  getSettlementType,
+    22→  timeToExpiryYears,
+    23→  daysToExpiry as dte,
+    24→  INDEX_SYMBOLS,
+    25→} from './black-scholes';
+    26→import { fetchVIX, vixAdjustedIV, type VIXData, getVIXGuidance } from './vix';
+    27→import {
+    28→  fetchNSEOptionChain,
+    29→  getExpiryDates as getNSEExpiryDates,
+    30→  filterByExpiry,
+    31→  findNearestExpiry,
+    32→  type NSEOptionData,
+    33→} from '@/lib/nse-data';
+    34→
+    35→// ── Symbol → Yahoo Ticker Mapping ────────────────────────────
+    36→
+    37→const YAHOO_MAP: Record<string, string> = {
+    38→  NIFTY: '^NSEI',
+    39→  BANKNIFTY: '^NSEBANK',
+    40→  FINNIFTY: '^CNXFINANCE',
+    41→  NIFTYIT: '^CNXIT',
+    42→  MIDCPNIFTY: '^CRSMIDCP', // or ^NSEMDCP50
+    43→};
+    44→
+    45→function toYahoo(symbol: string): string {
+    46→  if (YAHOO_MAP[symbol]) return YAHOO_MAP[symbol];
+    47→  if (symbol.endsWith('.NS')) return symbol;
+    48→  return `${symbol}.NS`;
+    49→}
+    50→
+    51→// ── Spot Price Fetcher (Yahoo Finance) ───────────────────────
+    52→
+    53→const YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+    54→const YAHOO_HEADERS = {
+    55→  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    56→  'Connection': 'close',
+    57→};
+    58→
+    59→const spotCache = new Map<string, { price: number; change: number; changePct: number; fetchedAt: number }>();
+    60→const SPOT_CACHE_TTL = 30_000; // 30 seconds
+    61→
+    62→async function fetchSpot(symbol: string): Promise<{ price: number; change: number; changePct: number }> {
+    63→  const cached = spotCache.get(symbol);
+    64→  if (cached && Date.now() - cached.fetchedAt < SPOT_CACHE_TTL) {
+    65→    return { price: cached.price, change: cached.change, changePct: cached.changePct };
+    66→  }
+    67→
+    68→  const yahooSym = toYahoo(symbol);
+    69→  const end = Math.floor(Date.now() / 1000);
+    70→  const start = end - 5 * 86400;
+    71→  const url = `${YAHOO_CHART_URL}${encodeURIComponent(yahooSym)}?period1=${start}&period2=${end}&interval=1d`;
+    72→
+    73→  const res = await fetch(url, { headers: YAHOO_HEADERS });
+    74→  if (!res.ok) throw new Error(`Yahoo HTTP ${res.status} for ${yahooSym}`);
+    75→
+    76→  const json: any = await res.json();
+    77→  const meta = json?.chart?.result?.[0]?.meta;
+    78→  if (!meta?.regularMarketPrice) throw new Error(`No price data for ${yahooSym}`);
+    79→
+    80→  const price = meta.regularMarketPrice;
+    81→  const prevClose = meta.chartPreviousClose || price;
+    82→  const change = price - prevClose;
+    83→  const changePct = prevClose > 0 ? (change / prevClose) * 100 : 0;
+    84→
+    85→  spotCache.set(symbol, {
+    86→    price: Math.round(price * 100) / 100,
+    87→    change: Math.round(change * 100) / 100,
+    88→    changePct: Math.round(changePct * 100) / 100,
+    89→    fetchedAt: Date.now(),
+    90→  });
+    91→
+    92→  return {
+    93→    price: Math.round(price * 100) / 100,
+    94→    change: Math.round(change * 100) / 100,
+    95→    changePct: Math.round(changePct * 100) / 100,
+    96→  };
+    97→}
+    98→
+    99→// ── Strike Generation ────────────────────────────────────────
+   100→
+   101→function getStrikeStep(symbol: string, spot: number): number {
+   102→  // Index-specific steps
+   103→  if (symbol === 'NIFTY') return 50;
+   104→  if (symbol === 'BANKNIFTY') return 100;
+   105→  if (symbol === 'FINNIFTY') return 50;
+   106→  if (symbol === 'NIFTYIT') return 50;
+   107→  if (symbol === 'MIDCPNIFTY') return 25;
+   108→
+   109→  // Stocks: adaptive step based on price
+   110→  if (spot > 3000) return 50;
+   111→  if (spot > 1000) return 20;
+   112→  if (spot > 500) return 10;
+   113→  if (spot > 200) return 5;
+   114→  if (spot > 100) return 2.5;
+   115→  return 1;
+   116→}
+   117→
+   118→function getStrikeRange(symbol: string): { below: number; above: number } {
+   119→  if (symbol === 'NIFTY') return { below: 2500, above: 2500 };
+   120→  if (symbol === 'BANKNIFTY') return { below: 3000, above: 3000 };
+   121→  if (symbol === 'FINNIFTY') return { below: 1500, above: 1500 };
+   122→  if (symbol === 'NIFTYIT') return { below: 1000, above: 1000 };
+   123→  if (symbol === 'MIDCPNIFTY') return { below: 800, above: 800 };
+   124→  // Stocks: show ±15% range (enough for most strategies)
+   125→  return { below: 25, above: 25 };
+   126→}
+   127→
+   128→export function generateStrikes(underlyingPrice: number, symbol: string): number[] {
+   129→  const step = getStrikeStep(symbol, underlyingPrice);
+   130→  const { below, above } = getStrikeRange(symbol);
+   131→
+   132→  const strikes: number[] = [];
+   133→  const atmStrike = Math.round(underlyingPrice / step) * step;
+   134→
+   135→  for (let s = atmStrike - below; s <= atmStrike + above; s += step) {
+   136→    if (s > 0) strikes.push(s);
+   137→  }
+   138→
+   139→  return strikes;
+   140→}
+   141→
+   142→// ── Expiry Classification ────────────────────────────────────
+   143→
+   144→export type ExpiryType = 'near_week' | 'mid_week' | 'far_week' | 'monthly' | 'far_monthly';
+   145→
+   146→export interface ExpiryInfo {
+   147→  date: string;
+   148→  label: string;
+   149→  type: ExpiryType;
+   150→  daysToExpiry: number;
+   151→  isIndex: boolean;
+   152→  isWeekly: boolean;
+   153→  isCurrentMonth: boolean;
+   154→}
+   155→
+   156→/**
+   157→ * Classify an expiry by its distance and type.
+   158→ * Near-week: 0-7 days (highest IV, gamma risk)
+   159→ * Mid-week: 8-21 days (moderate IV)
+   160→ * Far-week: 22-35 days (lower IV)
+   161→ * Monthly: >35 days (lowest IV, most liquid for stocks)
+   162→ */
+   163→export function classifyExpiry(expiryDate: string, symbol: string): ExpiryInfo {
+   164→  const days = dte(expiryDate);
+   165→  const isIndex = (INDEX_SYMBOLS as readonly string[]).includes(symbol);
+   166→
+   167→  // Determine if it's current month
+   168→  const now = new Date();
+   169→  const expiry = new Date(expiryDate);
+   170→  const isCurrentMonth = now.getMonth() === expiry.getMonth() && now.getFullYear() === expiry.getFullYear();
+   171→
+   172→  let type: ExpiryType;
+   173→  if (days <= 7) {
+   174→    type = 'near_week';
+   175→  } else if (days <= 21) {
+   176→    type = isIndex ? 'mid_week' : 'far_week'; // Stocks with 2-3 week expiry = far
+   177→  } else if (days <= 35) {
+   178→    type = isIndex ? 'far_week' : 'monthly';
+   179→  } else {
+   180→    type = isCurrentMonth ? 'monthly' : 'far_monthly';
+   181→  }
+   182→
+   183→  // Generate human-readable label
+   184→  const d = new Date(expiryDate);
+   185→  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+   186→  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+   187→
+   188→  let label: string;
+   189→  if (days <= 7) {
+   190→    label = `${dayNames[d.getDay()]} (${days}d)`;
+   191→  } else if (isIndex) {
+   192→    label = `${d.getDate()} ${monthNames[d.getMonth()]} (${days}d)`;
+   193→  } else {
+   194→    // Monthly: show month name
+   195→    label = `${monthNames[d.getMonth()]} ${d.getDate()} (${days}d)`;
+   196→  }
+   197→
+   198→  return {
+   199→    date: expiryDate,
+   200→    label,
+   201→    type,
+   202→    daysToExpiry: days,
+   203→    isIndex,
+   204→    isWeekly: isIndex || days <= 21,
+   205→    isCurrentMonth,
+   206→  };
+   207→}
+   208→
+   209→// ── Expiry Dates ─────────────────────────────────────────────
+   210→
+   211→// Stocks that have weekly options (as of 2024-25, NSE has expanded weekly F&O)
+   212→const STOCKS_WITH_WEEKLY_OPTIONS = new Set([
+   213→  'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN',
+   214→  'AXISBANK', 'KOTAKBANK', 'BAJFINANCE', 'ITC', 'LT', 'BHARTIARTL',
+   215→  'HINDUNILVR', 'TATAMOTORS', 'ASIANPAINT', 'MARUTI', 'SUNPHARMA',
+   216→  'WIPRO', 'HCLTECH', 'TATASTEEL', 'ADANIENT', 'TITAN', 'HDFCLIFE',
+   217→  'SBILIFE', 'DIVISLAB', 'DRREDDY', 'CIPLA', 'EICHERMOT', 'HEROMOTOCO',
+   218→  'ULTRACEMCO', 'NESTLEIND', 'BPCL', 'POWERGRID', 'NTPC', 'COALINDIA',
+   219→  'ONGC', 'IOC', 'HPCL', 'GRASIM', 'INDUSINDBK', 'TATACONSUM',
+   220→  'BAJAJFINSV', 'M_M', 'DIXON', 'VEDL', 'HAL', 'BEL',
+   221→]);
+   222→
+   223→function hasWeeklyOptions(symbol: string): boolean {
+   224→  return (INDEX_SYMBOLS as readonly string[]).includes(symbol) || STOCKS_WITH_WEEKLY_OPTIONS.has(symbol);
+   225→}
+   226→
+   227→/**
+   228→ * Get next N expiry dates with classification.
+   229→ * 
+   230→ * Index: Weekly expiries every Thursday (NIFTY, BANKNIFTY, FINNIFTY, NIFTYIT, MIDCPNIFTY)
+   231→ * Stocks with weekly: Weekly + Monthly (last Thursday)
+   232→ * Other stocks: Monthly (last Thursday) only
+   233→ */
+   234→export function getNextExpiries(symbol: string, count: number = 8): string[] {
+   235→  const expiries: string[] = [];
+   236→  const now = new Date();
+   237→
+   238→  for (let i = 0; i < 365 && expiries.length < count; i++) {
+   239→    const d = new Date(now);
+   240→    d.setDate(d.getDate() + i);
+   241→
+   242→    if (d.getDay() !== 4) continue; // Only Thursdays
+   243→
+   244→    const dateStr = formatDate(d);
+   245→    if (expiries.includes(dateStr)) continue;
+   246→
+   247→    const isIndex = (INDEX_SYMBOLS as readonly string[]).includes(symbol);
+   248→    const weekly = hasWeeklyOptions(symbol);
+   249→
+   250→    if (isIndex || weekly) {
+   251→      // All Thursdays are valid expiries
+   252→      expiries.push(dateStr);
+   253→    } else {
+   254→      // Monthly: only last Thursday of month
+   255→      if (isLastThursday(d)) {
+   256→        expiries.push(dateStr);
+   257→      }
+   258→    }
+   259→  }
+   260→
+   261→  return expiries;
+   262→}
+   263→
+   264→function isLastThursday(d: Date): boolean {
+   265→  if (d.getDay() !== 4) return false;
+   266→  const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+   267→  return d.getDate() > lastDay.getDate() - 7;
+   268→}
+   269→
+   270→function formatDate(d: Date): string {
+   271→  const y = d.getFullYear();
+   272→  const m = String(d.getMonth() + 1).padStart(2, '0');
+   273→  const day = String(d.getDate()).padStart(2, '0');
+   274→  return `${y}-${m}-${day}`;
+   275→}
+   276→
+   277→// ── Option Chain Types ───────────────────────────────────────
+   278→
+   279→interface OptionLegData {
+   280→  ltp: number;
+   281→  iv: number;
+   282→  delta: number;
+   283→  gamma: number;
+   284→  theta: number;
+   285→  vega: number;
+   286→  oi: number;
+   287→  volume: number;
+   288→  bid: number;
+   289→  ask: number;
+   290→  itm: boolean;
+   291→  theoretical: boolean;  // Flag: this is theoretical pricing, not live
+   292→  changeInOI?: number;  // NSE-provided: change in open interest
+   293→  pChangeInOI?: number; // NSE-provided: % change in OI
+   294→}
+   295→
+   296→export interface OptionChainRow {
+   297→  strike: number;
+   298→  ce: OptionLegData;
+   299→  pe: OptionLegData;
+   300→  distance: number;
+   301→  moneyness: 'ITM' | 'ATM' | 'OTM';
+   302→}
+   303→
+   304→// ── PCR (Put-Call Ratio) Calculation ─────────────────────────
+   305→
+   306→export interface PCRData {
+   307→  pcr: number;
+   308→  totalCEOI: number;
+   309→  totalPEOI: number;
+   310→  interpretation: string;
+   311→  signal: 'bullish' | 'bearish' | 'neutral' | 'extreme_bearish' | 'extreme_bullish';
+   312→}
+   313→
+   314→export function calculatePCR(chain: OptionChainRow[]): PCRData {
+   315→  let totalCEOI = 0;
+   316→  let totalPEOI = 0;
+   317→
+   318→  for (const row of chain) {
+   319→    totalCEOI += row.ce.oi;
+   320→    totalPEOI += row.pe.oi;
+   321→  }
+   322→
+   323→  const pcr = totalCEOI > 0 ? totalPEOI / totalCEOI : 0;
+   324→
+   325→  let interpretation: string;
+   326→  let signal: PCRData['signal'];
+   327→
+   328→  if (pcr > 1.5) {
+   329→    signal = 'extreme_bearish';
+   330→    interpretation = `PCR at ${pcr.toFixed(2)} — Extremely high put writing. Market is oversold, strong support expected. Contrarian bullish signal.`;
+   331→  } else if (pcr > 1.2) {
+   332→    signal = 'bearish';
+   333→    interpretation = `PCR at ${pcr.toFixed(2)} — High put writing. Heavy support at current levels, mildly bearish sentiment.`;
+   334→  } else if (pcr > 0.8) {
+   335→    signal = 'neutral';
+   336→    interpretation = `PCR at ${pcr.toFixed(2)} — Balanced put-call activity. Neutral market sentiment.`;
+   337→  } else if (pcr > 0.5) {
+   338→    signal = 'bullish';
+   339→    interpretation = `PCR at ${pcr.toFixed(2)} — More call writing than puts. Bullish sentiment, resistance expected.`;
+   340→  } else {
+   341→    signal = 'extreme_bullish';
+   342→    interpretation = `PCR at ${pcr.toFixed(2)} — Very low PCR. Extreme bullishness, potential for reversal. Contrarian bearish signal.`;
+   343→  }
+   344→
+   345→  return { pcr: Math.round(pcr * 100) / 100, totalCEOI, totalPEOI, interpretation, signal };
+   346→}
+   347→
+   348→// ── Max Pain Calculation ─────────────────────────────────────
+   349→
+   350→export interface MaxPainResult {
+   351→  strike: number;
+   352→  maxPainStrike: number;
+   353→  totalPainAtMax: number;
+   354→  reasoning: string;
+   355→}
+   356→
+   357→/**
+   358→ * Calculate max pain — the strike at which option buyers lose the most money.
+   359→ * Sellers (institutions) tend to pin the price near max pain on expiry day.
+   360→ * 
+   361→ * Pain at strike K = Sum of (intrinsic value of all CE above K) + Sum of (intrinsic value of all PE below K)
+   362→ * Max pain = K where total pain is maximum (sellers gain most)
+   363→ */
+   364→export function calculateMaxPain(chain: OptionChainRow[], spot: number): MaxPainResult {
+   365→  let maxPainStrike = spot;
+   366→  let minTotalPain = Infinity;
+   367→
+   368→  for (const row of chain) {
+   369→    let totalPain = 0;
+   370→
+   371→    // CE pain: all CE with strike < currentStrike will have intrinsic value
+   372→    // Sellers lose = intrinsic value × OI
+   373→    for (const r of chain) {
+   374→      if (r.ce.oi > 0 && r.strike < row.strike) {
+   375→        totalPain += (row.strike - r.strike) * r.ce.oi;
+   376→      }
+   377→      if (r.pe.oi > 0 && r.strike > row.strike) {
+   378→        totalPain += (r.strike - row.strike) * r.pe.oi;
+   379→      }
+   380→    }
+   381→
+   382→    if (totalPain < minTotalPain) {
+   383→      minTotalPain = totalPain;
+   384→      maxPainStrike = row.strike;
+   385→    }
+   386→  }
+   387→
+   388→  const distanceFromSpot = ((maxPainStrike - spot) / spot * 100).toFixed(2);
+   389→  const days = 1; // Max pain is most relevant on expiry day
+   390→
+   391→  let reasoning: string;
+   392→  if (Math.abs(maxPainStrike - spot) < spot * 0.005) {
+   393→    reasoning = `Max pain at ₹${maxPainStrike} (≈ ATM, ${distanceFromSpot}% from spot). Price is already near max pain — expect consolidation around this level on expiry.`;
+   394→  } else if (maxPainStrike > spot) {
+   395→    reasoning = `Max pain at ₹${maxPainStrike} (+${distanceFromSpot}% from spot). Gravitational pull upward toward max pain. More relevant within ${days} day(s) of expiry.`;
+   396→  } else {
+   397→    reasoning = `Max pain at ₹${maxPainStrike} (${distanceFromSpot}% from spot). Downward pull toward max pain. More relevant within ${days} day(s) of expiry.`;
+   398→  }
+   399→
+   400→  return {
+   401→    strike: spot,
+   402→    maxPainStrike,
+   403→    totalPainAtMax: Math.round(minTotalPain),
+   404→    reasoning,
+   405→  };
+   406→}
+   407→
+   408→// ── Liquidity Tier (for bid/ask spread estimation) ───────────
+   409→
+   410→type LiquidityTier = 'ultra' | 'high' | 'medium' | 'low';
+   411→
+   412→function getLiquidityTier(symbol: string): LiquidityTier {
+   413→  const ultra = ['NIFTY', 'BANKNIFTY'];
+   414→  const high = ['FINNIFTY', 'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN'];
+   415→  const medium = ['AXISBANK', 'KOTAKBANK', 'BAJFINANCE', 'ITC', 'LT', 'BHARTIARTL', 'HINDUNILVR', 'TATAMOTORS'];
+   416→
+   417→  if (ultra.includes(symbol)) return 'ultra';
+   418→  if (high.includes(symbol)) return 'high';
+   419→  if (medium.includes(symbol)) return 'medium';
+   420→  return 'low';
+   421→}
+   422→
+   423→function getSpreadMultiplier(tier: LiquidityTier, moneyness: 'ITM' | 'ATM' | 'OTM'): number {
+   424→  // Tighter spreads for liquid names, wider for OTM
+   425→  const baseSpreads: Record<LiquidityTier, number> = {
+   426→    ultra: 0.005,  // 0.5%
+   427→    high: 0.015,   // 1.5%
+   428→    medium: 0.03,  // 3%
+   429→    low: 0.06,     // 6%
+   430→  };
+   431→
+   432→  const otmMultiplier = moneyness === 'OTM' ? 2.0 : moneyness === 'ATM' ? 1.0 : 1.2;
+   433→
+   434→  return baseSpreads[tier] * otmMultiplier;
+   435→}
+   436→
+   437→// ── Main: Fetch Option Chain ─────────────────────────────────
+   438→
+   439→export interface OptionChainResult {
+   440→  symbol: string;
+   441→  symbolType: 'index' | 'stock';
+   442→  settlementType: 'cash' | 'physical';
+   443→  underlyingPrice: number;
+   444→  change: number;
+   445→  changePct: number;
+   446→  expiryDate: string;
+   447→  expiryInfo: ExpiryInfo;
+   448→  expiryDates: string[];
+   449→  chain: OptionChainRow[];
+   450→  vix: VIXData | null;
+   451→  pcr: PCRData | null;
+   452→  maxPain: MaxPainResult | null;
+   453→  dividendYield: number;
+   454→  lotSize: number;
+   455→  dataSource: 'nse_live' | 'theoretical';
+   456→  nseFetchTime?: number; // timestamp of NSE data fetch
+   457→}
+   458→
+   459→/**
+   460→ * Build option chain from NSE live data.
+   461→ * Uses real premiums, OI, volume, IV, bid/ask from NSE.
+   462→ * Greeks are calculated via BSM using real IV from NSE (exchange doesn't provide Greeks).
+   463→ */
+   464→function buildChainFromNSE(
+   465→  nseData: NSEOptionData[],
+   466→  spot: number,
+   467→  symbol: string,
+   468→  T: number,
+   469→  r: number,
+   470→  dividendYield: number,
+   471→): OptionChainRow[] {
+   472→  const step = getStrikeStep(symbol, spot);
+   473→  const atmStrike = Math.round(spot / step) * step;
+   474→
+   475→  // Build a map for quick lookup
+   476→  const nseMap = new Map<number, NSEOptionData>();
+   477→  for (const item of nseData) {
+   478→    nseMap.set(item.strikePrice, item);
+   479→  }
+   480→
+   481→  const strikes = generateStrikes(spot, symbol);
+   482→  const chain: OptionChainRow[] = [];
+   483→
+   484→  for (const strike of strikes) {
+   485→    const nseItem = nseMap.get(strike);
+   486→    const dist = ((strike - spot) / spot) * 100;
+   487→    const isATM = Math.abs(strike - atmStrike) < step / 2;
+   488→
+   489→    let moneyness: 'ITM' | 'ATM' | 'OTM';
+   490→    if (isATM) {
+   491→      moneyness = 'ATM';
+   492→    } else if (strike < spot) {
+   493→      moneyness = 'ITM';
+   494→    } else {
+   495→      moneyness = 'OTM';
+   496→    }
+   497→
+   498→    if (nseItem) {
+   499→      // ── LIVE DATA from NSE ──────────────────────────
+   500→      // Use real IV from NSE to calculate Greeks via BSM
+   501→      const ceIV = nseItem.ce?.impliedVolatility
+   502→        ? nseItem.ce.impliedVolatility / 100 // NSE gives IV as percentage (e.g. 12.35 for 12.35%)
+   503→        : 0.15;
+   504→      const peIV = nseItem.pe?.impliedVolatility
+   505→        ? nseItem.pe.impliedVolatility / 100
+   506→        : 0.15;
+   507→
+   508→      // Calculate Greeks using BSM with real IV
+   509→      const ceBS = T > 0 && ceIV > 0
+   510→        ? blackScholes(spot, strike, T, r, ceIV, 'CE', dividendYield)
+   511→        : { premium: Math.max(spot - strike, 0), delta: 0, gamma: 0, theta: 0, vega: 0, iv: ceIV };
+   512→      const peBS = T > 0 && peIV > 0
+   513→        ? blackScholes(spot, strike, T, r, peIV, 'PE', dividendYield)
+   514→        : { premium: Math.max(strike - spot, 0), delta: 0, gamma: 0, theta: 0, vega: 0, iv: peIV };
+   515→
+   516→      chain.push({
+   517→        strike,
+   518→        distance: Math.round(dist * 100) / 100,
+   519→        moneyness,
+   520→        ce: {
+   521→          ltp: Math.round((nseItem.ce?.lastPrice || 0) * 100) / 100,
+   522→          iv: Math.round((ceIV * 10000)) / 100, // as %
+   523→          delta: ceBS.delta,
+   524→          gamma: ceBS.gamma,
+   525→          theta: ceBS.theta,
+   526→          vega: ceBS.vega,
+   527→          oi: nseItem.ce?.openInterest || 0,
+   528→          volume: nseItem.ce?.totalTradedVolume || 0,
+   529→          bid: Math.round((nseItem.ce?.bidprice || 0) * 100) / 100,
+   530→          ask: Math.round((nseItem.ce?.askPrice || 0) * 100) / 100,
+   531→          itm: strike < spot,
+   532→          theoretical: false,
+   533→          changeInOI: nseItem.ce?.changeinOpenInterest || 0,
+   534→          pChangeInOI: nseItem.ce?.pChangeInOI || 0,
+   535→        },
+   536→        pe: {
+   537→          ltp: Math.round((nseItem.pe?.lastPrice || 0) * 100) / 100,
+   538→          iv: Math.round((peIV * 10000)) / 100,
+   539→          delta: peBS.delta,
+   540→          gamma: peBS.gamma,
+   541→          theta: peBS.theta,
+   542→          vega: peBS.vega,
+   543→          oi: nseItem.pe?.openInterest || 0,
+   544→          volume: nseItem.pe?.totalTradedVolume || 0,
+   545→          bid: Math.round((nseItem.pe?.bidprice || 0) * 100) / 100,
+   546→          ask: Math.round((nseItem.pe?.askPrice || 0) * 100) / 100,
+   547→          itm: strike > spot,
+   548→          theoretical: false,
+   549→          changeInOI: nseItem.pe?.changeinOpenInterest || 0,
+   550→          pChangeInOI: nseItem.pe?.pChangeInOI || 0,
+   551→        },
+   552→      });
+   553→    } else {
+   554→      // ── No NSE data for this strike — skip ───────────
+   555→      // Only include strikes that NSE has data for (keeps chain clean)
+   556→    }
+   557→  }
+   558→
+   559→  return chain;
+   560→}
+   561→
+   562→export async function fetchOptionChain(
+   563→  symbol: string,
+   564→  expiryDate: string
+   565→): Promise<OptionChainResult> {
+   566→  // 0. Try NSE live data first (best-effort, 5s timeout)
+   567→  let nseResult: OptionChainResult | null = null;
+   568→  try {
+   569→    const nseRaw = await Promise.race([
+   570→      fetchNSEOptionChain(symbol),
+   571→      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+   572→    ]);
+   573→
+   574→    if (nseRaw && nseRaw.underlyingValue > 0) {
+   575→      const spot = Math.round(nseRaw.underlyingValue * 100) / 100;
+   576→      const symbolType = getSymbolType(symbol);
+   577→      const settlementType = getSettlementType(symbol);
+   578→      const lotSize = getOptionLotSize(symbol);
+   579→      const dividendYield = getDividendYield(symbol);
+   580→
+   581→      // Get expiry dates from NSE data
+   582→      const nseExpiryDates = getNSEExpiryDates(nseRaw);
+   583→      const targetExpiry = expiryDate
+   584→        ? findNearestExpiry(nseRaw, expiryDate)
+   585→        : nseExpiryDates[0];
+   586→
+   587→      if (targetExpiry) {
+   588→        const expiryInfo = classifyExpiry(targetExpiry, symbol);
+   589→        const T = timeToExpiryYears(targetExpiry);
+   590→        const r = 0.07;
+   591→
+   592→        // Filter NSE data for this expiry and build chain
+   593→        const nseFiltered = filterByExpiry(nseRaw, targetExpiry);
+   594→        const chain = buildChainFromNSE(nseFiltered, spot, symbol, T, r, dividendYield);
+   595→
+   596→        if (chain.length > 0) {
+   597→          // Fetch VIX separately (best-effort)
+   598→          const vixData = await fetchVIX().catch(() => null);
+   599→
+   600→          // Get change data from Yahoo (NSE option chain doesn't provide change)
+   601→          let change = 0;
+   602→          let changePct = 0;
+   603→          try {
+   604→            const spotData = await fetchSpot(symbol);
+   605→            change = spotData.change;
+   606→            changePct = spotData.changePct;
+   607→          } catch {
+   608→            // Non-critical, skip
+   609→          }
+   610→
+   611→          nseResult = {
+   612→            symbol,
+   613→            symbolType,
+   614→            settlementType,
+   615→            underlyingPrice: spot,
+   616→            change,
+   617→            changePct,
+   618→            expiryDate: targetExpiry,
+   619→            expiryInfo,
+   620→            expiryDates: nseExpiryDates.length > 0 ? nseExpiryDates : getNextExpiries(symbol, 10),
+   621→            chain,
+   622→            vix: vixData,
+   623→            pcr: calculatePCR(chain),
+   624→            maxPain: calculateMaxPain(chain, spot),
+   625→            dividendYield,
+   626→            lotSize,
+   627→            dataSource: 'nse_live',
+   628→            nseFetchTime: Date.now(),
+   629→          };
+   630→        }
+   631→      }
+   632→    }
+   633→  } catch (err) {
+   634→    console.warn('[OptionChain] NSE fetch failed, falling back to theoretical:', String(err).substring(0, 120));
+   635→  }
+   636→
+   637→  // Return NSE data if successful
+   638→  if (nseResult) return nseResult;
+   639→
+   640→  // ── THEORETICAL FALLBACK (original logic) ─────────────────
+   641→  // 1. Fetch spot price and VIX in parallel
+   642→  const [spotData, vixData] = await Promise.all([
+   643→    fetchSpot(symbol),
+   644→    fetchVIX().catch(() => null), // VIX is best-effort
+   645→  ]);
+   646→
+   647→  const spot = spotData.price;
+   648→  const symbolType = getSymbolType(symbol);
+   649→  const settlementType = getSettlementType(symbol);
+   650→  const lotSize = getOptionLotSize(symbol);
+   651→  const dividendYield = getDividendYield(symbol);
+   652→
+   653→  // 2. Get expiry dates and classify
+   654→  const expiryDates = getNextExpiries(symbol, 10);
+   655→  const targetExpiry = expiryDate || expiryDates[0];
+   656→  const expiryInfo = classifyExpiry(targetExpiry, symbol);
+   657→
+   658→  // 3. Time to expiry and risk-free rate
+   659→  const T = timeToExpiryYears(targetExpiry);
+   660→  const r = 0.07; // India risk-free rate (7% RBI repo rate approx)
+   661→
+   662→  // 4. Generate strikes
+   663→  const strikes = generateStrikes(spot, symbol);
+   664→
+   665→  // 5. ATM strike
+   666→  const step = getStrikeStep(symbol, spot);
+   667→  const atmStrike = Math.round(spot / step) * step;
+   668→
+   669→  // 6. Get VIX value for IV estimation
+   670→  const vixValue = vixData?.value ?? (symbolType === 'index' ? 13 : 22);
+   671→
+   672→  // 7. Build chain with VIX-adjusted IV
+   673→  const chain: OptionChainRow[] = strikes.map((strike) => {
+   674→    const dist = ((strike - spot) / spot) * 100;
+   675→    const isATM = Math.abs(strike - atmStrike) < step / 2;
+   676→
+   677→    let moneyness: 'ITM' | 'ATM' | 'OTM';
+   678→    if (isATM) {
+   679→      moneyness = 'ATM';
+   680→    } else if (strike < spot) {
+   681→      moneyness = 'ITM'; // CE is ITM when strike < spot
+   682→    } else {
+   683→      moneyness = 'OTM';
+   684→    }
+   685→
+   686→    const days = expiryInfo.daysToExpiry;
+   687→
+   688→    // VIX-adjusted IV for each leg
+   689→    const ceIV = vixAdjustedIV(vixValue, symbolType, strike, spot, 'CE', days);
+   690→    const peIV = vixAdjustedIV(vixValue, symbolType, strike, spot, 'PE', days);
+   691→
+   692→    // BSM pricing with dividend yield for stocks
+   693→    const ceBS = blackScholes(spot, strike, T, r, ceIV, 'CE', dividendYield);
+   694→    const peBS = blackScholes(spot, strike, T, r, peIV, 'PE', dividendYield);
+   695→
+   696→    // Liquidity-based bid/ask spread
+   697→    const ceSpread = ceBS.premium > 0
+   698→      ? Math.max(ceBS.premium * getSpreadMultiplier(getLiquidityTier(symbol), moneyness), 0.05)
+   699→      : 0;
+   700→    const peSpread = peBS.premium > 0
+   701→      ? Math.max(peBS.premium * getSpreadMultiplier(getLiquidityTier(symbol), moneyness), 0.05)
+   702→      : 0;
+   703→
+   704→    // Simulated OI (higher near ATM, more for liquid names)
+   705→    const atmDist = Math.abs(strike - atmStrike);
+   706→    const liquidityBase: Record<string, number> = {
+   707→      NIFTY: 500000, BANKNIFTY: 300000, FINNIFTY: 100000,
+   708→      NIFTYIT: 50000, MIDCPNIFTY: 30000,
+   709→    };
+   710→    const oiBase = Math.max(0, (liquidityBase[symbol] || 50000) - atmDist * 80);
+   711→
+   712→    return {
+   713→      strike,
+   714→      distance: Math.round(dist * 100) / 100,
+   715→      moneyness,
+   716→      ce: {
+   717→        ltp: Math.round(ceBS.premium * 100) / 100,
+   718→        iv: Math.round(ceIV * 10000) / 100, // as %
+   719→        delta: ceBS.delta,
+   720→        gamma: ceBS.gamma,
+   721→        theta: ceBS.theta,
+   722→        vega: ceBS.vega,
+   723→        oi: Math.round(oiBase * (0.8 + Math.random() * 0.4)),
+   724→        volume: Math.round(oiBase * (0.1 + Math.random() * 0.3)),
+   725→        bid: Math.round((ceBS.premium - ceSpread) * 100) / 100,
+   726→        ask: Math.round((ceBS.premium + ceSpread) * 100) / 100,
+   727→        itm: strike < spot,
+   728→        theoretical: true,
+   729→      },
+   730→      pe: {
+   731→        ltp: Math.round(peBS.premium * 100) / 100,
+   732→        iv: Math.round(peIV * 10000) / 100,
+   733→        delta: peBS.delta,
+   734→        gamma: peBS.gamma,
+   735→        theta: peBS.theta,
+   736→        vega: peBS.vega,
+   737→        oi: Math.round(oiBase * (0.8 + Math.random() * 0.4)),
+   738→        volume: Math.round(oiBase * (0.1 + Math.random() * 0.3)),
+   739→        bid: Math.round((peBS.premium - peSpread) * 100) / 100,
+   740→        ask: Math.round((peBS.premium + peSpread) * 100) / 100,
+   741→        itm: strike > spot,
+   742→        theoretical: true,
+   743→      },
+   744→    };
+   745→  });
+   746→
+   747→  // 8. Calculate derived metrics
+   748→  const pcr = calculatePCR(chain);
+   749→  const maxPain = calculateMaxPain(chain, spot);
+   750→
+   751→  return {
+   752→    symbol,
+   753→    symbolType,
+   754→    settlementType,
+   755→    underlyingPrice: spot,
+   756→    change: spotData.change,
+   757→    changePct: spotData.changePct,
+   758→    expiryDate: targetExpiry,
+   759→    expiryInfo,
+   760→    expiryDates,
+   761→    chain,
+   762→    vix: vixData,
+   763→    pcr,
+   764→    maxPain,
+   765→    dividendYield,
+   766→    lotSize,
+   767→    dataSource: 'theoretical',
+   768→  };
+   769→}
+   770→
+   771→// ── Expose spot fetcher for positions API ────────────────────
+   772→
+   773→export async function fetchSpotPrice(symbol: string): Promise<number> {
+   774→  const data = await fetchSpot(symbol);
+   775→  return data.price;
+   776→}
+   777→
+   778→// ── VIX API for frontend ────────────────────────────────────
+   779→
+   780→export { fetchVIX, getVIXGuidance, expectedDailyMove, expectedWeeklyRange } from './vix';
+   781→export type { VIXData, VIXGuidance } from './vix';

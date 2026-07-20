@@ -1,0 +1,852 @@
+     1→/**
+     2→ * PMS Auto-Trade Engine v2 — Professional Portfolio Management System
+     3→ *
+     4→ * v2 Enhancements over v1:
+     5→ * 1. Drawdown circuit breaker — pauses new entries if drawdown exceeds threshold
+     6→ * 2. Adaptive position sizing — reduces size after consecutive losses
+     7→ * 3. Nifty regime filter — only longs when Nifty > EMA200 (bullish regime)
+     8→ * 4. ATR-based trailing stop — uses volatility-adjusted trail instead of fixed R
+     9→ * 5. Daily loss limit — halts all new entries if daily loss exceeds threshold
+    10→ * 6. Consecutive loss streak tracking — tighter risk after 3+ losses in a row
+    11→ * 7. Max open drawdown check before new entry
+    12→ * 8. Position health scoring (0-100) for priority-based exit management
+    13→ * 9. Stale position acceleration — exits aging losers faster
+    14→ */
+    15→import { NextRequest, NextResponse } from 'next/server';
+    16→import { runScreening, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/trading/screening-engine';
+    17→import { getHistoricalData, getCurrentPrice } from '@/lib/trading/data-provider';
+    18→import { getFullUniverse, runL1Filter, type NSEStock } from '@/lib/trading/universe-scanner';
+    19→import { EMA, ATR } from 'technicalindicators';
+    20→import { db } from '@/lib/db';
+    21→
+    22→// ── Types ──────────────────────────────────────────────
+    23→interface PositionRules {
+    24→  maxPerStock: number;
+    25→  maxBuysPerMonth: number;
+    26→  maxHoldingDays: number;
+    27→  maxTotalPositions: number;
+    28→  riskPerTradePct: number;
+    29→  trailingStopR: number;
+    30→  trailToR: number;
+    31→  partialBookR: number;
+    32→  partialBookPct: number;
+    33→  cooldownDays: number;
+    34→  maxSectorPct: number;
+    35→  timeExitMins: number;
+    36→  // v2 additions
+    37→  maxDrawdownPct: number;          // Halt entries if portfolio drawdown exceeds this %
+    38→  dailyLossLimit: number;          // Halt entries if daily realized loss exceeds this ₹
+    39→  niftyRegimeFilter: boolean;      // Only take longs when Nifty > EMA200
+    40→  atrTrailMultiplier: number;      // ATR multiplier for trailing stop (0 = use fixed R)
+    41→  adaptiveSizing: boolean;         // Reduce size after consecutive losses
+    42→  streakPenaltyPct: number;        // % size reduction per consecutive loss after 3
+    43→}
+    44→
+    45→const DEFAULT_RULES: PositionRules = {
+    46→  maxPerStock: 50000, maxBuysPerMonth: 3, maxHoldingDays: 25,
+    47→  maxTotalPositions: 8, riskPerTradePct: 1.0,
+    48→  trailingStopR: 1.5, trailToR: 0.5, partialBookR: 2.0, partialBookPct: 30,
+    49→  cooldownDays: 3, maxSectorPct: 35, timeExitMins: 30,
+    50→  // v2 defaults
+    51→  maxDrawdownPct: 8,               // 8% max drawdown before circuit breaker
+    52→  dailyLossLimit: 5000,            // ₹5000 daily loss limit
+    53→  niftyRegimeFilter: true,         // Enable Nifty EMA200 filter
+    54→  atrTrailMultiplier: 2.0,         // 2x ATR trailing stop
+    55→  adaptiveSizing: true,            // Enable adaptive sizing
+    56→  streakPenaltyPct: 20,            // 20% size reduction per loss after 3 consecutive
+    57→};
+    58→
+    59→interface SchedulerState {
+    60→  enabled: boolean;
+    61→  scanIntervalMin: number;
+    62→  exitIntervalMin: number;
+    63→  lastScanAt: string | null;
+    64→  lastExitAt: string | null;
+    65→  nextScanAt: string | null;
+    66→  nextExitAt: string | null;
+    67→  todayEntries: number;
+    68→  todayExits: number;
+    69→  todayPnl: number;
+    70→  scanCount: number;
+    71→  // v2 state
+    72→  circuitBreaker: boolean;         // True = halted due to drawdown/daily loss
+    73→  circuitBreakerReason: string;    // Why the breaker is active
+    74→  niftyRegime: 'BULLISH' | 'BEARISH' | 'UNKNOWN';
+    75→  consecutiveLosses: number;
+    76→  lastAdaptiveFactor: number;      // Current position size multiplier (0.0-1.0)
+    77→}
+    78→
+    79→const DEFAULT_SCHEDULER: SchedulerState = {
+    80→  enabled: false, scanIntervalMin: 30, exitIntervalMin: 5,
+    81→  lastScanAt: null, lastExitAt: null, nextScanAt: null, nextExitAt: null,
+    82→  todayEntries: 0, todayExits: 0, todayPnl: 0, scanCount: 0,
+    83→  circuitBreaker: false, circuitBreakerReason: '',
+    84→  niftyRegime: 'UNKNOWN', consecutiveLosses: 0, lastAdaptiveFactor: 1.0,
+    85→};
+    86→
+    87→// ── Position Health Score (0-100) ───────────────────────
+    88→interface HealthScore {
+    89→  score: number;
+    90→  factors: { name: string; impact: number; detail: string }[];
+    91→  urgency: 'CRITICAL' | 'WARNING' | 'OK';
+    92→}
+    93→
+    94→function scorePositionHealth(
+    95→  cp: number, entryPrice: number, sl: number, tp: number,
+    96→  holdingDays: number, maxHoldingDays: number, rMultiple: number
+    97→): HealthScore {
+    98→  const factors: { name: string; impact: number; detail: string }[] = [];
+    99→  let score = 50; // Base score
+   100→
+   101→  // Factor 1: R-multiple profit (±25 points)
+   102→  if (rMultiple >= 2) { score += 25; factors.push({ name: 'Profit', impact: 25, detail: `Strong ${rMultiple.toFixed(1)}R` }); }
+   103→  else if (rMultiple >= 1) { score += 15; factors.push({ name: 'Profit', impact: 15, detail: `Moderate ${rMultiple.toFixed(1)}R` }); }
+   104→  else if (rMultiple >= 0) { score += 5; factors.push({ name: 'Profit', impact: 5, detail: `Marginal ${rMultiple.toFixed(1)}R` }); }
+   105→  else if (rMultiple >= -0.5) { score -= 10; factors.push({ name: 'Loss', impact: -10, detail: `Small loss ${rMultiple.toFixed(1)}R` }); }
+   106→  else { score -= 25; factors.push({ name: 'Loss', impact: -25, detail: `Large loss ${rMultiple.toFixed(1)}R` }); }
+   107→
+   108→  // Factor 2: SL proximity (±20 points)
+   109→  const risk = entryPrice - sl;
+   110→  const slDistPct = risk > 0 ? ((cp - sl) / risk) * 100 : 100;
+   111→  if (slDistPct < 20) { score -= 20; factors.push({ name: 'SL Proximity', impact: -20, detail: `${slDistPct.toFixed(0)}% to SL` }); }
+   112→  else if (slDistPct < 40) { score -= 10; factors.push({ name: 'SL Proximity', impact: -10, detail: `${slDistPct.toFixed(0)}% to SL` }); }
+   113→  else { score += 5; factors.push({ name: 'SL Distance', impact: 5, detail: `Safe at ${slDistPct.toFixed(0)}%` }); }
+   114→
+   115→  // Factor 3: Age penalty (±15 points)
+   116→  const agePct = maxHoldingDays > 0 ? holdingDays / maxHoldingDays : 0;
+   117→  if (agePct >= 0.9) { score -= 15; factors.push({ name: 'Age', impact: -15, detail: `${holdingDays}/${maxHoldingDays}d (expired)` }); }
+   118→  else if (agePct >= 0.7) { score -= 8; factors.push({ name: 'Age', impact: -8, detail: `${holdingDays}/${maxHoldingDays}d (aging)` }); }
+   119→  else if (agePct < 0.3) { score += 5; factors.push({ name: 'Age', impact: 5, detail: `Fresh ${holdingDays}d` }); }
+   120→
+   121→  // Factor 4: Trend to TP (±10 points)
+   122→  if (tp > entryPrice && cp > entryPrice) {
+   123→    const tpProgress = ((cp - entryPrice) / (tp - entryPrice)) * 100;
+   124→    if (tpProgress > 75) { score += 10; factors.push({ name: 'TP Progress', impact: 10, detail: `${tpProgress.toFixed(0)}% to TP` }); }
+   125→    else if (tpProgress > 40) { score += 5; factors.push({ name: 'TP Progress', impact: 5, detail: `${tpProgress.toFixed(0)}% to TP` }); }
+   126→  }
+   127→
+   128→  // Clamp score
+   129→  score = Math.max(0, Math.min(100, score));
+   130→
+   131→  let urgency: HealthScore['urgency'] = 'OK';
+   132→  if (score < 30) urgency = 'CRITICAL';
+   133→  else if (score < 55) urgency = 'WARNING';
+   134→
+   135→  return { score, factors, urgency };
+   136→}
+   137→
+   138→// ── Helpers ────────────────────────────────────────────
+   139→function isMarketHours(): boolean {
+   140→  const now = new Date();
+   141→  const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000) + (now.getTimezoneOffset() * 60 * 1000));
+   142→  const day = ist.getDay();
+   143→  if (day === 0 || day === 6) return false;
+   144→  const h = ist.getHours();
+   145→  const m = ist.getMinutes();
+   146→  const mins = h * 60 + m;
+   147→  return mins >= 555 && mins <= 930;
+   148→}
+   149→
+   150→function timeToClose(): number {
+   151→  const now = new Date();
+   152→  const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000) + (now.getTimezoneOffset() * 60 * 1000));
+   153→  const h = ist.getHours();
+   154→  const m = ist.getMinutes();
+   155→  const mins = h * 60 + m;
+   156→  return Math.max(0, 930 - mins);
+   157→}
+   158→
+   159→async function getRules(): Promise<PositionRules> {
+   160→  try {
+   161→    const s = await db.appSettings.findMany();
+   162→    const m: Record<string, string> = {};
+   163→    for (const x of s) m[x.key] = x.value;
+   164→    return {
+   165→      maxPerStock: parseFloat(m['rules_maxPerStock'] || '') || DEFAULT_RULES.maxPerStock,
+   166→      maxBuysPerMonth: parseInt(m['rules_maxBuysPerMonth'] || '') || DEFAULT_RULES.maxBuysPerMonth,
+   167→      maxHoldingDays: parseInt(m['rules_maxHoldingDays'] || '') || DEFAULT_RULES.maxHoldingDays,
+   168→      maxTotalPositions: parseInt(m['rules_maxTotalPositions'] || '') || DEFAULT_RULES.maxTotalPositions,
+   169→      riskPerTradePct: parseFloat(m['rules_riskPerTradePct'] || '') || DEFAULT_RULES.riskPerTradePct,
+   170→      trailingStopR: parseFloat(m['rules_trailingStopR'] || '') || DEFAULT_RULES.trailingStopR,
+   171→      trailToR: parseFloat(m['rules_trailToR'] || '') || DEFAULT_RULES.trailToR,
+   172→      partialBookR: parseFloat(m['rules_partialBookR'] || '') || DEFAULT_RULES.partialBookR,
+   173→      partialBookPct: parseFloat(m['rules_partialBookPct'] || '') || DEFAULT_RULES.partialBookPct,
+   174→      cooldownDays: parseInt(m['rules_cooldownDays'] || '') || DEFAULT_RULES.cooldownDays,
+   175→      maxSectorPct: parseFloat(m['rules_maxSectorPct'] || '') || DEFAULT_RULES.maxSectorPct,
+   176→      timeExitMins: parseInt(m['rules_timeExitMins'] || '') || DEFAULT_RULES.timeExitMins,
+   177→      // v2 rules
+   178→      maxDrawdownPct: parseFloat(m['rules_maxDrawdownPct'] || '') || DEFAULT_RULES.maxDrawdownPct,
+   179→      dailyLossLimit: parseFloat(m['rules_dailyLossLimit'] || '') || DEFAULT_RULES.dailyLossLimit,
+   180→      niftyRegimeFilter: m['rules_niftyRegimeFilter'] !== 'false',
+   181→      atrTrailMultiplier: parseFloat(m['rules_atrTrailMultiplier'] || '') || DEFAULT_RULES.atrTrailMultiplier,
+   182→      adaptiveSizing: m['rules_adaptiveSizing'] !== 'false',
+   183→      streakPenaltyPct: parseFloat(m['rules_streakPenaltyPct'] || '') || DEFAULT_RULES.streakPenaltyPct,
+   184→    };
+   185→  } catch { return DEFAULT_RULES; }
+   186→}
+   187→
+   188→async function getSchedulerState(): Promise<SchedulerState> {
+   189→  try {
+   190→    const s = await db.appSettings.findMany();
+   191→    const m: Record<string, string> = {};
+   192→    for (const x of s) m[x.key] = x.value;
+   193→    return {
+   194→      enabled: m['sched_enabled'] === 'true',
+   195→      scanIntervalMin: parseInt(m['sched_scanIntervalMin'] || '') || DEFAULT_SCHEDULER.scanIntervalMin,
+   196→      exitIntervalMin: parseInt(m['sched_exitIntervalMin'] || '') || DEFAULT_SCHEDULER.exitIntervalMin,
+   197→      lastScanAt: m['sched_lastScanAt'] || null,
+   198→      lastExitAt: m['sched_lastExitAt'] || null,
+   199→      nextScanAt: m['sched_nextScanAt'] || null,
+   200→      nextExitAt: m['sched_nextExitAt'] || null,
+   201→      todayEntries: parseInt(m['sched_todayEntries'] || '0'),
+   202→      todayExits: parseInt(m['sched_todayExits'] || '0'),
+   203→      todayPnl: parseFloat(m['sched_todayPnl'] || '0'),
+   204→      scanCount: parseInt(m['sched_scanCount'] || '0'),
+   205→      // v2 state
+   206→      circuitBreaker: m['sched_circuitBreaker'] === 'true',
+   207→      circuitBreakerReason: m['sched_circuitBreakerReason'] || '',
+   208→      niftyRegime: (m['sched_niftyRegime'] as SchedulerState['niftyRegime']) || 'UNKNOWN',
+   209→      consecutiveLosses: parseInt(m['sched_consecutiveLosses'] || '0'),
+   210→      lastAdaptiveFactor: parseFloat(m['sched_lastAdaptiveFactor'] || '1'),
+   211→    };
+   212→  } catch { return DEFAULT_SCHEDULER; }
+   213→}
+   214→
+   215→async function setSchedulerKV(k: string, v: string) {
+   216→  await db.appSettings.upsert({ where: { key: k }, create: { key: k, value: v }, update: { value: v } });
+   217→}
+   218→
+   219→async function resetDailyCounters() {
+   220→  const today = new Date().toISOString().split('T')[0];
+   221→  const lastReset = (await db.appSettings.findUnique({ where: { key: 'sched_lastResetDate' } }))?.value;
+   222→  if (lastReset !== today) {
+   223→    await setSchedulerKV('sched_todayEntries', '0');
+   224→    await setSchedulerKV('sched_todayExits', '0');
+   225→    await setSchedulerKV('sched_todayPnl', '0');
+   226→    await setSchedulerKV('sched_lastResetDate', today);
+   227→    // Reset circuit breaker on new day (fresh start)
+   228→    await setSchedulerKV('sched_circuitBreaker', 'false');
+   229→    await setSchedulerKV('sched_circuitBreakerReason', '');
+   230→  }
+   231→}
+   232→
+   233→async function getWallet() {
+   234→  let w = await db.capitalWallet.findFirst();
+   235→  if (!w) w = await db.capitalWallet.create({ data: { totalCapital: 200000, initialCapital: 200000, available: 200000 } });
+   236→  return w;
+   237→}
+   238→
+   239→async function recalcWallet() {
+   240→  const w = await getWallet();
+   241→  const open = await db.paperTrade.findMany({ where: { status: 'OPEN' } });
+   242→  const deployed = open.reduce((s, t) => s + t.entryPrice * t.qty, 0);
+   243→  const total = w.totalCapital + w.realizedPnl;
+   244→  let unrealizedPnl = 0;
+   245→  const syms = [...new Set(open.map(t => t.symbol))];
+   246→  for (const sym of syms) {
+   247→    try {
+   248→      const { price } = await getCurrentPrice(sym);
+   249→      for (const t of open.filter(t => t.symbol === sym)) {
+   250→        unrealizedPnl += (price - t.entryPrice) * t.qty;
+   251→      }
+   252→    } catch { /* skip */ }
+   253→  }
+   254→  await db.capitalWallet.update({ where: { id: w.id }, data: { deployed, available: total - deployed, unrealizedPnl, totalCapital: total } });
+   255→  return { ...w, deployed, available: total - deployed, unrealizedPnl, totalCapital: total, initialCapital: w.initialCapital };
+   256→}
+   257→
+   258→async function getSectorAllocation(): Promise<Record<string, number>> {
+   259→  const open = await db.paperTrade.findMany({ where: { status: 'OPEN' } });
+   260→  const w = await getWallet();
+   261→  const total = w.totalCapital;
+   262→  if (total <= 0) return {};
+   263→  const sectors: Record<string, number> = {};
+   264→  for (const t of open) {
+   265→    const ws = await db.watchlistStock.findUnique({ where: { symbol: t.symbol } });
+   266→    const sector = ws?.sector || t.tags?.split(',').find((tag: string) => !['auto','aplus','b','partial-booked'].includes(tag)) || 'Unknown';
+   267→    sectors[sector] = (sectors[sector] || 0) + (t.entryPrice * t.qty);
+   268→  }
+   269→  const pct: Record<string, number> = {};
+   270→  for (const [k, v] of Object.entries(sectors)) pct[k] = (v / total) * 100;
+   271→  return pct;
+   272→}
+   273→
+   274→// ── v2: Drawdown & Circuit Breaker ─────────────────────
+   275→async function getPortfolioDrawdown(): Promise<{ drawdownPct: number; peakCapital: number; currentCapital: number }> {
+   276→  const w = await getWallet();
+   277→  const open = await db.paperTrade.findMany({ where: { status: 'OPEN' } });
+   278→  let unrealizedPnl = 0;
+   279→  const syms = [...new Set(open.map(t => t.symbol))];
+   280→  for (const sym of syms) {
+   281→    try {
+   282→      const { price } = await getCurrentPrice(sym);
+   283→      for (const t of open.filter(t => t.symbol === sym)) {
+   284→        unrealizedPnl += (price - t.entryPrice) * t.qty;
+   285→      }
+   286→    } catch { /* skip */ }
+   287→  }
+   288→
+   289→  const currentCapital = w.totalCapital + unrealizedPnl;
+   290→  // Peak = highest totalCapital value we've seen (initial + best realized)
+   291→  const peakCapital = Math.max(w.initialCapital, w.totalCapital + w.realizedPnl, currentCapital);
+   292→  const drawdownPct = peakCapital > 0 ? ((peakCapital - currentCapital) / peakCapital) * 100 : 0;
+   293→  return { drawdownPct, peakCapital, currentCapital };
+   294→}
+   295→
+   296→async function getConsecutiveLosses(): Promise<number> {
+   297→  const recent = await db.paperTrade.findMany({
+   298→    where: { status: 'CLOSED', autoTraded: true, pnl: { not: null } },
+   299→    orderBy: { exitDate: 'desc' },
+   300→    take: 10,
+   301→  });
+   302→  let streak = 0;
+   303→  for (const t of recent) {
+   304→    if ((t.pnl || 0) < 0) streak++;
+   305→    else break;
+   306→  }
+   307→  return streak;
+   308→}
+   309→
+   310→function getAdaptiveFactor(consecutiveLosses: number, rules: PositionRules): number {
+   311→  if (!rules.adaptiveSizing) return 1.0;
+   312→  if (consecutiveLosses < 3) return 1.0;
+   313→  // Reduce by streakPenaltyPct for each loss beyond 2, min 20% of original
+   314→  const reductions = consecutiveLosses - 2;
+   315→  const factor = 1.0 - (reductions * (rules.streakPenaltyPct / 100));
+   316→  return Math.max(0.2, Math.min(1.0, factor));
+   317→}
+   318→
+   319→// ── v2: Nifty Regime Detection ──────────────────────────
+   320→async function getNiftyRegime(niftyData: any[]): Promise<{ regime: 'BULLISH' | 'BEARISH' | 'UNKNOWN'; ema200: number; currentClose: number }> {
+   321→  if (niftyData.length < 200) return { regime: 'UNKNOWN', ema200: 0, currentClose: 0 };
+   322→  const closes = niftyData.map(c => c.close);
+   323→  const ema200Arr = EMA.calculate({ period: 200, values: closes });
+   324→  if (ema200Arr.length === 0) return { regime: 'UNKNOWN', ema200: 0, currentClose: 0 };
+   325→  const ema200 = ema200Arr[ema200Arr.length - 1];
+   326→  const currentClose = closes[closes.length - 1];
+   327→  return {
+   328→    regime: currentClose > ema200 ? 'BULLISH' : 'BEARISH',
+   329→    ema200: Math.round(ema200 * 100) / 100,
+   330→    currentClose: Math.round(currentClose * 100) / 100,
+   331→  };
+   332→}
+   333→
+   334→// ── v2: ATR-based Trailing Stop ─────────────────────────
+   335→async function getATRTrailLevel(symbol: string, entryPrice: number, currentPrice: number, risk: number, rules: PositionRules): Promise<{ useATR: boolean; trailLevel: number; atr: number }> {
+   336→  if (rules.atrTrailMultiplier <= 0) {
+   337→    // Use fixed R-based trail (v1 behavior)
+   338→    const trailLevel = entryPrice + (risk * rules.trailToR);
+   339→    return { useATR: false, trailLevel, atr: 0 };
+   340→  }
+   341→
+   342→  try {
+   343→    const { data } = await getHistoricalData(symbol, 30);
+   344→    if (data.length < 14) return { useATR: false, trailLevel: entryPrice + (risk * rules.trailToR), atr: 0 };
+   345→
+   346→    const atrArr = ATR.calculate({
+   347→      period: 14,
+   348→      high: data.map(c => c.high),
+   349→      low: data.map(c => c.low),
+   350→      close: data.map(c => c.close),
+   351→    });
+   352→    if (atrArr.length === 0) return { useATR: false, trailLevel: entryPrice + (risk * rules.trailToR), atr: 0 };
+   353→
+   354→    const atr = atrArr[atrArr.length - 1];
+   355→    // Trail level = highest close seen - ATR * multiplier (stored in notes, or use current price as proxy)
+   356→    // Since we don't track the high-water mark in DB, use: max(current, entry) - ATR * multiplier
+   357→    const highWaterMark = Math.max(currentPrice, entryPrice);
+   358→    const trailLevel = highWaterMark - (atr * rules.atrTrailMultiplier);
+   359→    return { useATR: true, trailLevel: Math.round(trailLevel * 100) / 100, atr: Math.round(atr * 100) / 100 };
+   360→  } catch {
+   361→    return { useATR: false, trailLevel: entryPrice + (risk * rules.trailToR), atr: 0 };
+   362→  }
+   363→}
+   364→
+   365→// ── Gate Checks (v2 enhanced canOpen) ───────────────────
+   366→async function canOpen(symbol: string, entryPrice: number, qty: number, rules: PositionRules, sector?: string): Promise<{ ok: boolean; reason: string }> {
+   367→  const w = await getWallet();
+   368→  const open = await db.paperTrade.findMany({ where: { status: 'OPEN' } });
+   369→  const now = new Date();
+   370→
+   371→  // === v2: Circuit Breaker Check ===
+   372→  const { drawdownPct } = await getPortfolioDrawdown();
+   373→  if (drawdownPct >= rules.maxDrawdownPct) {
+   374→    return { ok: false, reason: `CIRCUIT BREAKER: Drawdown ${drawdownPct.toFixed(1)}% >= ${rules.maxDrawdownPct}%` };
+   375→  }
+   376→
+   377→  // === v2: Daily Loss Limit ===
+   378→  await resetDailyCounters();
+   379→  const st = await getSchedulerState();
+   380→  if (st.todayPnl < 0 && Math.abs(st.todayPnl) >= rules.dailyLossLimit) {
+   381→    return { ok: false, reason: `DAILY LOSS LIMIT: ₹${Math.abs(st.todayPnl).toFixed(0)} >= ₹${rules.dailyLossLimit}` };
+   382→  }
+   383→
+   384→  // Max positions check
+   385→  if (open.length >= rules.maxTotalPositions) return { ok: false, reason: `Max ${rules.maxTotalPositions} positions` };
+   386→
+   387→  // Per-stock cap
+   388→  const stockOpen = open.filter(t => t.symbol === symbol);
+   389→  const stockDep = stockOpen.reduce((s, t) => s + t.entryPrice * t.qty, 0);
+   390→  if (stockDep + entryPrice * qty > rules.maxPerStock) return { ok: false, reason: `Max ₹${rules.maxPerStock}/stock` };
+   391→
+   392→  // Duplicate position
+   393→  if (stockOpen.length > 0) return { ok: false, reason: 'Open position exists' };
+   394→
+   395→  // Monthly cap
+   396→  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+   397→  const monthTrades = await db.paperTrade.count({ where: { symbol, entryDate: { gte: monthStart } } });
+   398→  if (monthTrades >= rules.maxBuysPerMonth) return { ok: false, reason: `Max ${rules.maxBuysPerMonth} buys/month` };
+   399→
+   400→  // Capital check
+   401→  if (entryPrice * qty > w.available) return { ok: false, reason: 'Insufficient capital' };
+   402→
+   403→  // Cooldown check
+   404→  if (rules.cooldownDays > 0) {
+   405→    const lastExit = await db.paperTrade.findFirst({
+   406→      where: { symbol, status: 'CLOSED', exitDate: { not: null } },
+   407→      orderBy: { exitDate: 'desc' },
+   408→    });
+   409→    if (lastExit?.exitDate) {
+   410→      const daysSinceExit = (now.getTime() - new Date(lastExit.exitDate).getTime()) / 86400000;
+   411→      if (daysSinceExit < rules.cooldownDays) {
+   412→        return { ok: false, reason: `Cooldown: ${Math.ceil(rules.cooldownDays - daysSinceExit)}d remaining` };
+   413→      }
+   414→    }
+   415→  }
+   416→
+   417→  // Sector concentration check
+   418→  if (sector && rules.maxSectorPct > 0) {
+   419→    const sectorAlloc = await getSectorAllocation();
+   420→    const currentPct = sectorAlloc[sector] || 0;
+   421→    const newPct = currentPct + ((entryPrice * qty) / w.totalCapital) * 100;
+   422→    if (newPct > rules.maxSectorPct) {
+   423→      return { ok: false, reason: `Sector cap: ${sector} at ${currentPct.toFixed(1)}% (max ${rules.maxSectorPct}%)` };
+   424→    }
+   425→  }
+   426→
+   427→  return { ok: true };
+   428→}
+   429→
+   430→// ── Core Engine: Scan & Auto-Enter (v2) ────────────────
+   431→async function autoScanAndTrade(config: ScreeningConfig) {
+   432→  const rules = await getRules();
+   433→  const stocks = getFullUniverse();
+   434→  const entries: any[] = [];
+   435→  const skipped: any[] = [];
+   436→  let niftyData: any[] = [];
+   437→  let niftyRegime: 'BULLISH' | 'BEARISH' | 'UNKNOWN' = 'UNKNOWN';
+   438→
+   439→  try {
+   440→    const result = await getHistoricalData('NIFTY50', 350);
+   441→    niftyData = result.data;
+   442→  } catch {
+   443→    skipped.push({ symbol: 'NIFTY50', reason: 'Failed to fetch Nifty data for macro filter' });
+   444→    return { entries, skipped, l1Passed: 0, l2Signals: 0, totalScanned: stocks.length, circuitBreaker: false, niftyRegime: 'UNKNOWN' };
+   445→  }
+   446→
+   447→  // v2: Nifty Regime Filter
+   448→  const regime = await getNiftyRegime(niftyData);
+   449→  niftyRegime = regime.regime;
+   450→  await setSchedulerKV('sched_niftyRegime', regime.regime);
+   451→
+   452→  if (rules.niftyRegimeFilter && regime.regime === 'BEARISH') {
+   453→    return {
+   454→      entries, skipped: [{ symbol: 'FILTER', reason: `Nifty regime BEARISH (Close ${regime.currentClose} < EMA200 ${regime.ema200})` }],
+   455→      l1Passed: 0, l2Signals: 0, totalScanned: stocks.length, circuitBreaker: false, niftyRegime,
+   456→    };
+   457→  }
+   458→
+   459→  // v2: Circuit breaker & daily loss check
+   460→  await resetDailyCounters();
+   461→  const { drawdownPct } = await getPortfolioDrawdown();
+   462→  const st = await getSchedulerState();
+   463→  if (drawdownPct >= rules.maxDrawdownPct) {
+   464→    await setSchedulerKV('sched_circuitBreaker', 'true');
+   465→    await setSchedulerKV('sched_circuitBreakerReason', `Drawdown ${drawdownPct.toFixed(1)}% >= ${rules.maxDrawdownPct}%`);
+   466→    return {
+   467→      entries, skipped: [{ symbol: 'CIRCUIT_BREAKER', reason: `Portfolio drawdown ${drawdownPct.toFixed(1)}% exceeds ${rules.maxDrawdownPct}% limit` }],
+   468→      l1Passed: 0, l2Signals: 0, totalScanned: stocks.length, circuitBreaker: true, niftyRegime,
+   469→    };
+   470→  }
+   471→  if (st.todayPnl < 0 && Math.abs(st.todayPnl) >= rules.dailyLossLimit) {
+   472→    await setSchedulerKV('sched_circuitBreaker', 'true');
+   473→    await setSchedulerKV('sched_circuitBreakerReason', `Daily loss ₹${Math.abs(st.todayPnl).toFixed(0)} >= ₹${rules.dailyLossLimit}`);
+   474→    return {
+   475→      entries, skipped: [{ symbol: 'DAILY_LIMIT', reason: `Daily loss ₹${Math.abs(st.todayPnl).toFixed(0)} exceeds ₹${rules.dailyLossLimit} limit` }],
+   476→      l1Passed: 0, l2Signals: 0, totalScanned: stocks.length, circuitBreaker: true, niftyRegime,
+   477→    };
+   478→  }
+   479→
+   480→  // v2: Adaptive sizing factor
+   481→  const consLosses = await getConsecutiveLosses();
+   482→  await setSchedulerKV('sched_consecutiveLosses', String(consLosses));
+   483→  const adaptiveFactor = getAdaptiveFactor(consLosses, rules);
+   484→  await setSchedulerKV('sched_lastAdaptiveFactor', String(adaptiveFactor));
+   485→
+   486→  // L1 filter in batches
+   487→  const BATCH = 15;
+   488→  const l1Pass: { stock: NSEStock; data: any[] }[] = [];
+   489→  for (let i = 0; i < stocks.length; i += BATCH) {
+   490→    const batch = stocks.slice(i, i + BATCH);
+   491→    const results = await Promise.allSettled(batch.map(async (stock) => {
+   492→      const { data } = await getHistoricalData(stock.symbol, 300);
+   493→      return { stock, data };
+   494→    }));
+   495→    for (const r of results) {
+   496→      if (r.status !== 'fulfilled') continue;
+   497→      const l1 = runL1Filter(r.value.stock.symbol, r.value.stock.name, r.value.stock.sector, r.value.stock.category, r.value.data);
+   498→      if (l1 && l1.passed) l1Pass.push(r.value);
+   499→    }
+   500→  }
+   501→
+   502→  // L2 V-Swing + auto-enter with v2 enhancements
+   503→  for (const { stock, data } of l1Pass) {
+   504→    try {
+   505→      const signal = runScreening(stock.symbol, data, niftyData, config);
+   506→      if (!signal) { skipped.push({ symbol: stock.symbol, reason: 'No V-Swing signal' }); continue; }
+   507→
+   508→      // v2: Apply adaptive sizing
+   509→      let qty = signal.setupType === 'A+' ? signal.sizing.qtyA : signal.sizing.qtyB;
+   510→      if (adaptiveFactor < 1.0) {
+   511→        const adjustedQty = Math.max(1, Math.floor(qty * adaptiveFactor));
+   512→        skipped.push({
+   513→          symbol: stock.symbol, reason: `Adaptive sizing: ${qty} → ${adjustedQty} (${(adaptiveFactor * 100).toFixed(0)}% factor, ${consLosses} consecutive losses)`,
+   514→        });
+   515→        // Only show as info, still proceed with adjusted qty
+   516→        qty = adjustedQty;
+   517→      }
+   518→      if (qty <= 0) { skipped.push({ symbol: stock.symbol, reason: 'Qty=0' }); continue; }
+   519→
+   520→      const check = await canOpen(stock.symbol, signal.entryPrice, qty, rules, stock.sector);
+   521→      if (!check.ok) { skipped.push({ symbol: stock.symbol, reason: check.reason }); continue; }
+   522→
+   523→      const trade = await db.paperTrade.create({
+   524→        data: {
+   525→          symbol: stock.symbol, stockName: stock.name, direction: 'LONG',
+   526→          entryDate: new Date(), entryPrice: signal.entryPrice, qty,
+   527→          stopLoss: signal.stopLoss, targetPrice: signal.targetPrice,
+   528→          autoTraded: true,
+   529→          notes: `AUTO | ${signal.setupType} | Score:${signal.score}/6 | R:R:${signal.riskReward}x | Regime:${niftyRegime} | Factor:${(adaptiveFactor * 100).toFixed(0)}%`,
+   530→          tags: `auto,${signal.setupType === 'A+' ? 'aplus' : 'b'},score-${signal.score},${stock.sector || ''}`.replace(/,$/, ''),
+   531→        },
+   532→      });
+   533→      await db.autoTradeLog.create({
+   534→        data: {
+   535→          action: 'AUTO_ENTRY', symbol: stock.symbol, tradeId: trade.id,
+   536→          signal: JSON.stringify(signal), executed: true,
+   537→          reason: `${signal.setupType} | Score ${signal.score}/6 | Qty ${qty} | R:R ${signal.riskReward}x | Factor:${(adaptiveFactor * 100).toFixed(0)}%`,
+   538→        },
+   539→      });
+   540→
+   541→      await resetDailyCounters();
+   542→      const st2 = await getSchedulerState();
+   543→      await setSchedulerKV('sched_todayEntries', String(st2.todayEntries + 1));
+   544→      await setSchedulerKV('sched_scanCount', String(st2.scanCount + 1));
+   545→
+   546→      entries.push({
+   547→        symbol: stock.symbol, setupType: signal.setupType, score: signal.score,
+   548→        entryPrice: signal.entryPrice, qty, tradeId: trade.id,
+   549→        adaptiveFactor, niftyRegime,
+   550→      });
+   551→    } catch (err) { skipped.push({ symbol: stock.symbol, reason: String(err) }); }
+   552→  }
+   553→  await recalcWallet();
+   554→  return {
+   555→    entries, skipped, l1Passed: l1Pass.length, l2Signals: entries.length,
+   556→    totalScanned: stocks.length, circuitBreaker: false, niftyRegime,
+   557→    adaptiveFactor, consecutiveLosses: consLosses, drawdownPct,
+   558→  };
+   559→}
+   560→
+   561→// ── Core Engine: Check Exits (v2 with health scoring) ─
+   562→async function autoCheckExits() {
+   563→  const rules = await getRules();
+   564→  const openTrades = await db.paperTrade.findMany({ where: { status: 'OPEN' }, orderBy: { entryDate: 'asc' } });
+   565→  const exits: any[] = [];
+   566→  const holding: any[] = [];
+   567→  const partialBooks: any[] = [];
+   568→  const warnings: any[] = [];
+   569→
+   570→  const minsToClose = timeToClose();
+   571→  const shouldTimeExit = minsToClose <= rules.timeExitMins && minsToClose > 0;
+   572→
+   573→  for (const trade of openTrades) {
+   574→    try {
+   575→      const { price: cp } = await getCurrentPrice(trade.symbol);
+   576→      if (cp <= 0) { holding.push({ symbol: trade.symbol, error: 'Price unavailable' }); continue; }
+   577→
+   578→      const days = Math.floor((Date.now() - new Date(trade.entryDate).getTime()) / 86400000);
+   579→      const risk = trade.entryPrice - trade.stopLoss;
+   580→      const rMultiple = risk > 0 ? (cp - trade.entryPrice) / risk : 0;
+   581→      let shouldExit = false;
+   582→      let reason = '';
+   583→      let exitPrice = cp;
+   584→      let exitQty = trade.qty;
+   585→
+   586→      // 1. Hard SL hit
+   587→      if (cp <= trade.stopLoss) {
+   588→        shouldExit = true; reason = 'SL_HIT'; exitPrice = trade.stopLoss;
+   589→      }
+   590→      // 2. Hard TP hit
+   591→      else if (cp >= trade.targetPrice) {
+   592→        shouldExit = true; reason = 'TP_HIT'; exitPrice = trade.targetPrice;
+   593→      }
+   594→      // 3. Trailing stop (v2: ATR-based if configured)
+   595→      else if (risk > 0 && rMultiple >= rules.trailingStopR) {
+   596→        const trail = await getATRTrailLevel(trade.symbol, trade.entryPrice, cp, risk, rules);
+   597→        if (trail.useATR) {
+   598→          // ATR trailing: only exit if price drops below ATR-based level
+   599→          if (cp <= trail.trailLevel) {
+   600→            shouldExit = true; reason = 'ATR_TRAIL_STOP'; exitPrice = trail.trailLevel;
+   601→          }
+   602→        } else {
+   603→          // Fixed R trailing (v1 behavior)
+   604→          const trailLevel = trade.entryPrice + (risk * rules.trailToR);
+   605→          if (cp <= trailLevel) {
+   606→            shouldExit = true; reason = 'TRAIL_STOP'; exitPrice = trailLevel;
+   607→          }
+   608→        }
+   609→      }
+   610→      // 4. Max holding days
+   611→      else if (days >= rules.maxHoldingDays) {
+   612→        shouldExit = true; reason = 'MAX_HOLDING_DAYS';
+   613→      }
+   614→      // 5. v2: Stale loser acceleration — exit aging losing positions faster
+   615→      else if (days >= rules.maxHoldingDays * 0.7 && rMultiple < -0.3) {
+   616→        shouldExit = true; reason = 'STALE_LOSER';
+   617→      }
+   618→      // 6. Time-based exit
+   619→      else if (shouldTimeExit) {
+   620→        if (rMultiple < 0.5) {
+   621→          shouldExit = true; reason = 'TIME_EXIT'; exitPrice = cp;
+   622→        }
+   623→      }
+   624→
+   625→      // 7. Partial booking (doesn't trigger full exit)
+   626→      if (!shouldExit && risk > 0 && rMultiple >= rules.partialBookR && trade.qty > 1) {
+   627→        const alreadyBooked = trade.tags?.includes('partial-booked');
+   628→        if (!alreadyBooked) {
+   629→          const bookQty = Math.max(1, Math.floor(trade.qty * (rules.partialBookPct / 100)));
+   630→          const remainingQty = trade.qty - bookQty;
+   631→          if (remainingQty >= 1) {
+   632→            const bookPnl = (cp - trade.entryPrice) * bookQty;
+   633→            await db.paperTrade.update({
+   634→              where: { id: trade.id },
+   635→              data: { qty: remainingQty, tags: (trade.tags ? trade.tags + ',' : '') + 'partial-booked' },
+   636→            });
+   637→            const w = await getWallet();
+   638→            await db.capitalWallet.update({ where: { id: w.id }, data: { realizedPnl: w.realizedPnl + bookPnl } });
+   639→            await db.autoTradeLog.create({
+   640→              action: 'PARTIAL_BOOK', symbol: trade.symbol, tradeId: trade.id,
+   641→              executed: true, reason: `Booked ${bookQty}/${trade.qty + bookQty} at ${rMultiple.toFixed(1)}R | P&L: ₹${bookPnl.toLocaleString()}`,
+   642→            });
+   643→            partialBooks.push({ symbol: trade.symbol, bookedQty: bookQty, remainingQty, rMultiple, pnl: bookPnl, exitPrice: cp });
+   644→          }
+   645→        }
+   646→      }
+   647→
+   648→      // Execute full exit
+   649→      if (shouldExit) {
+   650→        const pnl = (exitPrice - trade.entryPrice) * exitQty;
+   651→        const pnlPct = ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100;
+   652→        await db.paperTrade.update({
+   653→          where: { id: trade.id },
+   654→          data: { status: 'CLOSED', exitDate: new Date(), exitPrice, pnl, pnlPercent: pnlPct, exitReason: reason },
+   655→        });
+   656→        const w = await getWallet();
+   657→        await db.capitalWallet.update({ where: { id: w.id }, data: { realizedPnl: w.realizedPnl + pnl } });
+   658→        await db.autoTradeLog.create({
+   659→          action: `AUTO_EXIT_${reason}`, symbol: trade.symbol, tradeId: trade.id,
+   660→          executed: true, reason: `${reason} | ₹${trade.entryPrice}→₹${exitPrice} | P&L: ₹${pnl.toLocaleString()} | ${rMultiple.toFixed(1)}R`,
+   661→        });
+   662→
+   663→        // v2: Track consecutive losses for adaptive sizing
+   664→        if (pnl < 0) {
+   665→          const newStreak = (await getSchedulerState()).consecutiveLosses + 1;
+   666→          await setSchedulerKV('sched_consecutiveLosses', String(newStreak));
+   667→        } else {
+   668→          await setSchedulerKV('sched_consecutiveLosses', '0');
+   669→          // Reset adaptive factor on win
+   670→          await setSchedulerKV('sched_lastAdaptiveFactor', '1');
+   671→        }
+   672→
+   673→        await resetDailyCounters();
+   674→        const st2 = await getSchedulerState();
+   675→        await setSchedulerKV('sched_todayExits', String(st2.todayExits + 1));
+   676→        await setSchedulerKV('sched_todayPnl', String(st2.todayPnl + pnl));
+   677→
+   678→        // v2: Check if we need to activate daily loss circuit breaker
+   679→        const updatedSt = await getSchedulerState();
+   680→        if (updatedSt.todayPnl < 0 && Math.abs(updatedSt.todayPnl) >= rules.dailyLossLimit) {
+   681→          await setSchedulerKV('sched_circuitBreaker', 'true');
+   682→          await setSchedulerKV('sched_circuitBreakerReason', `Daily loss ₹${Math.abs(updatedSt.todayPnl).toFixed(0)} >= ₹${rules.dailyLossLimit}`);
+   683→        }
+   684→
+   685→        exits.push({
+   686→          symbol: trade.symbol, exitReason: reason, entryPrice: trade.entryPrice, exitPrice,
+   687→          pnl, pnlPercent: pnlPct, holdingDays: days, rMultiple: rMultiple.toFixed(2),
+   688→        });
+   689→      } else {
+   690→        // v2: Position Health Score
+   691→        const health = scorePositionHealth(cp, trade.entryPrice, trade.stopLoss, trade.targetPrice, days, rules.maxHoldingDays, rMultiple);
+   692→        const healthData: any = {
+   693→          symbol: trade.symbol, entryPrice: trade.entryPrice, currentPrice: cp,
+   694→          pnl: (cp - trade.entryPrice) * trade.qty,
+   695→          pnlPercent: ((cp - trade.entryPrice) / trade.entryPrice) * 100,
+   696→          holdingDays: days, maxHoldingDays: rules.maxHoldingDays,
+   697→          sl: trade.stopLoss, tp: trade.targetPrice, rMultiple: rMultiple.toFixed(2),
+   698→          healthScore: health.score, healthUrgency: health.urgency, healthFactors: health.factors,
+   699→        };
+   700→
+   701→        if (health.urgency === 'CRITICAL') {
+   702→          healthData.slWarning = true;
+   703→          warnings.push({ ...healthData, type: health.score < 20 ? 'SL_PROXIMITY' : 'AGING', message: `${trade.symbol} health ${health.score}/100 (${health.urgency})` });
+   704→        } else if (health.urgency === 'WARNING') {
+   705→          warnings.push({ ...healthData, type: 'AGING', message: `${trade.symbol} health ${health.score}/100` });
+   706→        }
+   707→
+   708→        holding.push(healthData);
+   709→      }
+   710→    } catch { holding.push({ symbol: trade.symbol, error: 'Price fetch failed' }); }
+   711→  }
+   712→
+   713→  if (exits.length > 0 || partialBooks.length > 0) await recalcWallet();
+   714→  return { exits, holding, partialBooks, warnings, timeToClose: minsToClose, marketHours: isMarketHours() };
+   715→}
+   716→
+   717→// ── Scheduler Control ──────────────────────────────────
+   718→async function runSchedulerTick() {
+   719→  if (!isMarketHours()) return { marketHours: false, message: 'Market closed' };
+   720→  const state = await getSchedulerState();
+   721→  if (!state.enabled) return { marketHours: true, enabled: false };
+   722→
+   723→  await resetDailyCounters();
+   724→  const now = new Date();
+   725→  const results: any = { scanResult: null, exitResult: null };
+   726→
+   727→  if (state.nextScanAt) {
+   728→    const nextScan = new Date(state.nextScanAt);
+   729→    if (now >= nextScan) {
+   730→      const config: ScreeningConfig = DEFAULT_CONFIG;
+   731→      results.scanResult = await autoScanAndTrade(config);
+   732→      await setSchedulerKV('sched_lastScanAt', now.toISOString());
+   733→      const next = new Date(now.getTime() + state.scanIntervalMin * 60000);
+   734→      await setSchedulerKV('sched_nextScanAt', next.toISOString());
+   735→    }
+   736→  }
+   737→
+   738→  if (state.nextExitAt) {
+   739→    const nextExit = new Date(state.nextExitAt);
+   740→    if (now >= nextExit) {
+   741→      results.exitResult = await autoCheckExits();
+   742→      await setSchedulerKV('sched_lastExitAt', now.toISOString());
+   743→      const next = new Date(now.getTime() + state.exitIntervalMin * 60000);
+   744→      await setSchedulerKV('sched_nextExitAt', next.toISOString());
+   745→    }
+   746→  }
+   747→
+   748→  return { ...results, marketHours: true, enabled: true, schedulerState: await getSchedulerState() };
+   749→}
+   750→
+   751→// ── API Endpoints ──────────────────────────────────────
+   752→export async function GET() {
+   753→  try {
+   754→    const wallet = await recalcWallet();
+   755→    const openTrades = await db.paperTrade.findMany({ where: { status: 'OPEN', autoTraded: true }, orderBy: { entryDate: 'desc' } });
+   756→    const recentLogs = await db.autoTradeLog.findMany({ orderBy: { createdAt: 'desc' }, take: 50 });
+   757→    const rules = await getRules();
+   758→    const scheduler = await getSchedulerState();
+   759→    const sectorAlloc = await getSectorAllocation();
+   760→    const { drawdownPct, peakCapital, currentCapital } = await getPortfolioDrawdown();
+   761→    return NextResponse.json({
+   762→      success: true, wallet, rules, openTrades, recentLogs, scheduler, sectorAllocation: sectorAlloc,
+   763→      marketHours: isMarketHours(), timeToClose: timeToClose(),
+   764→      // v2 data
+   765→      drawdown: { drawdownPct: Math.round(drawdownPct * 100) / 100, peakCapital, currentCapital },
+   766→      consecutiveLosses: scheduler.consecutiveLosses,
+   767→      adaptiveFactor: scheduler.lastAdaptiveFactor,
+   768→    });
+   769→  } catch (error) {
+   770→    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+   771→  }
+   772→}
+   773→
+   774→export async function POST(request: NextRequest) {
+   775→  try {
+   776→    const body = await request.json();
+   777→    const action: string = body.action || 'get_status';
+   778→    const config: ScreeningConfig = { ...DEFAULT_CONFIG, ...body.config };
+   779→
+   780→    switch (action) {
+   781→      case 'scan_and_trade': {
+   782→        const result = await autoScanAndTrade(config);
+   783→        return NextResponse.json({ success: true, action, ...result });
+   784→      }
+   785→      case 'check_exits': {
+   786→        const result = await autoCheckExits();
+   787→        return NextResponse.json({ success: true, action, ...result });
+   788→      }
+   789→      case 'scheduler_tick': {
+   790→        const result = await runSchedulerTick();
+   791→        return NextResponse.json({ success: true, action, ...result });
+   792→      }
+   793→      case 'scheduler_toggle': {
+   794→        const enabled = body.enabled;
+   795→        if (enabled) {
+   796→          const now = new Date();
+   797→          const state = await getSchedulerState();
+   798→          const scanMin = body.scanIntervalMin || state.scanIntervalMin;
+   799→          const exitMin = body.exitIntervalMin || state.exitIntervalMin;
+   800→          await setSchedulerKV('sched_enabled', 'true');
+   801→          await setSchedulerKV('sched_scanIntervalMin', String(scanMin));
+   802→          await setSchedulerKV('sched_exitIntervalMin', String(exitMin));
+   803→          await setSchedulerKV('sched_nextScanAt', now.toISOString());
+   804→          await setSchedulerKV('sched_nextExitAt', now.toISOString());
+   805→          await resetDailyCounters();
+   806→        } else {
+   807→          await setSchedulerKV('sched_enabled', 'false');
+   808→          await setSchedulerKV('sched_nextScanAt', '');
+   809→          await setSchedulerKV('sched_nextExitAt', '');
+   810→        }
+   811→        return NextResponse.json({ success: true, scheduler: await getSchedulerState() });
+   812→      }
+   813→      case 'update_wallet': {
+   814→        const { totalCapital } = body;
+   815→        if (totalCapital) {
+   816→          const w = await getWallet();
+   817→          const open = await db.paperTrade.findMany({ where: { status: 'OPEN' } });
+   818→          const deployed = open.reduce((s, t) => s + t.entryPrice * t.qty, 0);
+   819→          await db.capitalWallet.update({ where: { id: w.id }, data: { totalCapital, available: totalCapital - deployed } });
+   820→          const updated = await recalcWallet();
+   821→          return NextResponse.json({ success: true, wallet: updated });
+   822→        }
+   823→        break;
+   824→      }
+   825→      case 'update_rules': {
+   826→        const rules = body.rules;
+   827→        if (rules) {
+   828→          for (const [key, value] of Object.entries(rules)) {
+   829→            await db.appSettings.upsert({
+   830→              where: { key: `rules_${key}` },
+   831→              create: { key: `rules_${key}`, value: String(value) },
+   832→              update: { value: String(value) },
+   833→            });
+   834→          }
+   835→          return NextResponse.json({ success: true, rules: await getRules() });
+   836→        }
+   837→        break;
+   838→      }
+   839→      case 'reset_circuit_breaker': {
+   840→        // v2: Manual circuit breaker reset
+   841→        await setSchedulerKV('sched_circuitBreaker', 'false');
+   842→        await setSchedulerKV('sched_circuitBreakerReason', '');
+   843→        return NextResponse.json({ success: true, scheduler: await getSchedulerState() });
+   844→      }
+   845→    }
+   846→    const wallet = await recalcWallet();
+   847→    return NextResponse.json({ success: true, wallet });
+   848→  } catch (error) {
+   849→    console.error('Auto-trade error:', error);
+   850→    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+   851→  }
+   852→}
