@@ -1,9 +1,26 @@
 'use client';
 
+export interface ChainLeg {
+  ltp: number;
+  iv: number;
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+  oi: number;
+  volume: number;
+  bid: number;
+  ask: number;
+  itm: boolean;
+  theoretical?: boolean;
+  changeInOI?: number;
+  pChangeInOI?: number;
+}
+
 export interface ChainRow {
   strike: number;
-  ce: { ltp: number; iv: number; delta: number; gamma: number; theta: number; vega: number; oi: number; volume: number; bid: number; ask: number; itm: boolean };
-  pe: { ltp: number; iv: number; delta: number; gamma: number; theta: number; vega: number; oi: number; volume: number; bid: number; ask: number; itm: boolean };
+  ce: ChainLeg;
+  pe: ChainLeg;
   distance: number;
   moneyness: 'ITM' | 'ATM' | 'OTM';
 }
@@ -16,6 +33,10 @@ export interface ChainData {
   expiryDate: string;
   expiryDates: string[];
   chain: ChainRow[];
+  dataSource?: 'nse_live' | 'theoretical';
+  lotSize?: number;
+  pcr?: { pcr: number; interpretation: string; signal: string };
+  maxPain?: { maxPainStrike: number; reasoning: string };
 }
 
 export interface Position {

@@ -10,8 +10,10 @@ import {
 } from '@/components/ui/table';
 import { Card } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Badge } from '@/components/ui/badge';
 import {
   TrendingUp, TrendingDown, RefreshCw, ArrowRight, Clock,
+  Radio, Calculator, Info,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { SYMBOLS } from './constants';
@@ -22,7 +24,7 @@ function OptionChainTab() {
   const [symbol, setSymbol] = useState('NIFTY');
   const [chainData, setChainData] = useState<ChainData | null>(null);
   const [loading, setLoading] = useState(false);
-  const [prefill, setPrefill] = useState<{ strike: number; type: 'CE' | 'PE'; premium: number } | null>(null);
+  const [prefill, setPrefill] = useState<{ strike: number; type: 'CE' | 'PE'; premium: number; lotSize?: number } | null>(null);
 
   const fetchChain = useCallback(async () => {
     setLoading(true);
@@ -38,12 +40,11 @@ function OptionChainTab() {
   useEffect(() => { fetchChain(); }, [symbol]);
 
   const handleRowClick = (strike: number, type: 'CE' | 'PE', premium: number) => {
-    setPrefill({ strike, type, premium });
+    setPrefill({ strike, type, premium, lotSize: chainData?.lotSize });
   };
 
   const handlePrefillTrade = () => {
     if (prefill) {
-      // Store in sessionStorage for the trade tab to pick up
       sessionStorage.setItem('options-prefill', JSON.stringify(prefill));
     }
   };
@@ -55,6 +56,12 @@ function OptionChainTab() {
     const days = Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
     return days <= 0 ? 'Expiry Day' : `${days}d ${Math.max(0, 23 - now.getHours())}h`;
   }, [chainData?.expiryDate]);
+
+  const isLive = chainData?.dataSource === 'nse_live';
+  const lotSize = chainData?.lotSize || 25;
+
+  // Format per-lot price: premium × lot size
+  const perLot = (premium: number) => Math.round(premium * lotSize);
 
   return (
     <div className="space-y-3">
@@ -93,9 +100,9 @@ function OptionChainTab() {
         </Button>
       </div>
 
-      {/* Spot Info */}
+      {/* Spot Info + Data Source Indicator */}
       {chainData && (
-        <div className="flex flex-wrap items-center gap-4 rounded-lg bg-secondary/30 px-4 py-2.5 text-sm">
+        <div className="flex flex-wrap items-center gap-3 rounded-lg bg-secondary/30 px-4 py-2.5 text-sm">
           <div>
             <span className="text-muted-foreground">{chainData.symbol}</span>{' '}
             <span className="font-bold text-lg">{fmt(chainData.underlyingPrice)}</span>
@@ -111,11 +118,52 @@ function OptionChainTab() {
             <Clock className="h-3 w-3" />
             Expiry: {chainData.expiryDate} ({expiryCountdown})
           </div>
+          <div className="text-muted-foreground text-xs">
+            Lot: <span className="text-foreground font-medium">{lotSize}</span>
+          </div>
+
+          {/* Data Source Badge */}
+          {isLive ? (
+            <Badge className="ml-auto h-6 text-[10px] bg-emerald-500/20 text-emerald-400 border-emerald-500/30 gap-1">
+              <Radio className="h-2.5 w-2.5" /> NSE Live
+            </Badge>
+          ) : (
+            <Badge className="ml-auto h-6 text-[10px] bg-amber-500/20 text-amber-400 border-amber-500/30 gap-1">
+              <Calculator className="h-2.5 w-2.5" /> Theoretical (BSM)
+            </Badge>
+          )}
+
           {prefill && (
-            <Button size="sm" onClick={handlePrefillTrade} className="ml-auto h-7 text-xs bg-indigo-600 hover:bg-indigo-700">
+            <Button size="sm" onClick={handlePrefillTrade} className="h-7 text-xs bg-indigo-600 hover:bg-indigo-700">
               <ArrowRight className="h-3 w-3 mr-1" /> Trade {prefill.strike} {prefill.type}
             </Button>
           )}
+        </div>
+      )}
+
+      {/* PCR & Max Pain Summary (only for NSE live data) */}
+      {isLive && chainData?.pcr && (
+        <div className="flex flex-wrap gap-3 text-xs">
+          <div className="rounded-md bg-secondary/30 px-3 py-1.5">
+            <span className="text-muted-foreground">PCR:</span>{' '}
+            <span className={cn(
+              'font-semibold',
+              chainData.pcr.pcr > 1.2 ? 'text-red-400' : chainData.pcr.pcr < 0.8 ? 'text-emerald-400' : 'text-foreground'
+            )}>
+              {chainData.pcr.pcr.toFixed(2)}
+            </span>
+            <span className="text-muted-foreground ml-1.5">({chainData.pcr.signal})</span>
+          </div>
+          {chainData.maxPain && (
+            <div className="rounded-md bg-secondary/30 px-3 py-1.5">
+              <span className="text-muted-foreground">Max Pain:</span>{' '}
+              <span className="font-semibold text-indigo-400">{chainData.maxPain.maxPainStrike}</span>
+            </div>
+          )}
+          <div className="rounded-md bg-secondary/30 px-3 py-1.5 flex items-center gap-1 text-muted-foreground">
+            <Info className="h-3 w-3" />
+            OI, Volume, IV from NSE. Greeks calculated via BSM with real IV.
+          </div>
         </div>
       )}
 
@@ -127,19 +175,19 @@ function OptionChainTab() {
               <TableHeader>
                 <TableRow className="bg-secondary/20 hover:bg-secondary/20">
                   <TableHead className="text-center h-8 w-16">OI(CE)</TableHead>
-                  <TableHead className="text-center h-8 w-16">Vol(CE)</TableHead>
+                  <TableHead className="text-center h-8 w-14">Chg OI</TableHead>
                   <TableHead className="text-center h-8 w-12">IV%</TableHead>
                   <TableHead className="text-center h-8 w-14">LTP(CE)</TableHead>
+                  <TableHead className="text-center h-8 w-14">Per Lot</TableHead>
                   <TableHead className="text-center h-8 w-10">Δ</TableHead>
-                  <TableHead className="text-center h-8 w-10">Γ</TableHead>
                   <TableHead className="text-center h-8 w-10">Θ</TableHead>
                   <TableHead className="text-center h-8 font-bold w-20">Strike</TableHead>
                   <TableHead className="text-center h-8 w-10">Θ</TableHead>
-                  <TableHead className="text-center h-8 w-10">Γ</TableHead>
                   <TableHead className="text-center h-8 w-10">Δ</TableHead>
                   <TableHead className="text-center h-8 w-14">LTP(PE)</TableHead>
+                  <TableHead className="text-center h-8 w-14">Per Lot</TableHead>
                   <TableHead className="text-center h-8 w-12">IV%</TableHead>
-                  <TableHead className="text-center h-8 w-16">Vol(PE)</TableHead>
+                  <TableHead className="text-center h-8 w-14">Chg OI</TableHead>
                   <TableHead className="text-center h-8 w-16">OI(PE)</TableHead>
                 </TableRow>
               </TableHeader>
@@ -160,7 +208,13 @@ function OptionChainTab() {
                       onClick={() => handleRowClick(row.strike, 'CE', row.ce.ltp)}
                     >
                       <TableCell className="text-center text-muted-foreground">{(row.ce.oi / 1000).toFixed(0)}K</TableCell>
-                      <TableCell className="text-center">{(row.ce.volume / 1000).toFixed(0)}K</TableCell>
+                      {/* Change in OI - only meaningful for NSE live */}
+                      <TableCell className={cn(
+                        'text-center',
+                        isLive && (row.ce.changeInOI || 0) > 0 ? 'text-emerald-400' : isLive && (row.ce.changeInOI || 0) < 0 ? 'text-red-400' : 'text-muted-foreground'
+                      )}>
+                        {isLive && row.ce.changeInOI ? `${(row.ce.changeInOI / 1000).toFixed(0)}K` : '—'}
+                      </TableCell>
                       <TableCell className="text-center text-amber-400">{row.ce.iv.toFixed(1)}</TableCell>
                       <TableCell
                         className="text-center font-medium text-emerald-400 cursor-pointer hover:bg-emerald-500/10"
@@ -168,8 +222,11 @@ function OptionChainTab() {
                       >
                         {row.ce.ltp}
                       </TableCell>
+                      {/* Per-Lot Price */}
+                      <TableCell className="text-center font-medium text-emerald-300">
+                        ₹{perLot(row.ce.ltp).toLocaleString('en-IN')}
+                      </TableCell>
                       <TableCell className="text-center">{row.ce.delta.toFixed(2)}</TableCell>
-                      <TableCell className="text-center">{row.ce.gamma.toFixed(4)}</TableCell>
                       <TableCell className={cn('text-center', row.ce.theta < 0 ? 'text-red-400' : 'text-emerald-400')}>
                         {row.ce.theta.toFixed(1)}
                       </TableCell>
@@ -179,7 +236,6 @@ function OptionChainTab() {
                       <TableCell className={cn('text-center', row.pe.theta < 0 ? 'text-red-400' : 'text-emerald-400')}>
                         {row.pe.theta.toFixed(1)}
                       </TableCell>
-                      <TableCell className="text-center">{row.pe.gamma.toFixed(4)}</TableCell>
                       <TableCell className="text-center">{row.pe.delta.toFixed(2)}</TableCell>
                       <TableCell
                         className="text-center font-medium text-red-400 cursor-pointer hover:bg-red-500/10"
@@ -187,8 +243,17 @@ function OptionChainTab() {
                       >
                         {row.pe.ltp}
                       </TableCell>
+                      {/* Per-Lot Price */}
+                      <TableCell className="text-center font-medium text-red-300">
+                        ₹{perLot(row.pe.ltp).toLocaleString('en-IN')}
+                      </TableCell>
                       <TableCell className="text-center text-amber-400">{row.pe.iv.toFixed(1)}</TableCell>
-                      <TableCell className="text-center">{(row.pe.volume / 1000).toFixed(0)}K</TableCell>
+                      <TableCell className={cn(
+                        'text-center',
+                        isLive && (row.pe.changeInOI || 0) > 0 ? 'text-emerald-400' : isLive && (row.pe.changeInOI || 0) < 0 ? 'text-red-400' : 'text-muted-foreground'
+                      )}>
+                        {isLive && row.pe.changeInOI ? `${(row.pe.changeInOI / 1000).toFixed(0)}K` : '—'}
+                      </TableCell>
                       <TableCell className="text-center text-muted-foreground">{(row.pe.oi / 1000).toFixed(0)}K</TableCell>
                     </TableRow>
                   );

@@ -24,6 +24,13 @@ import {
   INDEX_SYMBOLS,
 } from './black-scholes';
 import { fetchVIX, vixAdjustedIV, type VIXData, getVIXGuidance } from './vix';
+import {
+  fetchNSEOptionChain,
+  getExpiryDates as getNSEExpiryDates,
+  filterByExpiry,
+  findNearestExpiry,
+  type NSEOptionData,
+} from '@/lib/nse-data';
 
 // ── Symbol → Yahoo Ticker Mapping ────────────────────────────
 
@@ -282,6 +289,8 @@ interface OptionLegData {
   ask: number;
   itm: boolean;
   theoretical: boolean;  // Flag: this is theoretical pricing, not live
+  changeInOI?: number;  // NSE-provided: change in open interest
+  pChangeInOI?: number; // NSE-provided: % change in OI
 }
 
 export interface OptionChainRow {
@@ -443,13 +452,192 @@ export interface OptionChainResult {
   maxPain: MaxPainResult | null;
   dividendYield: number;
   lotSize: number;
-  dataSource: 'theoretical';  // Always theoretical until real OI/volume data is integrated
+  dataSource: 'nse_live' | 'theoretical';
+  nseFetchTime?: number; // timestamp of NSE data fetch
+}
+
+/**
+ * Build option chain from NSE live data.
+ * Uses real premiums, OI, volume, IV, bid/ask from NSE.
+ * Greeks are calculated via BSM using real IV from NSE (exchange doesn't provide Greeks).
+ */
+function buildChainFromNSE(
+  nseData: NSEOptionData[],
+  spot: number,
+  symbol: string,
+  T: number,
+  r: number,
+  dividendYield: number,
+): OptionChainRow[] {
+  const step = getStrikeStep(symbol, spot);
+  const atmStrike = Math.round(spot / step) * step;
+
+  // Build a map for quick lookup
+  const nseMap = new Map<number, NSEOptionData>();
+  for (const item of nseData) {
+    nseMap.set(item.strikePrice, item);
+  }
+
+  const strikes = generateStrikes(spot, symbol);
+  const chain: OptionChainRow[] = [];
+
+  for (const strike of strikes) {
+    const nseItem = nseMap.get(strike);
+    const dist = ((strike - spot) / spot) * 100;
+    const isATM = Math.abs(strike - atmStrike) < step / 2;
+
+    let moneyness: 'ITM' | 'ATM' | 'OTM';
+    if (isATM) {
+      moneyness = 'ATM';
+    } else if (strike < spot) {
+      moneyness = 'ITM';
+    } else {
+      moneyness = 'OTM';
+    }
+
+    if (nseItem) {
+      // ── LIVE DATA from NSE ──────────────────────────
+      // Use real IV from NSE to calculate Greeks via BSM
+      const ceIV = nseItem.ce?.impliedVolatility
+        ? nseItem.ce.impliedVolatility / 100 // NSE gives IV as percentage (e.g. 12.35 for 12.35%)
+        : 0.15;
+      const peIV = nseItem.pe?.impliedVolatility
+        ? nseItem.pe.impliedVolatility / 100
+        : 0.15;
+
+      // Calculate Greeks using BSM with real IV
+      const ceBS = T > 0 && ceIV > 0
+        ? blackScholes(spot, strike, T, r, ceIV, 'CE', dividendYield)
+        : { premium: Math.max(spot - strike, 0), delta: 0, gamma: 0, theta: 0, vega: 0, iv: ceIV };
+      const peBS = T > 0 && peIV > 0
+        ? blackScholes(spot, strike, T, r, peIV, 'PE', dividendYield)
+        : { premium: Math.max(strike - spot, 0), delta: 0, gamma: 0, theta: 0, vega: 0, iv: peIV };
+
+      chain.push({
+        strike,
+        distance: Math.round(dist * 100) / 100,
+        moneyness,
+        ce: {
+          ltp: Math.round((nseItem.ce?.lastPrice || 0) * 100) / 100,
+          iv: Math.round((ceIV * 10000)) / 100, // as %
+          delta: ceBS.delta,
+          gamma: ceBS.gamma,
+          theta: ceBS.theta,
+          vega: ceBS.vega,
+          oi: nseItem.ce?.openInterest || 0,
+          volume: nseItem.ce?.totalTradedVolume || 0,
+          bid: Math.round((nseItem.ce?.bidprice || 0) * 100) / 100,
+          ask: Math.round((nseItem.ce?.askPrice || 0) * 100) / 100,
+          itm: strike < spot,
+          theoretical: false,
+          changeInOI: nseItem.ce?.changeinOpenInterest || 0,
+          pChangeInOI: nseItem.ce?.pChangeInOI || 0,
+        },
+        pe: {
+          ltp: Math.round((nseItem.pe?.lastPrice || 0) * 100) / 100,
+          iv: Math.round((peIV * 10000)) / 100,
+          delta: peBS.delta,
+          gamma: peBS.gamma,
+          theta: peBS.theta,
+          vega: peBS.vega,
+          oi: nseItem.pe?.openInterest || 0,
+          volume: nseItem.pe?.totalTradedVolume || 0,
+          bid: Math.round((nseItem.pe?.bidprice || 0) * 100) / 100,
+          ask: Math.round((nseItem.pe?.askPrice || 0) * 100) / 100,
+          itm: strike > spot,
+          theoretical: false,
+          changeInOI: nseItem.pe?.changeinOpenInterest || 0,
+          pChangeInOI: nseItem.pe?.pChangeInOI || 0,
+        },
+      });
+    } else {
+      // ── No NSE data for this strike — skip ───────────
+      // Only include strikes that NSE has data for (keeps chain clean)
+    }
+  }
+
+  return chain;
 }
 
 export async function fetchOptionChain(
   symbol: string,
   expiryDate: string
 ): Promise<OptionChainResult> {
+  // 0. Try NSE live data first (best-effort, 5s timeout)
+  let nseResult: OptionChainResult | null = null;
+  try {
+    const nseRaw = await Promise.race([
+      fetchNSEOptionChain(symbol),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]);
+
+    if (nseRaw && nseRaw.underlyingValue > 0) {
+      const spot = Math.round(nseRaw.underlyingValue * 100) / 100;
+      const symbolType = getSymbolType(symbol);
+      const settlementType = getSettlementType(symbol);
+      const lotSize = getOptionLotSize(symbol);
+      const dividendYield = getDividendYield(symbol);
+
+      // Get expiry dates from NSE data
+      const nseExpiryDates = getNSEExpiryDates(nseRaw);
+      const targetExpiry = expiryDate
+        ? findNearestExpiry(nseRaw, expiryDate)
+        : nseExpiryDates[0];
+
+      if (targetExpiry) {
+        const expiryInfo = classifyExpiry(targetExpiry, symbol);
+        const T = timeToExpiryYears(targetExpiry);
+        const r = 0.07;
+
+        // Filter NSE data for this expiry and build chain
+        const nseFiltered = filterByExpiry(nseRaw, targetExpiry);
+        const chain = buildChainFromNSE(nseFiltered, spot, symbol, T, r, dividendYield);
+
+        if (chain.length > 0) {
+          // Fetch VIX separately (best-effort)
+          const vixData = await fetchVIX().catch(() => null);
+
+          // Get change data from Yahoo (NSE option chain doesn't provide change)
+          let change = 0;
+          let changePct = 0;
+          try {
+            const spotData = await fetchSpot(symbol);
+            change = spotData.change;
+            changePct = spotData.changePct;
+          } catch {
+            // Non-critical, skip
+          }
+
+          nseResult = {
+            symbol,
+            symbolType,
+            settlementType,
+            underlyingPrice: spot,
+            change,
+            changePct,
+            expiryDate: targetExpiry,
+            expiryInfo,
+            expiryDates: nseExpiryDates.length > 0 ? nseExpiryDates : getNextExpiries(symbol, 10),
+            chain,
+            vix: vixData,
+            pcr: calculatePCR(chain),
+            maxPain: calculateMaxPain(chain, spot),
+            dividendYield,
+            lotSize,
+            dataSource: 'nse_live',
+            nseFetchTime: Date.now(),
+          };
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[OptionChain] NSE fetch failed, falling back to theoretical:', String(err).substring(0, 120));
+  }
+
+  // Return NSE data if successful
+  if (nseResult) return nseResult;
+
+  // ── THEORETICAL FALLBACK (original logic) ─────────────────
   // 1. Fetch spot price and VIX in parallel
   const [spotData, vixData] = await Promise.all([
     fetchSpot(symbol),

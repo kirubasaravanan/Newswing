@@ -44,6 +44,7 @@ function NewTradeTab() {
         setExpiryDates(data.expiryDates || []);
         setExpiry(data.expiryDate || '');
         setSpotPrice(data.underlyingPrice || 0);
+        if (data.lotSize) setLotSize(data.lotSize);
       }
     };
     loadExpiries();
@@ -58,6 +59,7 @@ function NewTradeTab() {
         setStrikePrice(String(p.strike));
         setOptionType(p.type);
         setEntryPremium(String(p.premium));
+        if (p.lotSize) setLotSize(p.lotSize);
         sessionStorage.removeItem('options-prefill');
       } catch { /* ignore */ }
     }
