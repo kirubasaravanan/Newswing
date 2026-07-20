@@ -35,6 +35,7 @@ export async function GET() {
     let netTheta = 0;
     let netVega = 0;
     let totalMargin = 0;
+    let totalLots = 0;
     let largestThetaAbs = 0;
     let largestThetaPos: string | null = null;
     let largestVegaAbs = 0;
@@ -57,11 +58,15 @@ export async function GET() {
       }
 
       const T = timeToExpiryYears(trade.expiryDate);
+      if (T <= 0) continue; // Skip expired — Greeks meaningless
       const q = getDividendYield(trade.symbol);
-      const iv = trade.iv / 100; // Convert from % to decimal
+      // entryIV is stored as decimal (e.g. 0.15 = 15%), NOT percentage
+      let iv = trade.entryIV ?? 0.15;
+      if (iv <= 0 || iv > 5) iv = 0.15; // Sanity clamp
 
       // Recalculate current Greeks
-      const bs = blackScholes(spot, trade.strike, T, r, iv, trade.optionType as 'CE' | 'PE', q);
+      const bs = blackScholes(spot, trade.strikePrice, T, r, iv, trade.optionType as 'CE' | 'PE', q);
+      if (!isFinite(bs.delta) || !isFinite(bs.gamma)) continue; // Skip invalid Greeks
 
       const positionDelta = sign * bs.delta * totalShares;
       const positionGamma = sign * bs.gamma * totalShares;
@@ -100,7 +105,7 @@ export async function GET() {
       netGamma: Math.round(netGamma * 100000) / 100000,
       netTheta: Math.round(netTheta * 100) / 100,
       netVega: Math.round(netVega * 100) / 100,
-      deltaPerLot: openTrades.length > 0 ? Math.round((netDelta / openTrades.length) * 100) / 100 : 0,
+      deltaPerLot: openTrades.length > 0 ? Math.round((netDelta / totalLots) * 100) / 100 : 0,
       thetaPerDay: Math.round(netTheta * 100) / 100,
       marginUtilization: deployed > 0 ? Math.round((totalMargin / deployed) * 100) : 0,
       openPositions: openTrades.length,

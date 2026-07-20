@@ -10,7 +10,6 @@ import {
   getOptionLotSize, timeToExpiryYears, daysToExpiry as dte,
   getDividendYield,
 } from '@/lib/options/black-scholes';
-import { creditRealizedPnl } from './wallet.service';
 
 export interface CreateOptionTradeDTO {
   symbol: string;
@@ -95,31 +94,52 @@ export async function createOptionTrade(dto: CreateOptionTradeDTO) {
       : dto.entryPremium * totalShares * 3;
   }
 
-  return db.optionTrade.create({
-    data: {
-      symbol: dto.symbol,
-      underlyingPrice: spot,
-      optionType: dto.optionType,
-      action: dto.action,
-      strikePrice: dto.strikePrice,
-      expiryDate: dto.expiryDate,
-      lotSize,
-      qty,
-      entryPremium: dto.entryPremium,
-      stopLoss: sl ? parseFloat(String(sl)) : null,
-      takeProfit: tp ? parseFloat(String(tp)) : null,
-      entryDelta: bs.delta,
-      entryGamma: bs.gamma,
-      entryTheta: bs.theta,
-      entryVega: bs.vega,
-      entryIV: iv,
-      slReasoning,
-      tpReasoning,
-      marginUsed,
-      notes: dto.notes || null,
-      tags: dto.tags || null,
-      strategyId: dto.strategyId || null,
-    },
+  return db.$transaction(async (tx) => {
+    // Check capital availability
+    const wallet = await tx.capitalWallet.findFirst();
+    if (!wallet) throw new Error('Wallet not initialized. Please set up capital first.');
+    if (marginUsed > wallet.available) {
+      throw new Error(
+        `Insufficient capital. Required: ₹${Math.round(marginUsed).toLocaleString('en-IN')}, Available: ₹${Math.round(wallet.available).toLocaleString('en-IN')}`
+      );
+    }
+
+    const trade = await tx.optionTrade.create({
+      data: {
+        symbol: dto.symbol,
+        underlyingPrice: spot,
+        optionType: dto.optionType,
+        action: dto.action,
+        strikePrice: dto.strikePrice,
+        expiryDate: dto.expiryDate,
+        lotSize,
+        qty,
+        entryPremium: dto.entryPremium,
+        stopLoss: sl ? parseFloat(String(sl)) : null,
+        takeProfit: tp ? parseFloat(String(tp)) : null,
+        entryDelta: bs.delta,
+        entryGamma: bs.gamma,
+        entryTheta: bs.theta,
+        entryVega: bs.vega,
+        entryIV: iv,
+        slReasoning,
+        tpReasoning,
+        marginUsed,
+        notes: dto.notes || null,
+        tags: dto.tags || null,
+        strategyId: dto.strategyId || null,
+      },
+    });
+
+    // Deploy capital from wallet
+    const newDeployed = Math.round((wallet.deployed + marginUsed) * 100) / 100;
+    const newAvailable = Math.max(0, Math.round((wallet.totalCapital - newDeployed) * 100) / 100);
+    await tx.capitalWallet.update({
+      where: { id: wallet.id },
+      data: { deployed: newDeployed, available: newAvailable },
+    });
+
+    return trade;
   });
 }
 
@@ -130,6 +150,7 @@ export async function closeOptionTrade(dto: CloseOptionTradeDTO) {
   return db.$transaction(async (tx) => {
     const trade = await tx.optionTrade.findUnique({ where: { id: dto.id } });
     if (!trade) throw new Error('Trade not found');
+    if (trade.status !== 'OPEN') throw new Error('Trade is already closed');
 
     const exitPrem = dto.exitPremium || trade.currentPremium || trade.entryPremium;
     const direction = trade.action === 'BUY' ? 1 : -1;
@@ -154,6 +175,27 @@ export async function closeOptionTrade(dto: CloseOptionTradeDTO) {
         exitReason: dto.exitReason || 'MANUAL',
       },
     });
+
+    // Credit realized P&L to wallet
+    const roundedPnl = Math.round(pnl * 100) / 100;
+    const wallet = await tx.capitalWallet.findFirst();
+    if (wallet) {
+      const newRealized = Math.round((wallet.realizedPnl + roundedPnl) * 100) / 100;
+      const newTotal = Math.round((wallet.initialCapital + newRealized) * 100) / 100;
+      // Free up deployed capital
+      const marginToFree = trade.marginUsed || 0;
+      const newDeployed = Math.max(0, Math.round((wallet.deployed - marginToFree) * 100) / 100);
+      const newAvailable = Math.max(0, Math.round((newTotal - newDeployed) * 100) / 100);
+      await tx.capitalWallet.update({
+        where: { id: wallet.id },
+        data: {
+          realizedPnl: newRealized,
+          totalCapital: newTotal,
+          deployed: newDeployed,
+          available: newAvailable,
+        },
+      });
+    }
 
     return updated;
   });
@@ -197,6 +239,7 @@ export async function createStrategy(data: {
     });
 
     let totalMargin = 0;
+    const tradeMargins: number[] = [];
 
     for (const leg of data.legs) {
       const lotSize = leg.lotSize || getOptionLotSize(data.symbol);
@@ -216,7 +259,9 @@ export async function createStrategy(data: {
         underlyingSymbol: data.symbol, optionType: leg.optionType,
       });
 
-      totalMargin += slResult.marginEstimate;
+      const legMargin = slResult.marginEstimate;
+      totalMargin += legMargin;
+      tradeMargins.push(legMargin);
 
       await tx.optionTrade.create({
         data: {
@@ -236,9 +281,25 @@ export async function createStrategy(data: {
           entryIV: iv,
           slReasoning: slResult.slReasoning,
           tpReasoning: slResult.tpReasoning,
-          marginUsed: slResult.marginEstimate,
+          marginUsed: legMargin,
           strategyId: strategy.id,
         },
+      });
+    }
+
+    // Deploy total margin from wallet
+    const wallet = await tx.capitalWallet.findFirst();
+    if (wallet) {
+      if (totalMargin > wallet.available) {
+        throw new Error(
+          `Insufficient capital for strategy. Required: ₹${Math.round(totalMargin).toLocaleString('en-IN')}, Available: ₹${Math.round(wallet.available).toLocaleString('en-IN')}`
+        );
+      }
+      const newDeployed = Math.round((wallet.deployed + totalMargin) * 100) / 100;
+      const newAvailable = Math.max(0, Math.round((wallet.totalCapital - newDeployed) * 100) / 100);
+      await tx.capitalWallet.update({
+        where: { id: wallet.id },
+        data: { deployed: newDeployed, available: newAvailable },
       });
     }
 
