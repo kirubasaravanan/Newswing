@@ -11,7 +11,7 @@ import {
   Clock, Zap, Target, Flame, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import {
-  PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LineChart, Line, Legend,
+  PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LineChart, Line, Legend, ReferenceLine,
 } from 'recharts';
 import { cn } from '@/lib/utils';
 import { useTradeStore } from '@/store/trade-store';
