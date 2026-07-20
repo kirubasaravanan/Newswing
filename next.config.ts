@@ -1,15 +1,13 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   serverExternalPackages: ["technicalindicators"],
   typescript: {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
-  // Use Webpack instead of Turbopack to avoid panics
-  webpack: (config, { isServer }) => {
-    return config;
-  },
+  turbopack: {},
   experimental: {
     optimizePackageImports: [
       'lucide-react',
