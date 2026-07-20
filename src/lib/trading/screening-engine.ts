@@ -255,8 +255,8 @@ export function runScreening(
 
   // ── Entry / SL / TP calculation ────────────────────────
   const theoreticalEP = Math.max(currentOpen, prevHigh);
-  const stopLow10 = Math.min(...lows.slice(Math.max(0, i - 10), i));
-  const rawSL = stopLow10 - (get(atr14, i1, currentAtr) * 0.5);
+  // ATR-based SL: 1.5x ATR below entry (standard swing trade stop)
+  const rawSL = theoreticalEP - (currentAtr * 1.5);
   const riskPerShare = theoreticalEP - rawSL;
 
   if (riskPerShare <= 0) return null;
@@ -268,7 +268,7 @@ export function runScreening(
   if (rr < config.minRR && totalScore < 6) return null;
 
   // ── Position Sizing ────────────────────────────────────
-  const tp1 = theoreticalEP + (riskPerShare * 1.5);
+  const tp1 = theoreticalEP + (riskPerShare * 1.0); // 1R target for display
 
   // A+ sizing
   const riskAmtA = config.liveCapital * (config.riskPct / 100);
@@ -441,21 +441,27 @@ export function runBacktest(
       const pos = openPositions[p];
       const barsHeld = barIdx - pos.entryBar;
       
-      // Partial TP check
+      // Activate trailing once price moves 0.8R in profit
+      const profitPerShare = bar.high - pos.avgPrice;
+      const riskPerSharePos = pos.avgPrice - pos.stopLoss;
+      if (!pos.trailActive && riskPerSharePos > 0 && profitPerShare >= riskPerSharePos * 0.8) {
+        pos.trailActive = true;
+      }
+
+      // Partial TP — book 50% at 1R profit
       if (!pos.partialTaken && bar.high >= pos.tp1) {
-        const closeQty = Math.ceil(pos.totalQty * 0.3);
+        const closeQty = Math.ceil(pos.totalQty * 0.5);
         const pnl = closeQty * (pos.tp1 - pos.avgPrice);
         capital += pnl + closeQty * pos.avgPrice;
         pos.totalQty -= closeQty;
-        pos.trailActive = true;
         pos.partialTaken = true;
       }
 
-      // Trailing stop — only ratchet UP, never down
+      // Trailing stop — EMA10 minus 1x ATR, ratchet UP only
       if (pos.trailActive) {
         const trailATR = atr14Full[barIdx] ?? 1;
-        const dynamicTrail = (ema10Full[barIdx] ?? pos.avgPrice) - (trailATR * 1.5);
-        // Only move SL up, never down
+        const ema10Val = ema10Full[barIdx] ?? pos.avgPrice;
+        const dynamicTrail = ema10Val - (trailATR * 1.0);
         pos.blendedSL = Math.max(pos.blendedSL, dynamicTrail);
       }
 
@@ -589,8 +595,8 @@ export function runBacktest(
 
     if (score >= config.minScore) {
       const theoreticalEP = Math.max(bar.open, prevCandle.high);
-      const stopLow10 = Math.min(...lows.slice(Math.max(0, i - 10), i));
-      const rawSL = stopLow10 - (prevATR * 0.5);
+      // ATR-based SL: 1.5x ATR below entry
+      const rawSL = theoreticalEP - (prevATR * 1.5);
       const riskPerShare = theoreticalEP - rawSL;
 
       if (riskPerShare <= 0) continue;
@@ -611,7 +617,7 @@ export function runBacktest(
       const qtyCap = Math.floor(targetAlloc / theoreticalEP);
       const qty = Math.max(1, Math.min(qtyRisk, qtyCap));
 
-      const tp1 = theoreticalEP + (riskPerShare * 2.0);
+      const tp1 = theoreticalEP + (riskPerShare * 1.0); // 1R partial booking
 
       if (capital < qty * theoreticalEP) continue;
 
