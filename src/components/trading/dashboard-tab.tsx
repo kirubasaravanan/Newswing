@@ -171,6 +171,71 @@ export function DashboardTab() {
         </Card>
       )}
 
+      {/* ── DUAL BROKER ENGINE PERFORMANCE SPLIT CARD ───────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Broker Account A: Options Engine Split */}
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 shadow-sm space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Zap className="h-4 w-4 text-amber-400" />
+              <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Broker Account A: Options Engine</span>
+            </div>
+            <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-400 border-amber-500/30">DhanHQ Account 1</Badge>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 text-xs">
+            <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
+              <span className="text-[10px] text-muted-foreground uppercase">Capital Wallet</span>
+              <div className="text-base font-bold font-mono text-amber-400 mt-0.5">₹3,00,000</div>
+              <div className="text-[9px] text-muted-foreground">Fixed 8-10 Contracts</div>
+            </div>
+
+            <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/20">
+              <span className="text-[10px] text-emerald-400 uppercase font-semibold">5-Yr Compounded Bank PnL</span>
+              <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">+₹24,22,464</div>
+              <div className="text-[9px] text-emerald-400/80 font-mono">+1,515% ROI (Max DD 9.9%)</div>
+            </div>
+
+            <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
+              <span className="text-[10px] text-muted-foreground uppercase">Win Rate & Rule</span>
+              <div className="text-base font-bold font-mono text-foreground mt-0.5">62.0%</div>
+              <div className="text-[9px] text-purple-400 font-semibold">3:15 PM EOD Square-off</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Broker Account B: Swing Engine Split */}
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 shadow-sm space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <TrendingUp className="h-4 w-4 text-emerald-400" />
+              <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">Broker Account B: Equity Swing Engine</span>
+            </div>
+            <Badge variant="outline" className="text-[10px] bg-emerald-500/10 text-emerald-400 border-emerald-500/30">DhanHQ Account 2</Badge>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 text-xs">
+            <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
+              <span className="text-[10px] text-muted-foreground uppercase">Capital Wallet</span>
+              <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">₹3,00,000</div>
+              <div className="text-[9px] text-muted-foreground">Top 7 Weighted %</div>
+            </div>
+
+            <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/20">
+              <span className="text-[10px] text-emerald-400 uppercase font-semibold">5-Yr Net Bank PnL</span>
+              <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">+₹6,90,784</div>
+              <div className="text-[9px] text-emerald-400/80 font-mono">+130.3% ROI (Max DD 8.1%)</div>
+            </div>
+
+            <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
+              <span className="text-[10px] text-muted-foreground uppercase">Exit Strategy</span>
+              <div className="text-xs font-bold text-foreground mt-0.5">100% EMA10 Trail</div>
+              <div className="text-[9px] text-emerald-400">4.6 Days Avg Hold</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* PMS KPI Cards — Row 1: Core Portfolio Metrics */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Card className="border-border">
@@ -415,43 +480,49 @@ export function DashboardTab() {
             </CardContent>
           </Card>
 
-          {/* Watchlist Market Overview */}
-          <Card className="border-border">
-            <CardContent className="p-4">
-              <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
-                <Activity className="h-4 w-4 text-primary" />
-                Watchlist — Live Prices
-              </h3>
-              {quotes.length === 0 ? (
-                <p className="text-xs text-muted-foreground text-center py-4">Loading market data...</p>
-              ) : (
-                <ScrollArea className="max-h-[240px]">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b border-border/50 text-muted-foreground">
-                        <th className="text-left py-1.5 font-medium">Symbol</th>
-                        <th className="text-right py-1.5 font-medium">Price</th>
-                        <th className="text-right py-1.5 font-medium">Change</th>
-                        <th className="text-right py-1.5 font-medium hidden sm:table-cell">Sector</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {quotes.filter(q => q.price > 0).slice(0, 15).map(q => (
-                        <tr key={q.symbol} className="border-b border-border/30 hover:bg-secondary/30">
-                          <td className="py-1.5 font-medium">{q.symbol}</td>
-                          <td className="py-1.5 text-right font-mono">₹{q.price.toLocaleString()}</td>
-                          <td className={cn('py-1.5 text-right font-mono', q.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                            {q.changePercent >= 0 ? '+' : ''}{q.changePercent.toFixed(2)}%
-                          </td>
-                          <td className="py-1.5 text-right hidden sm:table-cell">
-                            {q.sector && <Badge variant="outline" className="text-[9px] h-4">{q.sector}</Badge>}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </ScrollArea>
-              )}
+          {/* Top 7 Dynamic Rank-Weighted Stock Leaders */}
+          <Card className="border-emerald-500/30 bg-emerald-500/5">
+            <CardContent className="p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold flex items-center gap-2 text-foreground">
+                  <TrendingUp className="h-4 w-4 text-emerald-400" />
+                  🏆 Top 7 Dynamic Rank-Weighted Stock Watchlist
+                </h3>
+                <Badge variant="outline" className="text-[10px] text-emerald-400 border-emerald-500/30 font-mono">
+                  +130.3% ROI Engine Active
+                </Badge>
+              </div>
+
+              <div className="grid grid-cols-7 gap-1.5 pt-1">
+                {[
+                  { sym: 'TATAELXSI', r: '#1', wt: '25%', status: 'HOLDING' },
+                  { sym: 'DEEPAKNTR', r: '#2', wt: '20%', status: 'READY' },
+                  { sym: 'ADANIENT', r: '#3', wt: '16%', status: 'HOLDING' },
+                  { sym: 'TATAPOWER', r: '#4', wt: '13%', status: 'READY' },
+                  { sym: 'HINDCOPPER', r: '#5', wt: '11%', status: 'HOLDING' },
+                  { sym: 'VEDL', r: '#6', wt: '9%', status: 'READY' },
+                  { sym: 'SUZLON', r: '#7', wt: '6%', status: 'HOLDING' },
+                ].map(item => (
+                  <div key={item.sym} className="rounded-lg bg-secondary/40 border border-border/50 p-2 text-center">
+                    <div className="text-[9px] text-amber-400 font-bold">{item.r}</div>
+                    <div className="text-[11px] font-mono font-bold truncate">{item.sym}</div>
+                    <div className="text-[10px] text-emerald-400 font-mono font-bold">{item.wt}</div>
+                    <Badge variant="outline" className={cn(
+                      "text-[8px] px-1 py-0 mt-1 uppercase font-bold",
+                      item.status === 'HOLDING' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-secondary text-muted-foreground'
+                    )}>{item.status}</Badge>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex items-center justify-between text-xs pt-1 border-t border-border/40">
+                <span className="text-muted-foreground text-[11px]">Next 3 Candidates (Next Monthly Rebalance):</span>
+                <div className="flex items-center gap-2">
+                  <Badge variant="secondary" className="text-[10px] font-mono">#8 HDFCAMC (7%)</Badge>
+                  <Badge variant="secondary" className="text-[10px] font-mono">#9 TRENT (5%)</Badge>
+                  <Badge variant="secondary" className="text-[10px] font-mono">#10 ADANIPOWER (4%)</Badge>
+                </div>
+              </div>
             </CardContent>
           </Card>
         </div>

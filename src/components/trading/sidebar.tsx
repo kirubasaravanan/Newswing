@@ -103,9 +103,9 @@ export function Sidebar() {
                 <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
               </span>
             )}
-            {item.id === 'scanner' && universeCount > 0 && (
+            {item.id === 'scanner' && (
               <span className="ml-auto hidden h-5 min-w-5 items-center justify-center rounded-full bg-emerald-500/20 px-1.5 text-[10px] font-bold text-emerald-400 lg:flex">
-                {universeCount}
+                7
               </span>
             )}
           </button>

@@ -19,6 +19,7 @@ import {
 const SYMBOL_MAP: Record<string, string> = {
   'NIFTY50': '^NSEI',
   'BANKNIFTY': '^NSEBANK',
+  'FINNIFTY': '^CNXFIN',
   'NIFTYMIDCAP': '^CNXMIDCAP',
   // NSE symbols that differ from Yahoo Finance symbols
   'BAJAJAUTO': 'BAJAJ-AUTO.NS',

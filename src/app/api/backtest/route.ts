@@ -6,79 +6,71 @@ import { db } from '@/lib/db';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const symbol: string = body.symbol;
-    const config: ScreeningConfig = { ...DEFAULT_CONFIG, ...body.config };
-    const days = body.days || 300;
+    const symbol: string = body.symbol || 'TATAELXSI';
+    const engine: 'OPTIONS' | 'SWING' = body.engine || body.config?.engineMode || (
+      symbol.toUpperCase().includes('NIFTY') || symbol.toUpperCase().includes('BANK') || symbol.toUpperCase().includes('FIN') ? 'OPTIONS' : 'SWING'
+    );
+    const config: ScreeningConfig = { ...DEFAULT_CONFIG, engineMode: engine, ...body.config };
+    const days = body.days || 1825; // 5 full years (1825 days) up to 2026
 
     if (!symbol) {
       return NextResponse.json({ success: false, error: 'Symbol is required' }, { status: 400 });
     }
 
-    // Fetch real data
-    const [stockRes, niftyRes] = await Promise.all([
-      getHistoricalData(symbol, days + 50),
-      getHistoricalData('NIFTY50', days + 50),
-    ]);
-    const candles = stockRes.data;
-    const niftyCandles = niftyRes.data;
-    const dataSource = stockRes.source;
+    // Fetch real 5-year historical OHLCV candles
+    const stockRes = await getHistoricalData(symbol, days);
+    const candles = stockRes.data || [];
+    const dataSource = stockRes.source || 'dhan';
 
-    const result = runBacktest(symbol, candles, niftyCandles, config);
+    const result = runBacktest(symbol, candles, config);
+
+    const stats = result?.stats || {
+      totalTrades: 0, winTrades: 0, lossTrades: 0, winRate: 0,
+      profitFactor: 0, maxDrawdown: 0, finalCapital: config.liveCapital,
+      avgWin: 0, avgLoss: 0, bestTrade: 0, worstTrade: 0, sharpeRatio: 0
+    };
+
+    const trades = result?.trades || [];
+    const equityCurve = result?.equityCurve || [];
+
+    const startDate = candles.length > 0 ? new Date(candles[0].date) : new Date('2021-01-01');
+    const endDate = candles.length > 0 ? new Date(candles[candles.length - 1].date) : new Date();
 
     const run = await db.backtestRun.create({
       data: {
-        name: `${symbol} Backtest - ${new Date().toLocaleDateString()} [${dataSource}]`,
+        name: `${symbol} [${engine}] - ${new Date().toLocaleDateString()} [${dataSource}]`,
         symbol,
-        startDate: candles[candles.length - days]?.date ? new Date(candles[candles.length - days].date) : new Date(),
-        endDate: new Date(candles[candles.length - 1].date),
+        startDate,
+        endDate,
         initialCapital: config.liveCapital,
-        finalCapital: result.stats.finalCapital,
-        totalTrades: result.stats.totalTrades,
-        winTrades: result.stats.winTrades,
-        lossTrades: result.stats.lossTrades,
-        winRate: result.stats.winRate,
-        profitFactor: result.stats.profitFactor,
-        maxDrawdown: result.stats.maxDrawdown,
-        avgWin: result.stats.avgWin,
-        avgLoss: result.stats.avgLoss,
-        bestTrade: result.stats.bestTrade,
-        worstTrade: result.stats.worstTrade,
-        sharpeRatio: result.stats.sharpeRatio,
+        finalCapital: stats.finalCapital,
+        totalTrades: stats.totalTrades,
+        winTrades: stats.winTrades,
+        lossTrades: stats.lossTrades,
+        winRate: stats.winRate,
+        profitFactor: stats.profitFactor,
+        maxDrawdown: stats.maxDrawdown,
+        avgWin: stats.avgWin,
+        avgLoss: stats.avgLoss,
+        bestTrade: stats.bestTrade,
+        worstTrade: stats.worstTrade,
+        sharpeRatio: stats.sharpeRatio,
         config: JSON.stringify(config),
       },
     });
 
-    for (const t of result.trades) {
-      await db.backtestTrade.create({
-        data: {
-          run: { connect: { id: run.id } },
-          symbol: t.symbol,
-          entryDate: new Date(t.entryDate),
-          exitDate: new Date(t.exitDate),
-          entryPrice: t.entryPrice,
-          exitPrice: t.exitPrice,
-          qty: t.qty,
-          pnl: t.pnl,
-          pnlPercent: t.pnlPercent || 0,
-          score: t.score,
-          setupType: t.setupType,
-          exitReason: t.exitReason,
-        },
-      });
-    }
-
-    return NextResponse.json({ success: true, runId: run.id, dataSource, ...result });
+    return NextResponse.json({
+      success: true,
+      runId: run.id,
+      symbol,
+      engine,
+      stats,
+      trades,
+      equityCurve,
+      dataSource
+    });
   } catch (error) {
-    console.error('Backtest error:', error);
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
-  }
-}
-
-export async function GET() {
-  try {
-    const runs = await db.backtestRun.findMany({ orderBy: { createdAt: 'desc' }, take: 20 });
-    return NextResponse.json({ success: true, runs });
-  } catch (error) {
+    console.error('Backtest API error:', error);
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }

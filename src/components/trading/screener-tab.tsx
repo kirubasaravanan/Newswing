@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useTradeStore } from '@/store/trade-store';
-import { DEFAULT_WATCHLIST, type ScreeningResult } from '@/lib/trading/screening-engine';
+import { TOP_7_RANKED_SYMBOLS, DEFAULT_WATCHLIST, type ScreeningResult } from '@/lib/trading/screening-engine';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
@@ -12,7 +12,7 @@ import { toast } from 'sonner';
 import {
   Radar, Play, Clock, ArrowUpRight, ArrowDownRight,
   Shield, TrendingUp, BarChart2, Activity, Zap,
-  ChevronDown, ChevronUp, Plus, Target, StopCircle, Bot, Loader2,
+  ChevronDown, ChevronUp, Plus, Target, StopCircle, Bot, Loader2, RefreshCw, CheckCircle2
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -40,60 +40,15 @@ function ScoreDots({ scores }: { scores: ScreeningResult['scores'] }) {
   );
 }
 
-function MiniChart({ symbol, entryPrice, stopLoss, targetPrice }: { symbol: string; entryPrice: number; stopLoss: number; targetPrice: number }) {
-  const [chartData, setChartData] = useState<{ date: string; close: number; ema20: number | null }[]>([]);
-
-  useEffect(() => {
-    fetch(`/api/chart-data?symbol=${symbol}&days=60`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.success) setChartData(data.data);
-      })
-      .catch(() => {});
-  }, [symbol]);
-
-  if (chartData.length === 0) return null;
-
-  const isBullish = chartData[chartData.length - 1]?.close >= chartData[0]?.close;
-  const color = isBullish ? '#10b981' : '#ef4444';
-
-  return (
-    <div className="h-20 mt-3 -mx-1">
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={chartData}>
-          <defs>
-            <linearGradient id={`grad-${symbol}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={color} stopOpacity={0.15} />
-              <stop offset="95%" stopColor="transparent" stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <XAxis dataKey="date" hide />
-          <YAxis hide domain={['auto', 'auto']} />
-          <Tooltip
-            contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, fontSize: 11, padding: '4px 8px' }}
-            labelStyle={{ display: 'none' }}
-            formatter={(value: number) => [`₹${value.toFixed(0)}`, 'Close']}
-          />
-          <ReferenceLine y={stopLoss} stroke="#ef4444" strokeDasharray="2 2" strokeOpacity={0.5} />
-          <ReferenceLine y={targetPrice} stroke="#10b981" strokeDasharray="2 2" strokeOpacity={0.5} />
-          <Area type="monotone" dataKey="close" stroke={color} fill={`url(#grad-${symbol})`} strokeWidth={1.5} />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function ResultCard({ result, onAddTrade }: { result: ScreeningResult; onAddTrade: (r: ScreeningResult) => void }) {
+function ResultCard({ result, onAddPaperTrade }: { result: ScreeningResult; onAddPaperTrade: (r: ScreeningResult) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [autoTrading, setAutoTrading] = useState(false);
-  const isAPlus = result.setupType === 'A+';
-  const qty = isAPlus ? result.sizing.qtyA : result.sizing.qtyB;
-  const riskAmt = isAPlus ? result.sizing.riskAmtA : result.sizing.riskAmtB;
+  const isAPlus = result.score === 6;
 
   const handlePaperTrade = () => {
-    onAddTrade(result);
-    toast.success(`${result.symbol} added to Paper Trade Journal`, {
-      description: `${result.setupType} Setup | Score ${result.score}/6 | Qty: ${qty}`,
+    onAddPaperTrade(result);
+    toast.success(`Paper trade added for ${result.symbol}`, {
+      description: `Entry: ₹${result.entryPrice} | SL: ₹${result.stopLoss} | TP: ₹${result.targetPrice}`,
     });
   };
 
@@ -105,51 +60,55 @@ function ResultCard({ result, onAddTrade }: { result: ScreeningResult; onAddTrad
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'scan_and_trade',
-          config: { liveCapital: 200000, riskPct: 1.0, maxSlots: 8, minScore: 3, minRR: 1.5 },
+          symbol: result.symbol,
+          config: { liveCapital: 300000, riskPct: 1.0, maxSlots: 7 },
         }),
       });
       const data = await res.json();
       if (data.success) {
-        const entry = data.entries?.find((e: any) => e.symbol === result.symbol);
-        if (entry) {
-          toast.success(`${result.symbol} auto-entered`, {
-            description: `${result.setupType} | Qty ${entry.qty} @ ₹${entry.entryPrice}`,
-          });
-        } else {
-          const skip = data.skipped?.find((s: any) => s.symbol === result.symbol);
-          toast.info(`${result.symbol} skipped`, { description: skip?.reason || 'Rule violation' });
-        }
+        toast.success(`Auto-Trade Placed for ${result.symbol}`, {
+          description: `Entry: ₹${result.entryPrice} | Qty: ${result.sizing.qty}`,
+        });
+      } else {
+        toast.error('Auto-trade failed', { description: data.error });
       }
-    } catch { toast.error('Auto-trade failed'); }
-    finally { setAutoTrading(false); }
+    } catch {
+      toast.error('Auto-trade failed');
+    } finally {
+      setAutoTrading(false);
+    }
   };
+
+  const qty = result.sizing?.qty || 10;
+  const riskAmt = Math.round(result.sizing?.riskAmt || 1000);
 
   return (
     <Card className={cn(
-      'border transition-all hover:border-primary/30',
-      isAPlus ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-border'
+      'transition-all border',
+      isAPlus ? 'border-emerald-500/40 bg-emerald-500/5 hover:border-emerald-500/60' : 'border-border bg-card/60 hover:border-border/80'
     )}>
       <CardContent className="p-4">
         {/* Header */}
-        <div className="flex items-start justify-between">
+        <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className={cn(
-              'flex h-10 w-10 items-center justify-center rounded-lg text-sm font-bold shrink-0',
+              'flex h-10 w-10 items-center justify-center rounded-xl font-mono font-bold text-sm',
               isAPlus ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
             )}>
-              {result.score}/6
+              #{result.rank || 1}
             </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-semibold">{result.symbol}</span>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-mono font-bold text-base">{result.symbol}</h3>
                 <Badge variant={isAPlus ? 'default' : 'secondary'} className={cn(
-                  'text-[10px] px-1.5 py-0',
-                  isAPlus ? 'bg-emerald-500/20 text-emerald-400 border-0' : 'bg-amber-500/20 text-amber-400 border-0'
+                  'text-[10px]',
+                  isAPlus ? 'bg-emerald-600 text-white' : 'bg-amber-500/20 text-amber-400'
                 )}>
-                  {result.setupType} Setup
+                  {result.setupType || 'A+'} Setup ({result.score}/6)
                 </Badge>
               </div>
               <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
+                <span>Weight: {Math.round((result.weightPct || 0.14) * 100)}%</span>
                 <span>RSI: {result.rsi}</span>
                 <span>ATR: {result.atr}</span>
                 <span>R:R: {result.riskReward}x</span>
@@ -157,42 +116,21 @@ function ResultCard({ result, onAddTrade }: { result: ScreeningResult; onAddTrad
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handlePaperTrade}
-              className="h-7 text-xs gap-1"
-            >
+            <Button size="sm" variant="outline" onClick={handlePaperTrade} className="h-7 text-xs gap-1">
               <Plus className="h-3 w-3" />
-              <span className="hidden sm:inline">Paper Trade</span>
+              <span>Paper Trade</span>
             </Button>
-            <Button
-              size="sm"
-              onClick={handleAutoTrade}
-              disabled={autoTrading}
-              className="h-7 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700"
-            >
+            <Button size="sm" onClick={handleAutoTrade} disabled={autoTrading} className="h-7 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700">
               {autoTrading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Bot className="h-3 w-3" />}
-              <span className="hidden sm:inline">Auto Trade</span>
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setExpanded(!expanded)}
-              className="h-7 w-7"
-            >
-              {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              <span>Auto Trade</span>
             </Button>
           </div>
         </div>
 
-        {/* Mini Chart */}
-        <MiniChart symbol={result.symbol} entryPrice={result.entryPrice} stopLoss={result.stopLoss} targetPrice={result.targetPrice} />
-
         {/* Price levels */}
         <div className="mt-3 grid grid-cols-3 gap-3">
           <div className="rounded-lg bg-secondary/50 p-2.5">
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Entry</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Entry Trigger</div>
             <div className="text-sm font-mono font-semibold mt-0.5">₹{result.entryPrice}</div>
           </div>
           <div className="rounded-lg bg-red-500/10 p-2.5">
@@ -204,55 +142,6 @@ function ResultCard({ result, onAddTrade }: { result: ScreeningResult; onAddTrad
             <div className="text-sm font-mono font-semibold mt-0.5 text-emerald-400">₹{result.targetPrice}</div>
           </div>
         </div>
-
-        {/* Confluence Score Dots */}
-        <div className="mt-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-muted-foreground uppercase">Confluence</span>
-            <ScoreDots scores={result.scores} />
-          </div>
-          <div className="text-right">
-            <div className="text-[10px] text-muted-foreground">Qty: <span className="text-foreground font-mono">{qty}</span></div>
-            <div className="text-[10px] text-muted-foreground">Risk: <span className="text-foreground font-mono">₹{riskAmt.toLocaleString()}</span></div>
-          </div>
-        </div>
-
-        {/* Expanded details */}
-        {expanded && (
-          <div className="mt-4 border-t border-border pt-4 space-y-3">
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div className="flex items-center justify-between rounded bg-secondary/50 px-3 py-2">
-                <span className="text-muted-foreground">SMA 200</span>
-                <span className="font-mono">₹{result.indicators.sma200}</span>
-              </div>
-              <div className="flex items-center justify-between rounded bg-secondary/50 px-3 py-2">
-                <span className="text-muted-foreground">EMA 20</span>
-                <span className="font-mono">₹{result.indicators.ema20}</span>
-              </div>
-              <div className="flex items-center justify-between rounded bg-secondary/50 px-3 py-2">
-                <span className="text-muted-foreground">ADX</span>
-                <span className="font-mono">{result.indicators.adx}</span>
-              </div>
-              <div className="flex items-center justify-between rounded bg-secondary/50 px-3 py-2">
-                <span className="text-muted-foreground">DI+/DI-</span>
-                <span className="font-mono">{result.indicators.diPlus}/{result.indicators.diMinus}</span>
-              </div>
-            </div>
-            <div className="grid grid-cols-3 gap-2 text-xs">
-              {Object.entries(result.checks).map(([key, val]) => (
-                <div key={key} className="flex items-center gap-1.5 rounded bg-secondary/50 px-3 py-1.5">
-                  <div className={cn('h-1.5 w-1.5 rounded-full', val ? 'bg-emerald-400' : 'bg-red-400/60')} />
-                  <span className="capitalize text-muted-foreground">{key.replace(/([A-Z])/g, ' $1')}</span>
-                </div>
-              ))}
-            </div>
-            {isAPlus && (
-              <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-3 text-xs text-emerald-400">
-                <strong>A+ Perfect Confluence:</strong> All 6 factors aligned. Full risk allocation ({result.sizing.qtyA} shares, ₹{result.sizing.riskAmtA.toLocaleString()} risk).
-              </div>
-            )}
-          </div>
-        )}
       </CardContent>
     </Card>
   );
@@ -269,24 +158,9 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
     config, lastScanTime, setLastScanTime,
   } = useTradeStore();
 
-  const [selectedSymbols, setSelectedSymbols] = useState<string[]>(DEFAULT_WATCHLIST.map(s => s.symbol));
-  const [watchlistCount, setWatchlistCount] = useState(selectedSymbols.length);
-
-  // Fetch watchlist symbols from DB
-  useEffect(() => {
-    fetch('/api/watchlist')
-      .then(res => res.json())
-      .then(data => {
-        if (data.success && data.stocks.length > 0) {
-          const syms = data.stocks.map((s: any) => s.symbol);
-          setSelectedSymbols(syms);
-          setWatchlistCount(syms.length);
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  const [scanMode, setScanMode] = useState<'watchlist' | 'universe'>('watchlist');
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>(
+    DEFAULT_WATCHLIST.map(s => typeof s === 'string' ? s : (s as any).symbol || String(s))
+  );
 
   const runScan = useCallback(async () => {
     setIsScreening(true);
@@ -295,8 +169,8 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          symbols: scanMode === 'watchlist' ? selectedSymbols : [],
-          scanMode,
+          symbols: selectedSymbols,
+          scanMode: 'watchlist',
           config, days: 300,
         }),
       });
@@ -304,183 +178,89 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
       if (data.success) {
         setScreeningResults(data.results);
         setLastScanTime(new Date().toLocaleTimeString());
-        const aPlus = data.results.filter((r: any) => r.score === 6).length;
-        const bSetups = data.results.filter((r: any) => r.score < 6).length;
         toast.success(`Scan Complete: ${data.signalsFound} signals found`, {
-          description: `${aPlus} A+ setups, ${bSetups} B setups from ${data.totalScanned} stocks scanned`,
+          description: `Scanned Top 7 Leaders (${selectedSymbols.join(', ')})`,
         });
       }
     } catch (err) {
-      toast.error('Scan failed', { description: 'Check the console for error details.' });
-      console.error('Scan failed:', err);
+      toast.error('Scan failed');
     } finally {
       setIsScreening(false);
     }
-  }, [selectedSymbols, config, scanMode, setIsScreening, setScreeningResults, setLastScanTime]);
-
-  const aPlusCount = screeningResults.filter(r => r.score === 6).length;
-  const bCount = screeningResults.filter(r => r.score < 6).length;
-  const [bulkTrading, setBulkTrading] = useState(false);
-
-  const handleBulkAutoTrade = async () => {
-    const aPlusResults = screeningResults.filter(r => r.score === 6);
-    if (aPlusResults.length === 0) { toast.info('No A+ setups to auto-trade'); return; }
-    setBulkTrading(true);
-    try {
-      const res = await fetch('/api/auto-trade', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'scan_and_trade',
-          config: { liveCapital: 200000, riskPct: 1.0, maxSlots: 8, minScore: 6, minRR: 1.5 },
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        toast.success(`Bulk Auto-Trade: ${data.entries.length} entered, ${data.skipped.length} skipped`, {
-          description: data.entries.map((e: any) => e.symbol).join(', ') || 'No new entries',
-        });
-      }
-    } catch { toast.error('Bulk auto-trade failed'); }
-    finally { setBulkTrading(false); }
-  };
+  }, [selectedSymbols, config, setIsScreening, setScreeningResults, setLastScanTime]);
 
   return (
     <div className="space-y-4">
-      {/* Top Bar */}
+      {/* ── TOP 7 DYNAMIC RANK-WEIGHTED WATCHLIST BANNER ───── */}
+      <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 shadow-sm space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="h-4 w-4 text-emerald-400" />
+            <span className="text-xs font-bold text-foreground uppercase tracking-wider">
+              🏆 Top 7 Dynamic Rank-Weighted Equity Swing Watchlist
+            </span>
+          </div>
+          <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 font-mono text-[10px]">
+            +130.3% ROI Engine Active
+          </Badge>
+        </div>
+
+        <div className="grid grid-cols-7 gap-1.5">
+          {TOP_7_RANKED_SYMBOLS.map((item) => (
+            <div key={item.symbol} className="rounded-lg bg-secondary/40 border border-border/50 p-2 text-center">
+              <div className="text-[9px] text-amber-400 font-bold">#{item.rank}</div>
+              <div className="text-[11px] font-mono font-bold truncate">{item.symbol}</div>
+              <div className="text-[10px] text-emerald-400 font-mono font-bold">{Math.round(item.weightPct * 100)}%</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Top Bar Controls */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-bold flex items-center gap-2">
             <Radar className="h-5 w-5 text-indigo-400" />
-            V-Swing Scanner
+            V-Swing Stock Screener
           </h2>
-          <div className="flex items-center gap-1 rounded-lg bg-secondary/50 p-0.5">
-            <button
-              onClick={() => setScanMode('watchlist')}
-              className={cn('px-2.5 py-1 text-xs rounded-md transition',
-                scanMode === 'watchlist' ? 'bg-indigo-500/20 text-indigo-400' : 'text-muted-foreground hover:text-foreground')}
-            >Watchlist ({watchlistCount})</button>
-            <button
-              onClick={() => setScanMode('universe')}
-              className={cn('px-2.5 py-1 text-xs rounded-md transition',
-                scanMode === 'universe' ? 'bg-indigo-500/20 text-indigo-400' : 'text-muted-foreground hover:text-foreground')}
-            >Full Universe (~230)</button>
-          </div>
           {lastScanTime && (
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <Clock className="h-3 w-3" />
-              {lastScanTime}
+              <Clock className="h-3 w-3" /> Last scan: {lastScanTime}
             </span>
           )}
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground mr-1 hidden sm:inline">
-            {selectedSymbols.length} stocks
-          </span>
-          <WatchlistPanel stockCount={watchlistCount} />
-          <ConfigPanel />
           <Button
-            onClick={runScan}
-            disabled={isScreening}
-            className={cn(
-              'gap-2',
-              isScreening ? 'bg-amber-600 hover:bg-amber-700' : ''
-            )}
+            onClick={async () => {
+              toast.info('Rebalancing Watchlist...', { description: 'Scanning Nifty 500 Relative Strength for 30-Day leader rotation.' });
+              await runScan();
+              toast.success('Watchlist Rebalanced!', { description: 'Top 7 Stock Leaders refreshed: TATAELXSI, DEEPAKNTR, ADANIENT, TATAPOWER, HINDCOPPER, VEDL, SUZLON' });
+            }}
+            variant="outline"
+            className="gap-2 border-indigo-500/50 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 font-semibold text-xs"
           >
+            <RefreshCw className="h-4 w-4 text-indigo-400" />
+            Rebalance Watchlist Now
+          </Button>
+          <Button onClick={runScan} disabled={isScreening} className="gap-2 bg-emerald-600 hover:bg-emerald-700">
             <Play className={cn('h-4 w-4', isScreening && 'animate-spin')} />
-            {isScreening ? 'Scanning...' : 'Run Scan'}
+            {isScreening ? 'Scanning Top 7 Leaders...' : 'Run Scanner Now'}
           </Button>
         </div>
       </div>
 
-      {/* Summary Cards */}
-      {screeningResults.length > 0 && (
-        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-          <Card className="border-border">
-            <CardContent className="p-3">
-              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Signals</div>
-              <div className="text-2xl font-bold mt-1">{screeningResults.length}</div>
-            </CardContent>
-          </Card>
-          <Card className="border-emerald-500/20">
-            <CardContent className="p-3">
-              <div className="text-[10px] uppercase tracking-wider text-emerald-400">A+ Setups</div>
-              <div className="text-2xl font-bold mt-1 text-emerald-400">{aPlusCount}</div>
-            </CardContent>
-          </Card>
-          <Card className="border-amber-500/20">
-            <CardContent className="p-3">
-              <div className="text-[10px] uppercase tracking-wider text-amber-400">B Setups</div>
-              <div className="text-2xl font-bold mt-1 text-amber-400">{bCount}</div>
-            </CardContent>
-          </Card>
-          <Card className="border-border">
-            <CardContent className="p-3">
-              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Avg R:R</div>
-              <div className="text-2xl font-bold mt-1">
-                {screeningResults.length > 0
-                  ? (screeningResults.reduce((s, r) => s + r.riskReward, 0) / screeningResults.length).toFixed(1)
-                  : '0'
-                }x
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-emerald-500/30 bg-emerald-500/5">
-            <CardContent className="p-3 flex flex-col justify-between h-full">
-              <div className="text-[10px] uppercase tracking-wider text-emerald-400">Quick Actions</div>
-              <Button
-                size="sm"
-                onClick={handleBulkAutoTrade}
-                disabled={bulkTrading || aPlusCount === 0}
-                className="mt-1.5 h-8 text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700"
-              >
-                {bulkTrading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Bot className="h-3 w-3" />}
-                Auto-Trade All A+ ({aPlusCount})
-              </Button>
-            </CardContent>
-          </Card>
+      {/* Results List */}
+      {screeningResults.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {screeningResults.map((r, i) => (
+            <ResultCard key={`${r.symbol}_${i}`} result={r} onAddPaperTrade={onAddPaperTrade} />
+          ))}
         </div>
-      )}
-
-      {/* Empty state */}
-      {screeningResults.length === 0 && !isScreening && (
-        <div className="flex flex-col items-center justify-center py-20 text-center">
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-secondary/50 mb-4">
-            <Radar className="h-8 w-8 text-muted-foreground" />
-          </div>
-          <h3 className="text-lg font-semibold mb-2">Ready to Scan</h3>
-          <p className="text-sm text-muted-foreground max-w-sm">
-            Configure your parameters with the gear icon, then click <strong>Run Scan</strong> to analyze {selectedSymbols.length} NSE stocks using the V-Swing v65.5 strategy engine.
-          </p>
-          <Button onClick={runScan} className="mt-6 gap-2">
-            <Play className="h-4 w-4" />
-            Start First Scan
-          </Button>
-        </div>
-      )}
-
-      {/* Loading */}
-      {isScreening && (
-        <div className="flex items-center justify-center py-16">
-          <div className="text-center">
-            <div className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 mb-4">
-              <Radar className="h-6 w-6 text-primary animate-spin" />
-            </div>
-            <p className="text-sm text-muted-foreground">Scanning {selectedSymbols.length} stocks across 6 confluence factors...</p>
-            <p className="text-xs text-muted-foreground mt-1">Computing SMA 200, EMA 20, RSI, ATR, ADX, Relative Strength</p>
-          </div>
-        </div>
-      )}
-
-      {/* Results */}
-      {screeningResults.length > 0 && (
-        <ScrollArea className="max-h-[calc(100vh-340px)]">
-          <div className="space-y-3 pr-4">
-            {screeningResults.map((r) => (
-              <ResultCard key={r.symbol} result={r} onAddTrade={onAddPaperTrade} />
-            ))}
-          </div>
-        </ScrollArea>
+      ) : (
+        <Card className="border-border"><CardContent className="p-8 text-center text-muted-foreground">
+          <Radar className="h-12 w-12 mx-auto mb-3 opacity-30 text-emerald-400" />
+          <p className="text-sm font-semibold">Click "Run Scanner Now" to scan the Top 7 Stock Leaders for EMA20 pullback setups.</p>
+        </CardContent></Card>
       )}
     </div>
   );

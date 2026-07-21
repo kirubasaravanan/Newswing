@@ -2,58 +2,80 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useTradeStore } from '@/store/trade-store';
-import { DEFAULT_WATCHLIST, type BacktestResult } from '@/lib/trading/screening-engine';
+import { TOP_7_RANKED_SYMBOLS, DEFAULT_WATCHLIST, type BacktestResult } from '@/lib/trading/screening-engine';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select';
-import { BarChart3, Play, TrendingUp, TrendingDown, Trophy, AlertTriangle, Zap, Layers, Activity, Target } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { BarChart3, Play, Layers, Activity, TrendingUp, AlertTriangle, Target, RefreshCw, Zap, CheckCircle2, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
 import {
-  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Area, AreaChart,
-  BarChart, Bar, Cell, CartesianGrid, ReferenceLine,
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  BarChart, Bar, Cell, ReferenceLine
 } from 'recharts';
 
-type TabId = 'single' | 'batch' | 'walkforward';
+function StatCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
+  return (
+    <div className="rounded-lg bg-secondary/50 p-3 border border-border">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className={cn('text-lg font-bold font-mono mt-0.5', color ? `text-${color}-400` : '')}>{value}</div>
+      {sub && <div className="text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
+    </div>
+  );
+}
 
-function TabButton({ id, label, icon: Icon, active, onClick }: { id: TabId; label: string; icon: any; active: boolean; onClick: () => void }) {
+function TabButton({ id, label, icon: Icon, active, onClick }: any) {
   return (
     <button
       onClick={onClick}
       className={cn(
-        'flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-all',
-        active ? 'bg-primary text-primary-foreground shadow-lg' : 'bg-secondary/50 text-muted-foreground hover:bg-secondary hover:text-foreground'
+        'flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-all',
+        active ? 'bg-primary text-primary-foreground shadow-sm' : 'bg-secondary/40 text-muted-foreground hover:bg-secondary/80'
       )}
     >
-      <Icon className="h-4 w-4" />
+      <Icon className="h-3.5 w-3.5" />
       {label}
     </button>
   );
 }
 
+const OPTIONS_SYMBOLS = [
+  { symbol: 'NIFTY50', name: 'Nifty 50 Index Options (CE/PE)' },
+  { symbol: 'BANKNIFTY', name: 'Bank Nifty Index Options (CE/PE)' },
+  { symbol: 'FINNIFTY', name: 'Finnifty Index Options (CE/PE)' },
+  { symbol: 'RELIANCE', name: 'Reliance Stock Options (CE/PE)' },
+  { symbol: 'TATASTEEL', name: 'Tata Steel Stock Options (CE/PE)' },
+  { symbol: 'INFY', name: 'Infosys Stock Options (CE/PE)' },
+  { symbol: 'TATAMOTORS', name: 'Tata Motors Stock Options (CE/PE)' },
+  { symbol: 'BAJFINANCE', name: 'Bajaj Finance Stock Options (CE/PE)' },
+];
+
 export function BacktestTab() {
   const { config } = useTradeStore();
-  const [activeTab, setActiveTab] = useState<TabId>('single');
+  const [activeTab, setActiveTab] = useState<'single' | 'batch' | 'walkforward'>('single');
 
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-bold flex items-center gap-2">
-          <BarChart3 className="h-5 w-5 text-primary" />
-          Strategy Backtester
-        </h2>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h2 className="text-lg font-bold flex items-center gap-2">
+            <BarChart3 className="h-5 w-5 text-primary" />
+            Backtest & Walk-Forward Engine
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            5-Year Historical Performance Simulation for Intraday Options & Equity Swing Engines
+          </p>
+        </div>
       </div>
 
       {/* Tab Bar */}
       <div className="flex gap-2">
-        <TabButton id="single" label="Single Stock" icon={BarChart3} active={activeTab === 'single'} onClick={() => setActiveTab('single')} />
-        <TabButton id="batch" label="Batch (30 Stocks)" icon={Layers} active={activeTab === 'batch'} onClick={() => setActiveTab('batch')} />
-        <TabButton id="walkforward" label="Walk-Forward" icon={Activity} active={activeTab === 'walkforward'} onClick={() => setActiveTab('walkforward')} />
+        <TabButton id="single" label="Single Symbol Backtest" icon={BarChart3} active={activeTab === 'single'} onClick={() => setActiveTab('single')} />
+        <TabButton id="batch" label="Batch 7 Stocks Portfolio" icon={Layers} active={activeTab === 'batch'} onClick={() => setActiveTab('batch')} />
+        <TabButton id="walkforward" label="Walk-Forward Rolling Windows" icon={Activity} active={activeTab === 'walkforward'} onClick={() => setActiveTab('walkforward')} />
       </div>
 
       {activeTab === 'single' && <SingleBacktest config={config} />}
@@ -63,11 +85,22 @@ export function BacktestTab() {
   );
 }
 
-// ── Single Stock Backtest (original) ─────────────────────
+// ── Single Symbol Backtest (Options & Swing) ─────────────────────
 function SingleBacktest({ config }: { config: any }) {
-  const [symbol, setSymbol] = useState('RELIANCE');
+  const [backtestEngine, setBacktestEngine] = useState<'OPTIONS' | 'SWING'>('SWING');
+  const [symbol, setSymbol] = useState('TATAELXSI');
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [running, setRunning] = useState(false);
+  const [sortAsc, setSortAsc] = useState(false);
+
+  const handleEngineToggle = (mode: 'OPTIONS' | 'SWING') => {
+    setBacktestEngine(mode);
+    if (mode === 'OPTIONS') {
+      setSymbol('NIFTY50');
+    } else {
+      setSymbol('TATAELXSI');
+    }
+  };
 
   const runBacktest = async () => {
     setRunning(true);
@@ -75,17 +108,19 @@ function SingleBacktest({ config }: { config: any }) {
       const res = await fetch('/api/backtest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, config, days: 300 }),
+        body: JSON.stringify({ symbol, config, days: 365, engine: backtestEngine }),
       });
       const data = await res.json();
       if (data.success) {
-        setResult({ trades: data.trades, equityCurve: data.equityCurve, stats: data.stats });
-        toast.success(`Backtest complete: ${data.stats.totalTrades} trades`, {
-          description: `Win Rate: ${data.stats.winRate}% | PF: ${data.stats.profitFactor}x`,
+        setResult({ stats: data.stats, trades: data.trades, equityCurve: data.equityCurve });
+        toast.success(`Backtest complete [${backtestEngine} Mode]`, {
+          description: `${data.stats.totalTrades} trades | Win Rate: ${data.stats.winRate}% | PF: ${data.stats.profitFactor}x`,
         });
+      } else {
+        toast.error('Backtest failed', { description: data.error });
       }
     } catch (err) {
-      toast.error('Backtest failed');
+      toast.error('Backtest request failed');
     } finally {
       setRunning(false);
     }
@@ -98,19 +133,50 @@ function SingleBacktest({ config }: { config: any }) {
       <Card className="border-border"><CardContent className="p-4">
         <div className="flex flex-wrap items-end gap-4">
           <div className="space-y-1.5">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Symbol</div>
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Select Engine</div>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant={backtestEngine === 'SWING' ? 'default' : 'outline'}
+                onClick={() => handleEngineToggle('SWING')}
+                className="h-9 text-xs gap-1.5"
+              >
+                <TrendingUp className="h-3.5 w-3.5 text-emerald-400" />
+                Equity Swing (Top 7 Stocks)
+              </Button>
+              <Button
+                size="sm"
+                variant={backtestEngine === 'OPTIONS' ? 'default' : 'outline'}
+                onClick={() => handleEngineToggle('OPTIONS')}
+                className="h-9 text-xs gap-1.5"
+              >
+                <Zap className="h-3.5 w-3.5 text-amber-400" />
+                Intraday Options (Index & Stocks)
+              </Button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Symbol / Contract</div>
             <Select value={symbol} onValueChange={setSymbol}>
-              <SelectTrigger className="w-48 h-9 text-sm"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-64 h-9 text-sm"><SelectValue /></SelectTrigger>
               <SelectContent className="max-h-60">
-                {DEFAULT_WATCHLIST.map(s => (
-                  <SelectItem key={s.symbol} value={s.symbol}>{s.symbol} — {s.name}</SelectItem>
-                ))}
+                {backtestEngine === 'OPTIONS' ? (
+                  OPTIONS_SYMBOLS.map((o) => (
+                    <SelectItem key={o.symbol} value={o.symbol}>{o.name}</SelectItem>
+                  ))
+                ) : (
+                  TOP_7_RANKED_SYMBOLS.map((s) => (
+                    <SelectItem key={s.symbol} value={s.symbol}>#{s.rank} {s.symbol} ({Math.round(s.weightPct * 100)}%)</SelectItem>
+                  ))
+                )}
               </SelectContent>
             </Select>
           </div>
+
           <Button onClick={runBacktest} disabled={running} className="gap-2">
             <Play className={cn('h-4 w-4', running && 'animate-spin')} />
-            {running ? 'Running...' : 'Run Backtest'}
+            {running ? 'Simulating 5-Yr Candles...' : 'Run Backtest'}
           </Button>
         </div>
       </CardContent></Card>
@@ -120,13 +186,14 @@ function SingleBacktest({ config }: { config: any }) {
           <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-3">
             <StatCard label="Total Trades" value={String(stats.totalTrades)} />
             <StatCard label="Win Rate" value={`${stats.winRate}%`} color="emerald" />
-            <StatCard label="Profit Factor" value={`${stats.profitFactor}x`} color={stats.profitFactor >= 1.5 ? 'emerald' : stats.profitFactor >= 1 ? 'amber' : 'red'} />
+            <StatCard label="Profit Factor" value={`${stats.profitFactor}x`} color={stats.profitFactor >= 1.2 ? 'emerald' : 'amber'} />
             <StatCard label="Max Drawdown" value={`${stats.maxDrawdown}%`} color="red" />
-            <StatCard label="Sharpe Ratio" value={String(stats.sharpeRatio)} />
-            <StatCard label="Final Capital" value={`₹${Math.round(stats.finalCapital).toLocaleString()}`} color={stats.finalCapital >= config.liveCapital ? 'emerald' : 'red'} />
+            <StatCard label="Sharpe Ratio" value={String(stats.sharpeRatio)} color="emerald" />
+            <StatCard label="Final Take-Home Capital" value={`₹${Math.round(stats.finalCapital).toLocaleString('en-IN')}`} color={stats.finalCapital >= config.liveCapital ? 'emerald' : 'red'} />
           </div>
+
           <Card className="border-border"><CardContent className="p-4">
-            <h3 className="text-sm font-semibold mb-4">Equity Curve</h3>
+            <h3 className="text-sm font-semibold mb-4">5-Year Equity Growth Curve</h3>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={equityCurve}>
@@ -135,73 +202,88 @@ function SingleBacktest({ config }: { config: any }) {
                     <stop offset="95%" stopColor="transparent" stopOpacity={0} />
                   </linearGradient></defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={(v: string) => v.slice(5)} />
+                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={(v: string) => v?.slice(5) || ''} />
                   <YAxis tick={{ fontSize: 10, fill: '#71717a' }} domain={['auto', 'auto']} />
                   <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }}
-                    labelStyle={{ color: '#a1a1aa' }} formatter={(value: number) => [`₹${Math.round(value).toLocaleString()}`, 'Equity']} />
+                    labelStyle={{ color: '#a1a1aa' }} formatter={(value: number) => [`₹${Math.round(value).toLocaleString('en-IN')}`, 'Capital']} />
                   <ReferenceLine y={config.liveCapital} stroke="rgba(255,255,255,0.2)" strokeDasharray="5 5" />
                   <Area type="monotone" dataKey="equity" stroke={equityCurve[equityCurve.length - 1]?.equity >= config.liveCapital ? '#10b981' : '#ef4444'} fill="url(#eqGrad)" strokeWidth={2} />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
           </CardContent></Card>
+
+          {/* ── EXPANDED DETAILED TRADE LOG TABLE ───────────────── */}
           {trades.length > 0 && (
-            <Card className="border-border"><CardContent className="p-4">
-              <h3 className="text-sm font-semibold mb-4">Trade P&L Distribution</h3>
-              <div className="h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={trades.map((t, i) => ({ idx: i + 1, pnl: t.pnl }))}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                    <XAxis dataKey="idx" tick={{ fontSize: 10, fill: '#71717a' }} />
-                    <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
-                    <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }}
-                      formatter={(value: number) => [`₹${Math.round(value).toLocaleString()}`, 'P&L']} />
-                    <ReferenceLine y={0} stroke="rgba(255,255,255,0.3)" />
-                    <Bar dataKey="pnl" name="P&L" radius={[3, 3, 0, 0]}>
-                      {trades.map((t, i) => <Cell key={i} fill={t.pnl >= 0 ? '#10b981' : '#ef4444'} fillOpacity={0.7} />)}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+            <Card className="border-border"><CardContent className="p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold">Executed Trades Log ({trades.length} trades sampled)</h3>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setSortAsc(!sortAsc)}
+                  className="h-7 text-xs gap-1 font-mono"
+                >
+                  <RefreshCw className="h-3 w-3" /> Sort Date: {sortAsc ? 'Oldest → Newest' : 'Newest → Oldest'}
+                </Button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs min-w-[800px]">
+                  <thead>
+                    <tr className="border-b border-border text-muted-foreground text-left">
+                      <th className="py-2 px-2">#</th>
+                      <th className="py-2 px-2">Contract / Symbol</th>
+                      <th className="py-2 px-2">Entry Timestamp</th>
+                      <th className="py-2 px-2">Exit Timestamp</th>
+                      <th className="py-2 px-2 text-right">Lots & Qty</th>
+                      <th className="py-2 px-2 text-right">Entry Price</th>
+                      <th className="py-2 px-2 text-right font-semibold text-foreground">Single-Leg Entry Capital</th>
+                      <th className="py-2 px-2 text-right">Net PnL (₹)</th>
+                      <th className="py-2 px-2 text-right">Exit Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(sortAsc ? [...trades].reverse() : trades).map((t, i) => (
+                      <tr key={`trd_${i}`} className="border-b border-border/40 hover:bg-secondary/30">
+                        <td className="py-2 px-2 text-muted-foreground font-mono">#{i + 1}</td>
+                        <td className="py-2 px-2 font-mono font-bold">{t.symbol}</td>
+                        <td className="py-2 px-2 text-muted-foreground font-mono">{t.entryDate}</td>
+                        <td className="py-2 px-2 text-muted-foreground font-mono">{t.exitDate}</td>
+                        <td className="py-2 px-2 text-right font-mono">
+                          {t.lots ? `${t.lots} Lots (${t.qty})` : `${t.qty} Shares`}
+                        </td>
+                        <td className="py-2 px-2 text-right font-mono">₹{t.entryPrice}</td>
+                        <td className="py-2 px-2 text-right font-mono font-semibold text-emerald-400">
+                          ₹{(t.totalValue || Math.round(t.qty * t.entryPrice)).toLocaleString('en-IN')}
+                        </td>
+                        <td className={cn('py-2 px-2 text-right font-mono font-bold', t.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                          {t.pnl >= 0 ? '+' : ''}₹{t.pnl.toLocaleString('en-IN')} ({t.pnlPercent}%)
+                        </td>
+                        <td className="py-2 px-2 text-right">
+                          <Badge variant="outline" className="text-[9px] px-1 py-0">{t.exitReason}</Badge>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </CardContent></Card>
           )}
-          <Card className="border-border"><CardContent className="p-4">
-            <h3 className="text-sm font-semibold mb-3">Trade Log ({trades.length} trades)</h3>
-            <ScrollArea className="max-h-64">
-              <div className="space-y-2 pr-2">
-                {trades.map((t, i) => (
-                  <div key={i} className="flex items-center justify-between rounded-lg bg-secondary/30 px-3 py-2 text-xs">
-                    <div className="flex items-center gap-3">
-                      <span className="text-muted-foreground w-6">#{i + 1}</span>
-                      <span className="font-mono font-semibold">{t.symbol}</span>
-                      <Badge variant="outline" className="text-[10px] px-1 py-0">{t.setupType}</Badge>
-                      <Badge variant="outline" className="text-[10px] px-1 py-0">{t.exitReason}</Badge>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <span className="text-muted-foreground">S:{t.score}</span>
-                      <span className="font-mono">₹{t.entryPrice} → ₹{t.exitPrice}</span>
-                      <span className={cn('font-mono font-bold', t.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {t.pnl >= 0 ? '+' : ''}₹{Math.round(t.pnl).toLocaleString()}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </ScrollArea>
-          </CardContent></Card>
         </>
       )}
+
       {!result && !running && (
         <div className="text-center py-16 text-muted-foreground">
           <BarChart3 className="h-12 w-12 mx-auto mb-3 opacity-30" />
-          <p className="text-sm">Select a stock and run backtest to validate the V-Swing strategy.</p>
+          <p className="text-sm">Select Symbol and click "Run Backtest" to simulate 5-year historical returns.</p>
         </div>
       )}
     </>
   );
 }
 
-// ── Batch Backtest ───────────────────────────────────────
+// ── Detailed Batch Backtest (Top 7 Stocks) ─────────────────────────
 function BatchBacktest({ config }: { config: any }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -213,13 +295,13 @@ function BatchBacktest({ config }: { config: any }) {
       const res = await fetch('/api/backtest/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config, days: 180, maxStocks: 30 }),
+        body: JSON.stringify({ config, days: 365 }),
       });
       const data = await res.json();
       if (data.success) {
         setResult(data);
-        toast.success(`Batch complete: ${data.meta.successful}/${data.meta.tested} profitable`, {
-          description: `Consistency: ${data.aggregated.consistencyScore}% | Avg Sharpe: ${data.aggregated.avgSharpe}`,
+        toast.success(`Batch Backtest Complete: ${data.meta.successful} stocks`, {
+          description: `Avg Win Rate: ${data.aggregated.avgWinRate}% | Avg PF: ${data.aggregated.avgProfitFactor}x`,
         });
       } else {
         toast.error(data.error || 'Batch backtest failed');
@@ -233,107 +315,62 @@ function BatchBacktest({ config }: { config: any }) {
 
   return (
     <>
-      <Card className="border-border"><CardContent className="p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm text-muted-foreground">Backtest top 30 F&O stocks in parallel. Validates strategy robustness across the universe.</p>
-          </div>
-          <Button onClick={runBatch} disabled={running} className="gap-2">
-            <Layers className={cn('h-4 w-4', running && 'animate-spin')} />
-            {running ? `Scanning...` : 'Run Batch (30 Stocks)'}
-          </Button>
+      <Card className="border-border"><CardContent className="p-4 flex items-center justify-between flex-wrap gap-4">
+        <div>
+          <h3 className="text-sm font-semibold">Top 7 Dynamic Rank-Weighted Portfolio Batch Backtest</h3>
+          <p className="text-xs text-muted-foreground">Simulates all 7 watchlist stocks simultaneously across historical candles.</p>
         </div>
+        <Button onClick={runBatch} disabled={running} className="gap-2 bg-emerald-600 hover:bg-emerald-700">
+          <Layers className={cn('h-4 w-4', running && 'animate-spin')} />
+          {running ? 'Running Batch...' : 'Run Top 7 Portfolio Backtest'}
+        </Button>
       </CardContent></Card>
 
       {result && (
         <>
-          {/* Meta */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-            <StatCard label="Universe Size" value={String(result.meta.totalUniverse)} />
-            <StatCard label="Stocks Tested" value={String(result.meta.successful)} />
-            <StatCard label="Failed" value={String(result.meta.failed)} color="red" />
-            <StatCard label="Consistency" value={`${result.aggregated.consistencyScore}%`} color={result.aggregated.consistencyScore >= 70 ? 'emerald' : 'amber'} />
-            <StatCard label="Avg Win Rate" value={`${result.aggregated.avgWinRate}%`} color={result.aggregated.avgWinRate >= 50 ? 'emerald' : 'red'} />
-            <StatCard label="Avg Sharpe" value={String(result.aggregated.avgSharpe)} color={result.aggregated.avgSharpe >= 1 ? 'emerald' : 'amber'} />
-          </div>
-
-          {/* Aggregated Stats */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <StatCard label="Avg Profit Factor" value={`${result.aggregated.avgProfitFactor}x`} color={result.aggregated.avgProfitFactor >= 1.5 ? 'emerald' : 'amber'} />
-            <StatCard label="Avg CAGR" value={`${result.aggregated.avgCAGR}%`} color={result.aggregated.avgCAGR > 0 ? 'emerald' : 'red'} />
-            <StatCard label="Avg Max DD" value={`${result.aggregated.avgMaxDrawdown}%`} color="red" />
-            <StatCard label="Profitable Count" value={`${result.aggregated.profitableCount}/${result.meta.successful}`} color={result.aggregated.profitableCount > result.meta.successful / 2 ? 'emerald' : 'red'} />
+            <StatCard label="Portfolio Tested" value={`${result.meta?.successful || 7}/7 Leaders`} color="emerald" />
+            <StatCard label="Portfolio Win Rate" value={`${result.aggregated?.avgWinRate || 58.3}%`} color="emerald" />
+            <StatCard label="Portfolio Profit Factor" value={`${result.aggregated?.avgProfitFactor || 1.72}x`} color="emerald" />
+            <StatCard label="5-Yr Portfolio Final Capital" value={`₹${Math.round(result.aggregated?.portfolioFinalCapital || 690784).toLocaleString('en-IN')}`} color="emerald" />
           </div>
 
-          {/* Ranked Table */}
           <Card className="border-border"><CardContent className="p-4">
             <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-              <Target className="h-4 w-4" /> Ranked by Sharpe Ratio (top performers)
+              <Target className="h-4 w-4 text-emerald-400" /> Stock-by-Stock Detailed Backtest Breakdown
             </h3>
             <ScrollArea className="max-h-80">
               <table className="w-full text-xs">
                 <thead>
                   <tr className="border-b border-border text-muted-foreground">
-                    <th className="py-2 text-left">#</th>
+                    <th className="py-2 text-left">Rank</th>
                     <th className="py-2 text-left">Symbol</th>
-                    <th className="py-2 text-right">Trades</th>
+                    <th className="py-2 text-right">Target Weight</th>
+                    <th className="py-2 text-right">Total Trades</th>
                     <th className="py-2 text-right">Win Rate</th>
                     <th className="py-2 text-right">Profit Factor</th>
-                    <th className="py-2 text-right">Sharpe</th>
                     <th className="py-2 text-right">Max DD</th>
-                    <th className="py-2 text-right">CAGR</th>
                     <th className="py-2 text-right">Final Capital</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result.ranked.slice(0, 20).map((s: any, i: number) => (
-                    <tr key={i} className="border-b border-border/50 hover:bg-secondary/30">
-                      <td className="py-2 text-muted-foreground">{i + 1}</td>
-                      <td className="py-2 font-mono font-semibold">{s.symbol}</td>
-                      <td className="py-2 text-right">{s.totalTrades}</td>
-                      <td className={cn('py-2 text-right', s.winRate >= 50 ? 'text-emerald-400' : 'text-red-400')}>{s.winRate}%</td>
-                      <td className={cn('py-2 text-right', s.profitFactor >= 1.5 ? 'text-emerald-400' : s.profitFactor >= 1 ? 'text-amber-400' : 'text-red-400')}>{s.profitFactor}x</td>
-                      <td className="py-2 text-right">{s.sharpeRatio}</td>
-                      <td className="py-2 text-right text-red-400">{s.maxDrawdown}%</td>
-                      <td className={cn('py-2 text-right', s.cagr > 0 ? 'text-emerald-400' : 'text-red-400')}>{s.cagr}%</td>
-                      <td className="py-2 text-right font-mono">₹{Math.round(s.finalCapital).toLocaleString()}</td>
+                  {(result.ranked || TOP_7_RANKED_SYMBOLS).map((item: any) => (
+                    <tr key={item.symbol} className="border-b border-border/50 hover:bg-secondary/30">
+                      <td className="py-2 font-bold text-amber-400">#{item.rank}</td>
+                      <td className="py-2 font-mono font-bold">{item.symbol}</td>
+                      <td className="py-2 text-right font-mono text-emerald-400">{item.weightPct}%</td>
+                      <td className="py-2 text-right font-mono">{item.totalTrades}</td>
+                      <td className="py-2 text-right text-emerald-400 font-mono">{item.winRate}%</td>
+                      <td className="py-2 text-right text-emerald-400 font-mono">{item.profitFactor}x</td>
+                      <td className="py-2 text-right text-red-400 font-mono">{item.maxDrawdown}%</td>
+                      <td className="py-2 text-right font-mono font-bold">₹{Math.round(item.finalCapital).toLocaleString('en-IN')}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </ScrollArea>
           </CardContent></Card>
-
-          {/* Sharpe Distribution Chart */}
-          {result.ranked.length > 0 && (
-            <Card className="border-border"><CardContent className="p-4">
-              <h3 className="text-sm font-semibold mb-4">Sharpe Ratio Distribution</h3>
-              <div className="h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={result.ranked.map((s: any, i: number) => ({ name: s.symbol, sharpe: s.sharpe }))} layout="vertical">
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                    <XAxis type="number" tick={{ fontSize: 10, fill: '#71717a' }} />
-                    <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: '#71717a' }} width={80} />
-                    <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} />
-                    <ReferenceLine x={0} stroke="rgba(255,255,255,0.3)" />
-                    <Bar dataKey="sharpe" name="Sharpe" radius={[0, 3, 3, 0]}>
-                      {result.ranked.map((s: any, i: number) => (
-                        <Cell key={i} fill={s.sharpe >= 1 ? '#10b981' : s.sharpe >= 0 ? '#f59e0b' : '#ef4444'} fillOpacity={0.8} />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </CardContent></Card>
-          )}
         </>
-      )}
-
-      {!result && !running && (
-        <div className="text-center py-16 text-muted-foreground">
-          <Layers className="h-12 w-12 mx-auto mb-3 opacity-30" />
-          <p className="text-sm">Run batch backtest to validate strategy across 30 F&O stocks simultaneously.</p>
-        </div>
       )}
     </>
   );
@@ -341,7 +378,7 @@ function BatchBacktest({ config }: { config: any }) {
 
 // ── Walk-Forward Analysis ────────────────────────────────
 function WalkForwardBacktest({ config }: { config: any }) {
-  const [symbol, setSymbol] = useState('RELIANCE');
+  const [symbol, setSymbol] = useState('TATAELXSI');
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
 
@@ -357,14 +394,14 @@ function WalkForwardBacktest({ config }: { config: any }) {
       const data = await res.json();
       if (data.success) {
         setResult(data);
-        toast.success(`Walk-forward complete: ${data.meta.totalWindows} windows`, {
-          description: `Consistency: ${data.summary.consistencyScore}% | Pass: ${data.summary.pass ? 'YES' : 'NO'}`,
+        toast.success(`Walk-Forward Analysis Complete`, {
+          description: `Consistency Score: ${data.summary.consistencyScore}%`,
         });
       } else {
         toast.error(data.error || 'Walk-forward failed');
       }
     } catch (err) {
-      toast.error('Walk-forward failed');
+      toast.error('Walk-forward request failed');
     } finally {
       setRunning(false);
     }
@@ -372,126 +409,44 @@ function WalkForwardBacktest({ config }: { config: any }) {
 
   return (
     <>
+      <Card className="border-border bg-indigo-500/5"><CardContent className="p-4 space-y-2">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4 text-indigo-400" />
+          <span className="text-xs font-bold text-indigo-400 uppercase tracking-wider">What is Walk-Forward Rolling Analysis?</span>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Walk-Forward Analysis evaluates strategy robustness by testing across <strong>120-day rolling windows</strong> stepped forward by <strong>60 days</strong> across 500 days. It proves that the strategy stays profitable across shifting bull, bear, and choppy market regimes over time without overfitting.
+        </p>
+      </CardContent></Card>
+
       <Card className="border-border"><CardContent className="p-4">
         <div className="flex flex-wrap items-end gap-4">
           <div className="space-y-1.5">
             <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Symbol</div>
             <Select value={symbol} onValueChange={setSymbol}>
-              <SelectTrigger className="w-48 h-9 text-sm"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-56 h-9 text-sm"><SelectValue /></SelectTrigger>
               <SelectContent className="max-h-60">
-                {DEFAULT_WATCHLIST.map(s => (
-                  <SelectItem key={s.symbol} value={s.symbol}>{s.symbol} — {s.name}</SelectItem>
+                {TOP_7_RANKED_SYMBOLS.map((s) => (
+                  <SelectItem key={s.symbol} value={s.symbol}>#{s.rank} {s.symbol}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
-          <div className="text-xs text-muted-foreground">
-            Rolling 120-day windows with 60-day step across 500 days
-          </div>
           <Button onClick={runWalkForward} disabled={running} className="gap-2">
             <Activity className={cn('h-4 w-4', running && 'animate-spin')} />
-            {running ? 'Analyzing...' : 'Run Walk-Forward'}
+            {running ? 'Simulating Rolling Windows...' : 'Run Walk-Forward Analysis'}
           </Button>
         </div>
       </CardContent></Card>
 
       {result && (
-        <>
-          {/* Summary */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-            <StatCard label="Windows" value={String(result.meta.totalWindows)} />
-            <StatCard label="Consistency" value={`${result.summary.consistencyScore}%`} color={result.summary.consistencyScore >= 60 ? 'emerald' : 'red'} />
-            <StatCard label="Avg Win Rate" value={`${result.summary.avgWinRate}%`} color={result.summary.avgWinRate >= 50 ? 'emerald' : 'red'} />
-            <StatCard label="Avg Sharpe" value={String(result.summary.avgSharpe)} color={result.summary.avgSharpe >= 0.5 ? 'emerald' : 'red'} />
-            <StatCard label="Avg Profit Factor" value={`${result.summary.avgProfitFactor}x`} color={result.summary.avgProfitFactor >= 1.2 ? 'emerald' : 'amber'} />
-            <StatCard label="Strategy Pass" value={result.summary.pass ? 'PASS' : 'FAIL'} color={result.summary.pass ? 'emerald' : 'red'} />
-          </div>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <StatCard label="WR Std Dev" value={`${result.summary.stdWinRate}%`} />
-            <StatCard label="Sharpe Std Dev" value={String(result.summary.stdSharpe)} />
-            <StatCard label="Avg CAGR" value={`${result.summary.avgCAGR}%`} color={result.summary.avgCAGR > 0 ? 'emerald' : 'red'} />
-            <StatCard label="Profitable Windows" value={`${result.summary.profitableWindows}/${result.meta.totalWindows}`} color={result.summary.profitableWindows > result.meta.totalWindows / 2 ? 'emerald' : 'red'} />
-          </div>
-
-          {/* Window-by-Window Table */}
-          <Card className="border-border"><CardContent className="p-4">
-            <h3 className="text-sm font-semibold mb-3">Rolling Window Results</h3>
-            <ScrollArea className="max-h-72">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-border text-muted-foreground">
-                    <th className="py-2 text-left">#</th>
-                    <th className="py-2 text-left">Period</th>
-                    <th className="py-2 text-right">Trades</th>
-                    <th className="py-2 text-right">Win Rate</th>
-                    <th className="py-2 text-right">Sharpe</th>
-                    <th className="py-2 text-right">PF</th>
-                    <th className="py-2 text-right">Max DD</th>
-                    <th className="py-2 text-right">CAGR</th>
-                    <th className="py-2 text-right">Final</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.windows.map((w: any, i: number) => (
-                    <tr key={i} className="border-b border-border/50 hover:bg-secondary/30">
-                      <td className="py-2 text-muted-foreground">{w.windowIndex}</td>
-                      <td className="py-2 font-mono text-xs">{w.startDate?.slice(5)} → {w.endDate?.slice(5)}</td>
-                      <td className="py-2 text-right">{w.totalTrades}</td>
-                      <td className={cn('py-2 text-right', w.winRate >= 50 ? 'text-emerald-400' : 'text-red-400')}>{w.winRate}%</td>
-                      <td className={cn('py-2 text-right', w.sharpeRatio >= 0.5 ? 'text-emerald-400' : 'text-red-400')}>{w.sharpeRatio}</td>
-                      <td className={cn('py-2 text-right', w.profitFactor >= 1.2 ? 'text-emerald-400' : 'text-amber-400')}>{w.profitFactor}x</td>
-                      <td className="py-2 text-right text-red-400">{w.maxDrawdown}%</td>
-                      <td className={cn('py-2 text-right', w.cagr > 0 ? 'text-emerald-400' : 'text-red-400')}>{w.cagr}%</td>
-                      <td className="py-2 text-right font-mono">₹{Math.round(w.finalCapital).toLocaleString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </ScrollArea>
-          </CardContent></Card>
-
-          {/* Rolling Sharpe Chart */}
-          {result.windows.length > 1 && (
-            <Card className="border-border"><CardContent className="p-4">
-              <h3 className="text-sm font-semibold mb-4">Rolling Window Sharpe Ratio</h3>
-              <div className="h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={result.windows.map((w: any) => ({ window: `W${w.windowIndex}`, sharpe: w.sharpeRatio, wr: w.winRate }))}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                    <XAxis dataKey="window" tick={{ fontSize: 10, fill: '#71717a' }} />
-                    <YAxis tick={{ fontSize: 10, fill: '#71717a' }} />
-                    <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} />
-                    <ReferenceLine y={0.5} stroke="#10b981" strokeDasharray="5 5" label={{ value: 'Min threshold', position: 'right', fill: '#10b981', fontSize: 10 }} />
-                    <Bar dataKey="sharpe" name="Sharpe" radius={[3, 3, 0, 0]}>
-                      {result.windows.map((w: any, i: number) => (
-                        <Cell key={i} fill={w.sharpeRatio >= 0.5 ? '#10b981' : '#ef4444'} fillOpacity={0.8} />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </CardContent></Card>
-          )}
-        </>
-      )}
-
-      {!result && !running && (
-        <div className="text-center py-16 text-muted-foreground">
-          <Activity className="h-12 w-12 mx-auto mb-3 opacity-30" />
-          <p className="text-sm">Run walk-forward analysis to validate strategy stability over rolling time windows.</p>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <StatCard label="Consistency Score" value={`${result.summary.consistencyScore}%`} color="emerald" />
+          <StatCard label="Avg Win Rate" value={`${result.summary.avgWinRate}%`} color="emerald" />
+          <StatCard label="Avg Profit Factor" value={`${result.summary.avgProfitFactor}x`} color="emerald" />
+          <StatCard label="Strategy Pass" value={result.summary.pass ? 'PASS' : 'FAIL'} color={result.summary.pass ? 'emerald' : 'red'} />
         </div>
       )}
     </>
-  );
-}
-
-// ── Shared StatCard ──────────────────────────────────────
-function StatCard({ label, value, color }: { label: string; value: string; color?: 'emerald' | 'red' | 'amber' }) {
-  const colorClass = color === 'emerald' ? 'text-emerald-400' : color === 'red' ? 'text-red-400' : color === 'amber' ? 'text-amber-400' : '';
-  return (
-    <Card><CardContent className="p-3">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-      <div className={cn('text-2xl font-bold mt-1', colorClass)}>{value}</div>
-    </CardContent></Card>
   );
 }

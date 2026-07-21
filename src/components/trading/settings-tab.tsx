@@ -12,7 +12,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   Briefcase, Plus, Trash2, Wallet, RefreshCw, FolderPlus, IndianRupee,
-  TrendingUp, Calendar, PieChart as PieIcon, Shield,
+  TrendingUp, Calendar, PieChart, Shield,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -388,7 +388,7 @@ function UniverseStatsCard() {
 
   return (
     <div>
-      <h3 className="text-sm font-semibold flex items-center gap-2 mb-3"><PieChart as any className="h-4 w-4" /> Scan Universe</h3>
+      <h3 className="text-sm font-semibold flex items-center gap-2 mb-3"><PieChart className="h-4 w-4" /> Scan Universe</h3>
       <div className="grid grid-cols-3 gap-3 mb-3">
         <div className="rounded-lg bg-indigo-500/10 p-3 text-center">
           <div className="text-[10px] text-indigo-400 uppercase">Total Stocks</div>
