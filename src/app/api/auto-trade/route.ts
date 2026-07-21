@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { runScreening, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/trading/screening-engine';
 import { getHistoricalData, getCurrentPrice } from '@/lib/trading/data-provider';
 import { getFullUniverse, runL1Filter, type NSEStock } from '@/lib/trading/universe-scanner';
+import { scanOptionsUniverse, type OptionsSignal } from '@/lib/trading/options-scanner';
 import { EMA, ATR } from 'technicalindicators';
 import { db } from '@/lib/db';
 
