@@ -210,12 +210,13 @@ export function runScreening(
   // Score 1: Trend (relaxed: RSI > 45 instead of > 52)
   const scoreTrend = (currentClose > sma200[i]! && rsi14[i]! > 45) ? 1 : 0;
 
-  // Score 2: Pullback (relaxed: allow 4% below EMA20, close above OR near EMA20)
+  // Score 2: Pullback (low touched near EMA20 within 1.5% in last 5 bars)
   const lowest5 = Math.min(...lows.slice(Math.max(0, i - 5), i + 1));
-  const scorePullback = (lowest5 < ema20[i]! * 1.04 && currentClose > ema20[i]! * 0.98) ? 1 : 0;
+  const scorePullback = (lowest5 <= ema20[i]! * 1.015 && currentClose >= ema20[i]! * 0.985) ? 1 : 0;
 
-  // Score 3: Trigger
-  const scoreTrigger = currentClose > prevHigh ? 1 : 0;
+  // Score 3: Reversal Trigger (green candle + RSI > 48 & turning UP)
+  const prevRsiVal = get(rsi14, i1, 0);
+  const scoreTrigger = (currentClose > currentOpen && rsi14[i]! > 48 && rsi14[i]! > prevRsiVal) ? 1 : 0;
 
   // Score 4: Volume (relaxed: current OR yesterday above 0.9x average)
   const prevVolMA20 = calcSMA(volumes.slice(Math.max(0, i1 - 20), i1 + 1), 20);
@@ -255,20 +256,20 @@ export function runScreening(
 
   // ── Entry / SL / TP calculation ────────────────────────
   const theoreticalEP = Math.max(currentOpen, prevHigh);
-  // ATR-based SL: 1.5x ATR below entry (standard swing trade stop)
-  const rawSL = theoreticalEP - (currentAtr * 1.5);
+  // Swing-low based SL: below 5-day swing low minus 0.5x ATR buffer
+  const stopLow5 = Math.min(...lows.slice(Math.max(0, i - 5), i));
+  const rawSL = Math.min(stopLow5 - (currentAtr * 0.5), theoreticalEP - (currentAtr * 1.0));
   const riskPerShare = theoreticalEP - rawSL;
 
   if (riskPerShare <= 0) return null;
 
-  const structRange = structHigh - structLow;
-  const expectedReward = structRange;
+  const expectedReward = currentAtr * 3.0; // Expected 3 ATR move
   const rr = expectedReward / riskPerShare;
 
   if (rr < config.minRR && totalScore < 6) return null;
 
   // ── Position Sizing ────────────────────────────────────
-  const tp1 = theoreticalEP + (riskPerShare * 1.0); // 1R target for display
+  const tp1 = theoreticalEP + (riskPerShare * 1.8); // 1.8R target for display
 
   // A+ sizing
   const riskAmtA = config.liveCapital * (config.riskPct / 100);
@@ -441,27 +442,27 @@ export function runBacktest(
       const pos = openPositions[p];
       const barsHeld = barIdx - pos.entryBar;
       
-      // Activate trailing once price moves 0.8R in profit
+      // Activate trailing once price moves 1.0R in profit -> move SL to breakeven
       const profitPerShare = bar.high - pos.avgPrice;
       const riskPerSharePos = pos.avgPrice - pos.stopLoss;
-      if (!pos.trailActive && riskPerSharePos > 0 && profitPerShare >= riskPerSharePos * 0.8) {
+      if (!pos.trailActive && riskPerSharePos > 0 && profitPerShare >= riskPerSharePos * 1.0) {
         pos.trailActive = true;
+        pos.blendedSL = Math.max(pos.blendedSL, pos.avgPrice); // Breakeven SL
       }
 
-      // Partial TP — book 50% at 1R profit
+      // Partial TP — book 40% at TP1 (1.8R)
       if (!pos.partialTaken && bar.high >= pos.tp1) {
-        const closeQty = Math.ceil(pos.totalQty * 0.5);
+        const closeQty = Math.ceil(pos.totalQty * 0.4);
         const pnl = closeQty * (pos.tp1 - pos.avgPrice);
         capital += pnl + closeQty * pos.avgPrice;
         pos.totalQty -= closeQty;
         pos.partialTaken = true;
       }
 
-      // Trailing stop — EMA10 minus 1x ATR, ratchet UP only
-      if (pos.trailActive) {
+      // Trailing stop — 2.0x ATR below current high, ratchet UP only
+      if (pos.trailActive && profitPerShare >= riskPerSharePos * 1.5) {
         const trailATR = atr14Full[barIdx] ?? 1;
-        const ema10Val = ema10Full[barIdx] ?? pos.avgPrice;
-        const dynamicTrail = ema10Val - (trailATR * 1.0);
+        const dynamicTrail = bar.high - (trailATR * 2.0);
         pos.blendedSL = Math.max(pos.blendedSL, dynamicTrail);
       }
 
@@ -556,12 +557,16 @@ export function runBacktest(
     const regimePassCount = [trending, validVol, notExt, regimeSafe, prevCandle.close > prevEMA20].filter(Boolean).length;
     if (regimePassCount < 3) continue;
 
-    // Score calculation on prev bar (relaxed to match screening engine)
+    // Score calculation on prev bar (Pullback-Reversal pattern)
     let score = 0;
     if (prevCandle.close > prevSMA200 && prevRSI > 45) score++;
-    const low5 = Math.min(...lows.slice(Math.max(0, i1 - 5), i1 + 1));
-    if (low5 < prevEMA20 * 1.04 && prevCandle.close > prevEMA20 * 0.98) score++;
-    if (prevCandle.close > (candles[i1 - 1]?.high ?? 0)) score++;
+    const prevLow5 = Math.min(...lows.slice(Math.max(0, i1 - 5), i1 + 1));
+    const isPullbackNearEMA = prevLow5 <= prevEMA20 * 1.015 && prevCandle.close >= prevEMA20 * 0.985;
+    if (isPullbackNearEMA) score++;
+    
+    const isReversalGreen = prevCandle.close > prevCandle.open && prevRSI > 48 && prevRSI > (rsi14Full[i1 - 1] ?? 0);
+    if (isReversalGreen) score++;
+    
     const vm = calcSMA(volumes.slice(Math.max(0, i1 - 20), i1 + 1), 20);
     if (prevCandle.volume > vm * 0.9) score++;
     
@@ -594,9 +599,10 @@ export function runBacktest(
     }
 
     if (score >= config.minScore) {
-      const theoreticalEP = Math.max(bar.open, prevCandle.high);
-      // ATR-based SL: 1.5x ATR below entry
-      const rawSL = theoreticalEP - (prevATR * 1.5);
+      const theoreticalEP = bar.open;
+      // Swing-low based SL: below 5-day swing low minus 0.5x ATR buffer
+      const stopLow5 = Math.min(...lows.slice(Math.max(0, i1 - 5), i1 + 1));
+      const rawSL = Math.min(stopLow5 - (prevATR * 0.5), theoreticalEP - (prevATR * 1.2));
       const riskPerShare = theoreticalEP - rawSL;
 
       if (riskPerShare <= 0) continue;
@@ -617,7 +623,7 @@ export function runBacktest(
       const qtyCap = Math.floor(targetAlloc / theoreticalEP);
       const qty = Math.max(1, Math.min(qtyRisk, qtyCap));
 
-      const tp1 = theoreticalEP + (riskPerShare * 1.0); // 1R partial booking
+      const tp1 = theoreticalEP + (riskPerShare * 2.5); // 2.5R target
 
       if (capital < qty * theoreticalEP) continue;
 

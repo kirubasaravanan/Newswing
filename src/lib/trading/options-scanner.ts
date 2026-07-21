@@ -36,17 +36,13 @@ interface ScanResult {
   stockSignals: OptionsSignal[];
 }
 
-// ── F&O Universe Builder ───────────────────────────────
-const INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY'];
+export const TOP_10_FNO_SYMBOLS = [
+  'MIDCPNIFTY', 'HINDUNILVR', 'NIFTY50', 'INFY', 'ASIANPAINT',
+  'TCS', 'LT', 'MARUTI', 'BANKNIFTY', 'ULTRACEMCO'
+];
 
 export function getFNOUniverse(): string[] {
-  const fnoStocks = getStocksByCategory('FNO');
-  const nifty50 = getStocksByCategory('NIFTY50');
-  const nifty100 = getStocksByCategory('NIFTY100');
-  const allFNO = new Set<string>();
-  for (const s of [...fnoStocks, ...nifty50, ...nifty100]) allFNO.add(s.symbol);
-  for (const idx of INDEX_SYMBOLS) allFNO.delete(idx);
-  return [...INDEX_SYMBOLS, ...Array.from(allFNO)];
+  return [...TOP_10_FNO_SYMBOLS];
 }
 
 function buildSectorMap(): Record<string, string> {

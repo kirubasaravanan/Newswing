@@ -798,9 +798,9 @@ async function autoOptionsScanAndTrade(): Promise<{
         ? Math.round((sig.atrPct * sig.entryPrice * 0.3 + 20) * 100) / 100  // rough CE premium estimate
         : Math.round((sig.atrPct * sig.entryPrice * 0.3 + 15) * 100) / 100;
 
-      // Stop loss = 50% of premium (for options)
-      const sl = sig.direction === 'CE' ? premium * 0.5 : premium * 0.5;
-      const tp = premium * 2.5; // 2.5x target
+      // Intraday options rules: SL = -25% of premium, TP = +50% of premium
+      const sl = Math.round(premium * 0.75 * 100) / 100; // -25% SL
+      const tp = Math.round(premium * 1.50 * 100) / 100; // +50% TP
 
       await db.paperTrade.create({
         data: {
@@ -810,11 +810,11 @@ async function autoOptionsScanAndTrade(): Promise<{
           entryDate: new Date(),
           entryPrice: premium,
           qty: OPTIONS_ENTRY_LOT_SIZE,
-          stopLoss: Math.round(sl * 100) / 100,
-          targetPrice: Math.round(tp * 100) / 100,
+          stopLoss: sl,
+          targetPrice: tp,
           status: 'OPEN',
           autoTraded: true,
-          tags: 'options',
+          tags: 'options,intraday',
           notes: JSON.stringify({
             spotPrice: sig.entryPrice,
             strike: sig.strike,
@@ -836,7 +836,7 @@ async function autoOptionsScanAndTrade(): Promise<{
           symbol: tradeSymbol,
           signal: JSON.stringify(sig),
           executed: true,
-          reason: `Options ${sig.direction} signal (conf:${sig.confidence}, score:${sig.score})`,
+          reason: `Intraday Options ${sig.direction} signal (conf:${sig.confidence}, score:${sig.score})`,
         },
       });
 
@@ -860,44 +860,47 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
 
   try {
     const openOptions = await db.paperTrade.findMany({
-      where: { status: 'OPEN', tags: 'options', autoTraded: true },
+      where: { status: 'OPEN', tags: { contains: 'options' }, autoTraded: true },
     });
+
+    const minsToClose = timeToClose();
+    const isIntradayCloseTime = minsToClose <= 15 && minsToClose > 0; // 3:15 PM IST square-off
 
     for (const trade of openOptions) {
       checked++;
       try {
-        // Parse underlying symbol (strip _CE/PE_strike_expiry suffix)
         const underlying = trade.symbol.split('_')[0];
         const { price: currentSpot } = await getCurrentPrice(underlying);
         if (!currentSpot) continue;
 
-        // Recalculate approximate current premium based on spot change
         const notes = trade.notes ? JSON.parse(trade.notes) : {};
         const spotAtEntry = notes.spotPrice || trade.entryPrice;
         const direction = trade.direction;
 
-        // Simple premium model: premium moves proportionally to spot
         let spotMovePct = (currentSpot - spotAtEntry) / spotAtEntry;
-        // Options amplify: use 0.4 delta approximation
         let currentPremium = trade.entryPrice * (1 + spotMovePct * 0.4);
         if (direction === 'PE') currentPremium = trade.entryPrice * (1 - spotMovePct * 0.4);
-        currentPremium = Math.max(0.05, currentPremium); // Floor at ₹0.05
+        currentPremium = Math.max(0.05, currentPremium);
 
         let exitReason: string | null = null;
         let exitPrice = currentPremium;
 
-        // Check SL
+        // 1. Check Fixed SL (-25%)
         if (currentPremium <= trade.stopLoss) {
           exitReason = 'SL_HIT';
           exitPrice = trade.stopLoss;
         }
-        // Check TP
+        // 2. Check Fixed TP (+50%)
         else if (currentPremium >= trade.targetPrice) {
           exitReason = 'TP_HIT';
           exitPrice = trade.targetPrice;
         }
-        // Time exit: if entered before today and market is near close
-        else if (timeToClose() < 10) {
+        // 3. Mandatory Intraday 3:15 PM Exit (No Overnight Carry)
+        else if (isIntradayCloseTime) {
+          exitReason = 'INTRADAY_315PM_SQUAREOFF';
+          exitPrice = currentPremium;
+        }
+        else {
           const entryDate = new Date(trade.entryDate);
           const now = new Date();
           if (entryDate.toDateString() !== now.toDateString()) {

@@ -1,18 +1,17 @@
 /**
  * Data Provider Layer
- * Provides REAL market data via Yahoo Finance REST API (direct fetch).
- * NO mock/fallback — all data comes from Yahoo Finance.
- *
- * Data paths:
- *   - Historical OHLCV → Yahoo Finance chart API (up to 10 years daily)
- *   - Current/LTP price → Yahoo Finance chart API metadata (v7 quote is dead)
- *   - Chart display → TradingView Widget (client-side embed)
- *
- * NOTE: We use direct fetch() to Yahoo Finance instead of the yahoo-finance2
- * npm package, which causes native crashes in the Next.js server context.
+ * Multi-provider market data abstraction.
+ * Primary: DhanHQ API v2 (when DATA_PROVIDER=dhan)
+ * Fallback: Yahoo Finance REST API
  */
 
 import type { OHLCV } from './screening-engine';
+import {
+  getDhanHistoricalDaily,
+  getDhanMarketQuotes,
+  DHAN_SECURITY_MAP,
+  getDhanConfig,
+} from './dhan-client';
 
 // ── Yahoo Finance symbol mapping ──────────────────────────
 // NSE stocks use .NS suffix in Yahoo Finance
@@ -284,6 +283,42 @@ export async function getHistoricalData(
     }
   }
 
+  // ── 1. Try DhanHQ API v2 first if configured ─────────────
+  if (process.env.DATA_PROVIDER === 'dhan') {
+    const dhanCfg = getDhanConfig();
+    const secMeta = DHAN_SECURITY_MAP[symbol.toUpperCase()];
+    if (dhanCfg.accessToken && secMeta) {
+      try {
+        const toDateStr = new Date().toISOString().split('T')[0];
+        const fromDateObj = new Date(Date.now() - (days * 1.5 * 86400000));
+        const fromDateStr = fromDateObj.toISOString().split('T')[0];
+
+        const dhanRes = await getDhanHistoricalDaily(symbol, fromDateStr, toDateStr);
+        if (dhanRes && dhanRes.close && dhanRes.close.length > 0) {
+          const candles: OHLCV[] = [];
+          for (let i = 0; i < dhanRes.close.length; i++) {
+            const time = dhanRes.start_Time?.[i];
+            const dateStr = time ? new Date(time * 1000).toISOString().split('T')[0] : '';
+            candles.push({
+              date: dateStr || `bar-${i}`,
+              open: Math.round((dhanRes.open[i] || dhanRes.close[i]) * 100) / 100,
+              high: Math.round((dhanRes.high[i] || dhanRes.close[i]) * 100) / 100,
+              low: Math.round((dhanRes.low[i] || dhanRes.close[i]) * 100) / 100,
+              close: Math.round(dhanRes.close[i] * 100) / 100,
+              volume: dhanRes.volume?.[i] || 0,
+            });
+          }
+          if (candles.length >= 10) {
+            historicalCache.set(cacheKey, { data: candles, fetchedAt: Date.now() });
+            return { data: candles, source: 'yahoo' }; // Return as primary source
+          }
+        }
+      } catch (err) {
+        console.warn(`DhanHQ historical fetch failed for ${symbol}, falling back to Yahoo:`, err);
+      }
+    }
+  }
+
   // Skip symbols that have failed repeatedly (likely delisted/wrong ticker)
   const failures = symbolFailures.get(symbol) || 0;
   if (failures >= MAX_SYMBOL_FAILURES) {
@@ -316,6 +351,42 @@ export async function getCurrentPrice(symbol: string): Promise<{
   source: DataSource;
   quote?: Awaited<ReturnType<typeof fetchYahooQuote>>;
 }> {
+  // ── 1. Try DhanHQ Market Feed Quote if configured ─────────
+  if (process.env.DATA_PROVIDER === 'dhan') {
+    const secMeta = DHAN_SECURITY_MAP[symbol.toUpperCase()];
+    if (secMeta) {
+      try {
+        const secIdNum = parseInt(secMeta.securityId, 10);
+        const quotesRes = await getDhanMarketQuotes([secIdNum]);
+        const eqData = quotesRes?.data?.NSE_EQ?.[secMeta.securityId];
+        if (eqData) {
+          const ltp = eqData.last_price || eqData.ohlc?.close || eqData.average_price || 0;
+          if (ltp > 0) {
+            const prevClose = eqData.ohlc?.close || ltp;
+            const change = ltp - prevClose;
+            const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
+            return {
+              price: Math.round(ltp * 100) / 100,
+              source: 'yahoo',
+              quote: {
+                price: Math.round(ltp * 100) / 100,
+                change: Math.round(change * 100) / 100,
+                changePercent: Math.round(changePercent * 100) / 100,
+                volume: eqData.volume || 0,
+                high: eqData.ohlc?.high || ltp,
+                low: eqData.ohlc?.low || ltp,
+                previousClose: Math.round(prevClose * 100) / 100,
+                marketCap: null,
+              },
+            };
+          }
+        }
+      } catch (err) {
+        console.warn(`DhanHQ quote failed for ${symbol}, falling back to Yahoo:`, err);
+      }
+    }
+  }
+
   try {
     const quote = await rateLimitedFetch(() => fetchYahooQuote(symbol));
     if (quote.price > 0) {
