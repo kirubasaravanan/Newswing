@@ -516,7 +516,7 @@ export function DashboardTab() {
               </div>
 
               <div className="flex items-center justify-between text-xs pt-1 border-t border-border/40">
-                <span className="text-muted-foreground text-[11px]">Next 3 Candidates (Next Monthly Rebalance):</span>
+                <span className="text-muted-foreground text-[11px]">Next 3 Candidates (Weekly 7-Day Rebalance & Vacant Slot Filler):</span>
                 <div className="flex items-center gap-2">
                   <Badge variant="secondary" className="text-[10px] font-mono">#8 HDFCAMC (7%)</Badge>
                   <Badge variant="secondary" className="text-[10px] font-mono">#9 TRENT (5%)</Badge>
