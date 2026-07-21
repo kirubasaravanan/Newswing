@@ -44,13 +44,21 @@ interface PositionRules {
 }
 
 const DEFAULT_RULES: PositionRules = {
-  maxPerStock: 50000, maxBuysPerMonth: 3, maxHoldingDays: 25,
-  maxTotalPositions: 8, riskPerTradePct: 1.0,
-  trailingStopR: 1.5, trailToR: 0.5, partialBookR: 2.0, partialBookPct: 30,
-  cooldownDays: 3, maxSectorPct: 35, timeExitMins: 30,
-  // v2 defaults
-  maxDrawdownPct: 8,               // 8% max drawdown before circuit breaker
-  dailyLossLimit: 5000,            // ₹5000 daily loss limit
+  maxPerStock: 75000,              // 25% max allocation of ₹3.0L capital
+  maxBuysPerMonth: 3, 
+  maxHoldingDays: 30,
+  maxTotalPositions: 7,            // Top 7 Stock Leaders
+  riskPerTradePct: 1.0,
+  trailingStopR: 1.5, 
+  trailToR: 0.5, 
+  partialBookR: 2.0, 
+  partialBookPct: 30,
+  cooldownDays: 1, 
+  maxSectorPct: 35, 
+  timeExitMins: 30,
+  // Dual-Broker Risk Controls
+  maxDrawdownPct: 8,               // 8% max drawdown circuit breaker
+  dailyLossLimit: 15000,           // ₹15,000 daily loss limit (5% of ₹3.0L)
   niftyRegimeFilter: true,         // Enable Nifty EMA200 filter
   atrTrailMultiplier: 2.0,         // 2x ATR trailing stop
   adaptiveSizing: true,            // Enable adaptive sizing
@@ -78,7 +86,7 @@ interface SchedulerState {
 }
 
 const DEFAULT_SCHEDULER: SchedulerState = {
-  enabled: false, scanIntervalMin: 30, exitIntervalMin: 5,
+  enabled: false, scanIntervalMin: 15, exitIntervalMin: 1, // 1-minute high speed exit monitor
   lastScanAt: null, lastExitAt: null, nextScanAt: null, nextExitAt: null,
   todayEntries: 0, todayExits: 0, todayPnl: 0, scanCount: 0,
   circuitBreaker: false, circuitBreakerReason: '',

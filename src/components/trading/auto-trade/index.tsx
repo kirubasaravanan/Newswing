@@ -30,15 +30,15 @@ export function AutoTradeTab() {
   const [engineMode, setEngineMode] = useState<'HYBRID' | 'OPTIONS' | 'SWING'>('HYBRID');
   
   // Dual Wallet Config
-  const [optionsCapital, setOptionsCapital] = useState('200000');
+  const [optionsCapital, setOptionsCapital] = useState('300000');
   const [swingCapital, setSwingCapital] = useState('300000');
 
   const [rules, setRules] = useState<PositionRules>({
-    maxPerStock: 50000, maxBuysPerMonth: 3, maxHoldingDays: 25,
-    maxTotalPositions: 8, riskPerTradePct: 1.0,
+    maxPerStock: 75000, maxBuysPerMonth: 3, maxHoldingDays: 30,
+    maxTotalPositions: 7, riskPerTradePct: 1.0,
     trailingStopR: 1.5, trailToR: 0.5, partialBookR: 2.0, partialBookPct: 30,
-    cooldownDays: 3, maxSectorPct: 35, timeExitMins: 30,
-    maxDrawdownPct: 8, dailyLossLimit: 5000, niftyRegimeFilter: true,
+    cooldownDays: 1, maxSectorPct: 35, timeExitMins: 30,
+    maxDrawdownPct: 8, dailyLossLimit: 15000, niftyRegimeFilter: true,
     atrTrailMultiplier: 2.0, adaptiveSizing: true, streakPenaltyPct: 20,
   });
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
