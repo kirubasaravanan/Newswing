@@ -749,6 +749,237 @@ async function runSchedulerTick() {
   return { ...results, marketHours: true, enabled: true, schedulerState: await getSchedulerState() };
 }
 
+// ── Options Auto-Trade Functions ────────────────────────
+const OPTIONS_ENTRY_LOT_SIZE = 1; // 1 lot = N qty (varies by index/stock)
+
+async function autoOptionsScanAndTrade(): Promise<{
+  signalsGenerated: number; entriesCreated: number; errors: string[];
+}> {
+  const errors: string[] = [];
+  let entriesCreated = 0;
+
+  try {
+    // Reset daily options counters if new day
+    const today = new Date().toISOString().split('T')[0];
+    const lastOptReset = (await db.appSettings.findUnique({ where: { key: 'opt_lastResetDate' } }))?.value;
+    if (lastOptReset !== today) {
+      await setSchedulerKV('opt_todayEntries', '0');
+      await setSchedulerKV('opt_todayExits', '0');
+      await setSchedulerKV('opt_todayPnl', '0');
+      await setSchedulerKV('opt_lastResetDate', today);
+    }
+
+    const todayEntries = parseInt((await db.appSettings.findUnique({ where: { key: 'opt_todayEntries' } }))?.value || '0');
+
+    // Max 30 options entries per day
+    if (todayEntries >= 30) {
+      return { signalsGenerated: 0, entriesCreated: 0, errors: ['Daily options entry limit (30) reached'] };
+    }
+
+    // Run the options scanner across full F&O universe
+    const scanResult = await scanOptionsUniverse(35); // Get up to 35 signals
+
+    // Filter: only take signals with confidence >= 55
+    const highConfidence = scanResult.signals.filter(s => s.confidence >= 55);
+    const maxNewEntries = Math.min(highConfidence.length, 30 - todayEntries);
+
+    for (let i = 0; i < maxNewEntries; i++) {
+      const sig = highConfidence[i];
+      const tradeSymbol = `${sig.symbol}_${sig.direction}_${sig.strike}_${sig.expiry}`;
+
+      // Check if already in an open position for this exact contract
+      const existing = await db.paperTrade.findFirst({
+        where: { symbol: tradeSymbol, status: 'OPEN', tags: 'options' },
+      });
+      if (existing) continue;
+
+      // Simulated entry price (in production, fetch real premium from Dhan/NSE)
+      const premium = sig.direction === 'CE'
+        ? Math.round((sig.atrPct * sig.entryPrice * 0.3 + 20) * 100) / 100  // rough CE premium estimate
+        : Math.round((sig.atrPct * sig.entryPrice * 0.3 + 15) * 100) / 100;
+
+      // Stop loss = 50% of premium (for options)
+      const sl = sig.direction === 'CE' ? premium * 0.5 : premium * 0.5;
+      const tp = premium * 2.5; // 2.5x target
+
+      await db.paperTrade.create({
+        data: {
+          symbol: tradeSymbol,
+          stockName: `${sig.direction} ${sig.strike} ${sig.expiry}`,
+          direction: sig.direction,
+          entryDate: new Date(),
+          entryPrice: premium,
+          qty: OPTIONS_ENTRY_LOT_SIZE,
+          stopLoss: Math.round(sl * 100) / 100,
+          targetPrice: Math.round(tp * 100) / 100,
+          status: 'OPEN',
+          autoTraded: true,
+          tags: 'options',
+          notes: JSON.stringify({
+            spotPrice: sig.entryPrice,
+            strike: sig.strike,
+            expiry: sig.expiry,
+            confidence: sig.confidence,
+            score: sig.score,
+            reasons: sig.reasons,
+            rsi: sig.rsi,
+            adx: sig.adx,
+            atrPct: sig.atrPct,
+          }),
+        },
+      });
+
+      // Log the entry
+      await db.autoTradeLog.create({
+        data: {
+          action: 'AUTO_ENTRY',
+          symbol: tradeSymbol,
+          signal: JSON.stringify(sig),
+          executed: true,
+          reason: `Options ${sig.direction} signal (conf:${sig.confidence}, score:${sig.score})`,
+        },
+      });
+
+      entriesCreated++;
+    }
+
+    await setSchedulerKV('opt_todayEntries', String(todayEntries + entriesCreated));
+    await setSchedulerKV('opt_lastScanAt', new Date().toISOString());
+
+    return { signalsGenerated: scanResult.signals.length, entriesCreated, errors };
+  } catch (err: any) {
+    errors.push(String(err?.message || err));
+    return { signalsGenerated: 0, entriesCreated, errors };
+  }
+}
+
+async function autoOptionsCheckExits(): Promise<{ checked: number; exited: number; errors: string[] }> {
+  const errors: string[] = [];
+  let checked = 0;
+  let exited = 0;
+
+  try {
+    const openOptions = await db.paperTrade.findMany({
+      where: { status: 'OPEN', tags: 'options', autoTraded: true },
+    });
+
+    for (const trade of openOptions) {
+      checked++;
+      try {
+        // Parse underlying symbol (strip _CE/PE_strike_expiry suffix)
+        const underlying = trade.symbol.split('_')[0];
+        const { price: currentSpot } = await getCurrentPrice(underlying);
+        if (!currentSpot) continue;
+
+        // Recalculate approximate current premium based on spot change
+        const notes = trade.notes ? JSON.parse(trade.notes) : {};
+        const spotAtEntry = notes.spotPrice || trade.entryPrice;
+        const direction = trade.direction;
+
+        // Simple premium model: premium moves proportionally to spot
+        let spotMovePct = (currentSpot - spotAtEntry) / spotAtEntry;
+        // Options amplify: use 0.4 delta approximation
+        let currentPremium = trade.entryPrice * (1 + spotMovePct * 0.4);
+        if (direction === 'PE') currentPremium = trade.entryPrice * (1 - spotMovePct * 0.4);
+        currentPremium = Math.max(0.05, currentPremium); // Floor at ₹0.05
+
+        let exitReason: string | null = null;
+        let exitPrice = currentPremium;
+
+        // Check SL
+        if (currentPremium <= trade.stopLoss) {
+          exitReason = 'SL_HIT';
+          exitPrice = trade.stopLoss;
+        }
+        // Check TP
+        else if (currentPremium >= trade.targetPrice) {
+          exitReason = 'TP_HIT';
+          exitPrice = trade.targetPrice;
+        }
+        // Time exit: if entered before today and market is near close
+        else if (timeToClose() < 10) {
+          const entryDate = new Date(trade.entryDate);
+          const now = new Date();
+          if (entryDate.toDateString() !== now.toDateString()) {
+            exitReason = 'EXPIRY_CLOSE';
+          }
+        }
+
+        if (exitReason) {
+          const pnl = (exitPrice - trade.entryPrice) * trade.qty;
+          await db.paperTrade.update({
+            where: { id: trade.id },
+            data: {
+              status: 'CLOSED',
+              exitDate: new Date(),
+              exitPrice: Math.round(exitPrice * 100) / 100,
+              pnl: Math.round(pnl * 100) / 100,
+              pnlPercent: Math.round(((exitPrice / trade.entryPrice) - 1) * 10000) / 100,
+              exitReason,
+            },
+          });
+
+          await db.autoTradeLog.create({
+            data: {
+              action: 'AUTO_EXIT_' + exitReason,
+              symbol: trade.symbol,
+              tradeId: trade.id,
+              signal: '',
+              executed: true,
+              reason: `${exitReason} at ₹${exitPrice.toFixed(2)}, PnL: ₹${pnl.toFixed(2)}`,
+            },
+          });
+
+          exited++;
+        }
+      } catch (e) {
+        // Skip individual errors
+      }
+    }
+
+    await setSchedulerKV('opt_lastExitAt', new Date().toISOString());
+    return { checked, exited, errors };
+  } catch (err: any) {
+    errors.push(String(err?.message || err));
+    return { checked, exited, errors };
+  }
+}
+
+async function getOptionsStatus() {
+  const openOptions = await db.paperTrade.findMany({
+    where: { status: 'OPEN', tags: 'options', autoTraded: true },
+    orderBy: { entryDate: 'desc' },
+  });
+  const recentOptsLogs = await db.autoTradeLog.findMany({
+    where: { symbol: { contains: '_CE' } },
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  });
+  // Also get PE logs
+  const peLogs = await db.autoTradeLog.findMany({
+    where: { symbol: { contains: '_PE' } },
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  });
+  const allOptLogs = [...recentOptsLogs, ...peLogs].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 30);
+
+  const s = await db.appSettings.findMany();
+  const m: Record<string, string> = {};
+  for (const x of s) m[x.key] = x.value;
+
+  return {
+    enabled: m['opt_enabled'] === 'true',
+    openPositions: openOptions.length,
+    todayEntries: parseInt(m['opt_todayEntries'] || '0'),
+    todayExits: parseInt(m['opt_todayExits'] || '0'),
+    todayPnl: parseFloat(m['opt_todayPnl'] || '0'),
+    lastScanAt: m['opt_lastScanAt'] || null,
+    lastExitAt: m['opt_lastExitAt'] || null,
+    openTrades: openOptions,
+    recentLogs: allOptLogs,
+  };
+}
+
 // ── API Endpoints ──────────────────────────────────────
 export async function GET() {
   try {
@@ -759,6 +990,7 @@ export async function GET() {
     const scheduler = await getSchedulerState();
     const sectorAlloc = await getSectorAllocation();
     const { drawdownPct, peakCapital, currentCapital } = await getPortfolioDrawdown();
+    const optionsStatus = await getOptionsStatus();
     return NextResponse.json({
       success: true, wallet, rules, openTrades, recentLogs, scheduler, sectorAllocation: sectorAlloc,
       marketHours: isMarketHours(), timeToClose: timeToClose(),
@@ -766,6 +998,8 @@ export async function GET() {
       drawdown: { drawdownPct: Math.round(drawdownPct * 100) / 100, peakCapital, currentCapital },
       consecutiveLosses: scheduler.consecutiveLosses,
       adaptiveFactor: scheduler.lastAdaptiveFactor,
+      // Options data
+      options: optionsStatus,
     });
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
@@ -842,6 +1076,24 @@ export async function POST(request: NextRequest) {
         await setSchedulerKV('sched_circuitBreaker', 'false');
         await setSchedulerKV('sched_circuitBreakerReason', '');
         return NextResponse.json({ success: true, scheduler: await getSchedulerState() });
+      }
+      // ── Options Auto-Trade Actions ──
+      case 'options_scan_and_trade': {
+        const result = await autoOptionsScanAndTrade();
+        return NextResponse.json({ success: true, action, ...result });
+      }
+      case 'options_check_exits': {
+        const result = await autoOptionsCheckExits();
+        return NextResponse.json({ success: true, action, ...result });
+      }
+      case 'options_status': {
+        const status = await getOptionsStatus();
+        return NextResponse.json({ success: true, action, ...status });
+      }
+      case 'options_toggle': {
+        const enabled = body.enabled;
+        await setSchedulerKV('opt_enabled', String(!!enabled));
+        return NextResponse.json({ success: true, options: await getOptionsStatus() });
       }
     }
     const wallet = await recalcWallet();
