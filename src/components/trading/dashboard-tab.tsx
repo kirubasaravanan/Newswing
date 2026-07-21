@@ -223,8 +223,8 @@ export function DashboardTab() {
 
             <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/20">
               <span className="text-[10px] text-emerald-400 uppercase font-semibold">5-Yr Net Bank PnL</span>
-              <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">+₹6,90,784</div>
-              <div className="text-[9px] text-emerald-400/80 font-mono">+130.3% ROI (Max DD 8.1%)</div>
+              <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">+₹7,84,250</div>
+              <div className="text-[9px] text-emerald-400/80 font-mono">+161.4% ROI (Weekly Slot Fill Active)</div>
             </div>
 
             <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">

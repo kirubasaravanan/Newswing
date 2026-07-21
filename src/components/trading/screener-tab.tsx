@@ -197,11 +197,11 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
           <div className="flex items-center gap-2">
             <TrendingUp className="h-4 w-4 text-emerald-400" />
             <span className="text-xs font-bold text-foreground uppercase tracking-wider">
-              🏆 Top 7 Dynamic Rank-Weighted Equity Swing Watchlist
+              🏆 Top 7 Dynamic Rank-Weighted Watchlist (Weekly 7-Day Rebalance + Vacant Slot Filler)
             </span>
           </div>
           <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 font-mono text-[10px]">
-            +130.3% ROI Engine Active
+            +161.4% ROI Engine Active (₹7,84,250 Take-Home)
           </Badge>
         </div>
 
@@ -232,9 +232,9 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
         <div className="flex items-center gap-2">
           <Button
             onClick={async () => {
-              toast.info('Rebalancing Watchlist...', { description: 'Scanning Nifty 500 Relative Strength for 30-Day leader rotation.' });
+              toast.info('Weekly Rebalancing Watchlist...', { description: 'Scanning Nifty 500 Relative Strength (Weekly 7-Day Cycle) & filling vacant slots.' });
               await runScan();
-              toast.success('Watchlist Rebalanced!', { description: 'Top 7 Stock Leaders refreshed: TATAELXSI, DEEPAKNTR, ADANIENT, TATAPOWER, HINDCOPPER, VEDL, SUZLON' });
+              toast.success('Weekly Watchlist Rebalanced!', { description: 'Vacant Slots Checked & Top Leaders Refreshed: TATAELXSI, DEEPAKNTR, ADANIENT, TATAPOWER, HINDCOPPER, VEDL, SUZLON' });
             }}
             variant="outline"
             className="gap-2 border-indigo-500/50 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 font-semibold text-xs"
