@@ -1,7 +1,11 @@
 /**
- * DhanHQ API v2 Client Module
+ * DhanHQ API v2 Client Module — Multi-Broker Routing Support
  * Official API Integration for DhanHQ Trading & Data Services.
  * Documentation: https://dhanhq.co/docs/v2/
+ *
+ * Supports Dual-Broker Routing:
+ * 1. OPTIONS_BROKER (Account 1 for Intraday Options Engine)
+ * 2. SWING_BROKER   (Account 2 for Equity Swing Engine)
  */
 
 const DHAN_BASE_URL = 'https://api.dhan.co/v2';
@@ -11,20 +15,27 @@ export interface DhanConfig {
   accessToken: string;
 }
 
-export function getDhanConfig(): DhanConfig {
-  const clientId = process.env.DHAN_CLIENT_ID || '';
-  const accessToken = process.env.DHAN_ACCESS_TOKEN || '';
-  return { clientId, accessToken };
+export function getDhanConfig(targetEngine: 'INTRADAY_OPTIONS' | 'EQUITY_SWING' = 'INTRADAY_OPTIONS'): DhanConfig {
+  if (targetEngine === 'INTRADAY_OPTIONS') {
+    const clientId = process.env.OPTIONS_DHAN_CLIENT_ID || process.env.DHAN_CLIENT_ID || '';
+    const accessToken = process.env.OPTIONS_DHAN_ACCESS_TOKEN || process.env.DHAN_ACCESS_TOKEN || '';
+    return { clientId, accessToken };
+  } else {
+    const clientId = process.env.SWING_DHAN_CLIENT_ID || process.env.DHAN_CLIENT_ID || '';
+    const accessToken = process.env.SWING_DHAN_ACCESS_TOKEN || process.env.DHAN_ACCESS_TOKEN || '';
+    return { clientId, accessToken };
+  }
 }
 
 export async function dhanFetch<T>(
   endpoint: string,
   method: 'GET' | 'POST' | 'DELETE' = 'GET',
-  body?: any
+  body?: any,
+  targetEngine: 'INTRADAY_OPTIONS' | 'EQUITY_SWING' = 'INTRADAY_OPTIONS'
 ): Promise<T> {
-  const config = getDhanConfig();
+  const config = getDhanConfig(targetEngine);
   if (!config.clientId || !config.accessToken) {
-    throw new Error('DhanHQ credentials missing in environment (DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN)');
+    throw new Error(`DhanHQ credentials missing for ${targetEngine} broker account.`);
   }
 
   const url = `${DHAN_BASE_URL}${endpoint}`;
@@ -80,55 +91,58 @@ export const DHAN_SECURITY_MAP: Record<string, { securityId: string; exchangeSeg
   'POWERGRID': { securityId: '14977', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
 };
 
-// ── Endpoint Wrappers ───────────────────────────────────────
-
-/** Get account fund limit / balance */
-export async function getDhanFundLimit() {
-  return dhanFetch<any>('/fundlimit', 'GET');
-}
-
-/** Get historical daily OHLCV candles */
+/**
+ * Fetch Historical Daily Candles from DhanHQ API v2
+ */
 export async function getDhanHistoricalDaily(
   symbol: string,
   fromDate: string,
-  toDate: string
+  toDate: string,
+  targetEngine: 'INTRADAY_OPTIONS' | 'EQUITY_SWING' = 'INTRADAY_OPTIONS'
 ) {
-  const meta = DHAN_SECURITY_MAP[symbol.toUpperCase()] || {
-    securityId: symbol,
-    exchangeSegment: 'NSE_EQ',
-    instrument: 'EQUITY',
-  };
+  const sec = DHAN_SECURITY_MAP[symbol.toUpperCase()];
+  const securityId = sec ? sec.securityId : '13';
+  const exchangeSegment = sec ? sec.exchangeSegment : 'NSE_EQ';
+  const instrument = sec ? sec.instrument : 'EQUITY';
 
-  return dhanFetch<{
-    open: number[];
-    high: number[];
-    low: number[];
-    close: number[];
-    volume: number[];
-    start_Time: number[];
-  }>('/charts/historical', 'POST', {
-    securityId: meta.securityId,
-    exchangeSegment: meta.exchangeSegment,
-    instrument: meta.instrument,
+  const res = await dhanFetch<any>('/charts/historical', 'POST', {
+    securityId,
+    exchangeSegment,
+    instrument,
+    expiryCode: 0,
     fromDate,
     toDate,
-  });
+  }, targetEngine);
+
+  if (!res || !res.start_Time) return [];
+
+  const candles = [];
+  for (let i = 0; i < res.start_Time.length; i++) {
+    candles.push({
+      date: new Date(res.start_Time[i] * 1000).toISOString().split('T')[0],
+      open: res.open[i],
+      high: res.high[i],
+      low: res.low[i],
+      close: res.close[i],
+      volume: res.volume?.[i] || 0,
+    });
+  }
+
+  return candles;
 }
 
-/** Get live market quotes for multiple security IDs */
+/**
+ * Fetch Live Market Feed Quotes from DhanHQ API v2
+ */
 export async function getDhanMarketQuotes(
-  equitySecIds: number[] = [],
-  fnoSecIds: number[] = []
+  securities: Array<{ securityId: string; exchangeSegment: string }>,
+  targetEngine: 'INTRADAY_OPTIONS' | 'EQUITY_SWING' = 'INTRADAY_OPTIONS'
 ) {
-  const payload: any = {};
-  if (equitySecIds.length > 0) payload.NSE_EQ = equitySecIds;
-  if (fnoSecIds.length > 0) payload.NSE_FNO = fnoSecIds;
+  const payload: Record<string, string[]> = {};
+  for (const s of securities) {
+    if (!payload[s.exchangeSegment]) payload[s.exchangeSegment] = [];
+    payload[s.exchangeSegment].push(s.securityId);
+  }
 
-  return dhanFetch<{
-    status: string;
-    data: {
-      NSE_EQ?: Record<string, any>;
-      NSE_FNO?: Record<string, any>;
-    };
-  }>('/marketfeed/quote', 'POST', payload);
+  return dhanFetch<any>('/marketfeed/quote', 'POST', payload, targetEngine);
 }
