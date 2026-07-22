@@ -37,8 +37,8 @@ interface ScanResult {
 }
 
 export const TOP_10_FNO_SYMBOLS = [
-  'NIFTY50', 'BANKNIFTY', 'FINNIFTY', 'LT', 'RELIANCE',
-  'INFY', 'TATAMOTORS', 'TATASTEEL', 'TCS', 'BAJFINANCE'
+  'NIFTY50', 'BANKNIFTY', 'FINNIFTY', 'TATAMOTORS', 'LT',
+  'BAJFINANCE', 'HAL', 'RELIANCE', 'BHARTIARTL', 'INFY'
 ];
 
 export function getFNOUniverse(): string[] {

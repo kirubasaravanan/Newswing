@@ -49,10 +49,28 @@ export const LIVE_OPTIONS_SIGNALS: OptionSignal[] = [
     factors: ['Intraday Reversal at Resistance', 'VIX Expansion +3.2%', 'EMA10 Trail']
   },
   {
+    symbol: 'TATAMOTORS', underlying: 'Tata Motors Ltd', strike: 'TATAMOTORS 980 CE',
+    type: 'CE', premium: 22.10, delta: 0.51, sl: 16.57, tp: 33.15,
+    confidence: 89, setup: 'A+', expiry: 'Monthly 27-JUL-2026',
+    factors: ['Auto Sales Surge', 'RSI Breakout', 'Volume Expansion']
+  },
+  {
     symbol: 'LT', underlying: 'Larsen & Toubro', strike: 'LT 3600 CE',
     type: 'CE', premium: 62.40, delta: 0.53, sl: 46.80, tp: 93.60,
     confidence: 91, setup: 'A+', expiry: 'Monthly 27-JUL-2026',
     factors: ['Infra Rally Support', '5-Min EMA20 Bounce', 'Vol Surge > 1.3x']
+  },
+  {
+    symbol: 'BAJFINANCE', underlying: 'Bajaj Finance Ltd', strike: 'BAJFINANCE 7200 CE',
+    type: 'CE', premium: 145.00, delta: 0.55, sl: 108.75, tp: 217.50,
+    confidence: 89, setup: 'A+', expiry: 'Monthly 27-JUL-2026',
+    factors: ['NBFC Breakout', 'High Delta 0.55', 'Volume Surge']
+  },
+  {
+    symbol: 'HAL', underlying: 'Hindustan Aeronautics', strike: 'HAL 4800 CE',
+    type: 'CE', premium: 98.00, delta: 0.52, sl: 73.50, tp: 147.00,
+    confidence: 88, setup: 'A+', expiry: 'Monthly 27-JUL-2026',
+    factors: ['Defense Order Surge', 'EMA20 Bounce', 'Institutional Buying']
   },
   {
     symbol: 'RELIANCE', underlying: 'Reliance Industries', strike: 'RELIANCE 3100 CE',
@@ -61,34 +79,16 @@ export const LIVE_OPTIONS_SIGNALS: OptionSignal[] = [
     factors: ['Breakout Above 20-Day High', 'Institutional Buying', 'Vol > 1.3x']
   },
   {
+    symbol: 'BHARTIARTL', underlying: 'Bharti Airtel Ltd', strike: 'BHARTIARTL 1450 CE',
+    type: 'CE', premium: 28.50, delta: 0.50, sl: 21.38, tp: 42.75,
+    confidence: 86, setup: 'A', expiry: 'Monthly 27-JUL-2026',
+    factors: ['Telecom Tariff Surge', 'RSI 56 Bullish Zone', 'Low Slippage']
+  },
+  {
     symbol: 'INFY', underlying: 'Infosys Ltd', strike: 'INFY 1850 PE',
     type: 'PE', premium: 28.40, delta: -0.50, sl: 21.30, tp: 42.60,
     confidence: 84, setup: 'A', expiry: 'Monthly 27-JUL-2026',
     factors: ['IT Sector Retracement', 'Lower High Trigger', 'Target RR 2.0x']
-  },
-  {
-    symbol: 'TATAMOTORS', underlying: 'Tata Motors Ltd', strike: 'TATAMOTORS 980 CE',
-    type: 'CE', premium: 22.10, delta: 0.51, sl: 16.57, tp: 33.15,
-    confidence: 87, setup: 'A', expiry: 'Monthly 27-JUL-2026',
-    factors: ['Auto Sales Surge', 'RSI Breakout', 'Volume Expansion']
-  },
-  {
-    symbol: 'TATASTEEL', underlying: 'Tata Steel Ltd', strike: 'TATASTEEL 175 CE',
-    type: 'CE', premium: 4.20, delta: 0.51, sl: 3.15, tp: 6.30,
-    confidence: 86, setup: 'A', expiry: 'Monthly 27-JUL-2026',
-    factors: ['Metals Rally Support', 'EMA20 Bounce', 'Volume Expansion']
-  },
-  {
-    symbol: 'TCS', underlying: 'Tata Consultancy Services', strike: 'TCS 3900 CE',
-    type: 'CE', premium: 54.00, delta: 0.50, sl: 40.50, tp: 81.00,
-    confidence: 85, setup: 'A', expiry: 'Monthly 27-JUL-2026',
-    factors: ['IT Trend Continuation', 'EMA10 Trail', 'Low Slippage']
-  },
-  {
-    symbol: 'BAJFINANCE', underlying: 'Bajaj Finance Ltd', strike: 'BAJFINANCE 7200 CE',
-    type: 'CE', premium: 145.00, delta: 0.55, sl: 108.75, tp: 217.50,
-    confidence: 89, setup: 'A+', expiry: 'Monthly 27-JUL-2026',
-    factors: ['NBFC Breakout', 'High Delta 0.55', 'Volume Surge']
   }
 ];
 
