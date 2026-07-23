@@ -4,7 +4,7 @@
  */
 
 import { SMA, EMA, RSI, ATR } from 'technicalindicators';
-import { calculateEquityCosts, calculateOptionCosts } from './transaction-costs';
+import { calculateEquityCosts } from './transaction-costs';
 
 export interface OHLCV {
   date: string;
@@ -65,7 +65,7 @@ export const DEFAULT_CONFIG: ScreeningConfig = {
   maxOpenTrades: 7,
   maxHoldBars: 30,
   minScore: 3,
-  minRR: 0.8,
+  minRR: 1.5,
   cooldownBars: 3,
   useMacro: true,
   minTurnoverCr: 5.0,
@@ -273,29 +273,22 @@ export function runBacktest(
   const entryTimes = ['09:20:00', '09:45:00', '10:15:00', '11:30:00', '12:45:00', '13:50:00'];
   const exitTimes = ['10:12:30', '11:15:00', '12:40:15', '14:20:00', '15:15:00'];
 
-  let activeCandles = candles && candles.length > 50 ? candles : [];
+  let activeCandles = candles && candles.length > 5 ? candles : [];
 
-  if (activeCandles.length < 50) {
-    const startDate = new Date('2021-01-01');
-    const endDate = new Date('2026-07-21');
-    let currPrice = sym.includes('NIFTY50') ? 14000 : sym.includes('BANK') ? 31000 : sym.includes('INFY') ? 1250 : 2000;
-    
-    let d = new Date(startDate);
-    while (d <= endDate) {
-      if (d.getDay() !== 0 && d.getDay() !== 6) {
-        const dateStr = d.toISOString().split('T')[0];
-        const changePct = (Math.random() - 0.48) * 0.02;
-        const open = currPrice;
-        const close = open * (1 + changePct);
-        const high = Math.max(open, close) * (1 + Math.random() * 0.01);
-        const low = Math.min(open, close) * (1 - Math.random() * 0.01);
-        const volume = 500000 + Math.floor(Math.random() * 1000000);
-        activeCandles.push({ date: dateStr, open, high, low, close, volume });
-        currPrice = close;
-      }
-      d.setDate(d.getDate() + 1);
-    }
+  if (activeCandles.length < 5) {
+    console.warn(`[BacktestEngine] Insufficient real historical candles (${activeCandles.length}) for ${sym}`);
+    return {
+      stats: {
+        totalTrades: 0, winTrades: 0, lossTrades: 0, winRate: 0, profitFactor: 0,
+        maxDrawdown: 0, finalCapital: initialCapital, avgWin: 0, avgLoss: 0,
+        bestTrade: 0, worstTrade: 0, sharpeRatio: 0
+      },
+      trades: [],
+      equityCurve: []
+    };
   }
+
+  const nowTimeMs = Date.now();
 
   let peakCapital = capital;
   let maxDrawdown = 0;
@@ -328,11 +321,14 @@ export function runBacktest(
       }
 
       const isCe = isUpTrend || dayReturnPct >= 0;
-      const strikeStep = sym.includes('BANK') ? 100 : sym.includes('BAJFINANCE') ? 50 : bar.close > 1000 ? 20 : 5;
+      // Official NSE F&O Strike Intervals: NIFTY/FINNIFTY = 50 pts, BANKNIFTY = 100 pts, Stocks = 20/50 pts
+      const strikeStep = sym.includes('BANK') ? 100 : (sym.includes('NIFTY') || sym.includes('FIN') || sym.includes('LT') || sym.includes('BAJFINANCE')) ? 50 : 20;
       const strike = Math.round(bar.close / strikeStep) * strikeStep;
       const contractSymbol = `${sym} ${strike} ${isCe ? 'CE' : 'PE'}`;
 
-      const baseOptPrice = Math.max(3.5, Math.round(bar.close * 0.015 * 10) / 10);
+      // Real Exchange Near-Week ATM Option Premium Ratio: ~0.55% of underlying spot price (e.g. ₹120-₹140 for Nifty)
+      const optRatio = sym.includes('BANK') ? 0.0065 : 0.0055;
+      const baseOptPrice = Math.max(3.5, Math.round(bar.close * optRatio * 10) / 10);
       const stockChange = isCe ? (bar.close - bar.open) : (bar.open - bar.close);
       const optPnlPct = Math.min(65, Math.max(-25, Math.round((stockChange / bar.open) * 100 * 18)));
 
@@ -342,22 +338,49 @@ export function runBacktest(
       const entryT = entryTimes[i % entryTimes.length];
       const exitT = exitTimes[i % exitTimes.length];
 
+      const entryTimestampStr = `${bar.date} ${entryT}`;
+      const exitTimestampStr = `${bar.date} ${exitT}`;
+
+      // Skip future timestamps relative to current time
+      const exitMs = new Date(exitTimestampStr.replace(' ', 'T') + '+05:30').getTime();
+      if (!isNaN(exitMs) && exitMs > nowTimeMs) {
+        continue;
+      }
+
       const targetAlloc = Math.min(capital * 0.15, 35000);
       const costPerLot = lotSize * baseOptPrice;
       const lots = Math.max(1, Math.floor(targetAlloc / costPerLot));
       const qty = lots * lotSize;
       const singleLegCap = Math.round(qty * baseOptPrice);
-      const netPnl = Math.round(singleLegCap * (optPnlPct / 100));
+      const grossPnl = Math.round(singleLegCap * (optPnlPct / 100));
+
+      // ── Real NSE F&O Transaction Costs ──────────────────────────────────────
+      // 1. Brokerage: ₹20 flat per order × 2 (entry+exit), or 0.03% whichever lower (zero-brokerage like Dhan)
+      const brokerage = 20 * 2; // ₹40 round-trip
+      // 2. STT: 0.0125% on Sell side option premium only (exercise = 0.125%, but we always square off)
+      const exitPremium = Math.max(0.5, baseOptPrice * (1 + optPnlPct / 100));
+      const stt = Math.round(qty * exitPremium * 0.000125 * 100) / 100;
+      // 3. Exchange + SEBI charges: ~0.0495% of turnover (both legs)
+      const turnover = qty * baseOptPrice + qty * exitPremium;
+      const exchangeCharges = Math.round(turnover * 0.000495 * 100) / 100;
+      // 4. GST: 18% on (brokerage + exchange charges)
+      const gst = Math.round((brokerage + exchangeCharges) * 0.18 * 100) / 100;
+      // 5. Stamp duty: 0.003% on buy side only
+      const stampDuty = Math.round(qty * baseOptPrice * 0.00003 * 100) / 100;
+
+      const totalCosts = brokerage + stt + exchangeCharges + gst + stampDuty;
+      const netPnl = Math.round(grossPnl - totalCosts);
 
       capital = Math.max(20000, capital + netPnl);
+
       peakCapital = Math.max(peakCapital, capital);
       const dd = ((peakCapital - capital) / peakCapital) * 100;
       maxDrawdown = Math.max(maxDrawdown, dd);
 
       trades.push({
         symbol: contractSymbol,
-        entryDate: `${bar.date} ${entryT}`,
-        exitDate: `${bar.date} ${exitT}`,
+        entryDate: entryTimestampStr,
+        exitDate: exitTimestampStr,
         entryPrice: baseOptPrice,
         exitPrice: Math.max(0.5, Math.round(baseOptPrice * (1 + optPnlPct / 100) * 10) / 10),
         qty,
@@ -389,7 +412,7 @@ export function runBacktest(
 
         if (bar.low <= pos.sl) {
           const grossPnl = pos.qty * (pos.sl - pos.entryPrice);
-          const costs = calculateEquityCosts(pos.entryPrice, pos.sl, pos.qty).totalCosts;
+          const costs = calculateEquityCosts(pos.entryPrice, pos.sl, pos.qty, symbol).totalCosts;
           const netPnl = grossPnl - costs;
 
           capital += (pos.qty * pos.entryPrice) + netPnl;

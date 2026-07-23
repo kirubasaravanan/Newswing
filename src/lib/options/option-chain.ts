@@ -208,20 +208,9 @@ export function classifyExpiry(expiryDate: string, symbol: string): ExpiryInfo {
 
 // ── Expiry Dates ─────────────────────────────────────────────
 
-// Stocks that have weekly options (as of 2024-25, NSE has expanded weekly F&O)
-const STOCKS_WITH_WEEKLY_OPTIONS = new Set([
-  'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN',
-  'AXISBANK', 'KOTAKBANK', 'BAJFINANCE', 'ITC', 'LT', 'BHARTIARTL',
-  'HINDUNILVR', 'TATAMOTORS', 'ASIANPAINT', 'MARUTI', 'SUNPHARMA',
-  'WIPRO', 'HCLTECH', 'TATASTEEL', 'ADANIENT', 'TITAN', 'HDFCLIFE',
-  'SBILIFE', 'DIVISLAB', 'DRREDDY', 'CIPLA', 'EICHERMOT', 'HEROMOTOCO',
-  'ULTRACEMCO', 'NESTLEIND', 'BPCL', 'POWERGRID', 'NTPC', 'COALINDIA',
-  'ONGC', 'IOC', 'HPCL', 'GRASIM', 'INDUSINDBK', 'TATACONSUM',
-  'BAJAJFINSV', 'M&M', 'DIXON', 'VEDL', 'HAL', 'BEL',
-]);
-
+// Individual stock options on NSE India only have monthly expiries (last Thursday of month)
 function hasWeeklyOptions(symbol: string): boolean {
-  return (INDEX_SYMBOLS as readonly string[]).includes(symbol) || STOCKS_WITH_WEEKLY_OPTIONS.has(symbol);
+  return (INDEX_SYMBOLS as readonly string[]).includes(symbol);
 }
 
 /**
@@ -452,7 +441,7 @@ export interface OptionChainResult {
   maxPain: MaxPainResult | null;
   dividendYield: number;
   lotSize: number;
-  dataSource: 'nse_live' | 'theoretical';
+  dataSource: 'nse_live' | 'dhan_live' | 'theoretical';
   nseFetchTime?: number; // timestamp of NSE data fetch
 }
 
@@ -563,7 +552,25 @@ export async function fetchOptionChain(
   symbol: string,
   expiryDate: string
 ): Promise<OptionChainResult> {
-  // 0. Try NSE live data first (best-effort, 5s timeout)
+  // 0a. Try DhanHQ Broker API live data first if configured
+  if (process.env.DATA_PROVIDER === 'dhan' || process.env.DHAN_ACCESS_TOKEN) {
+    try {
+      const { fetchDhanOptionChain } = await import('./dhan-option-provider');
+      let dhanData = await fetchDhanOptionChain(symbol, expiryDate);
+      if (!dhanData || !dhanData.chain.length) {
+        // Short retry for transient network glitch
+        await new Promise((r) => setTimeout(r, 250));
+        dhanData = await fetchDhanOptionChain(symbol, expiryDate);
+      }
+      if (dhanData && dhanData.chain.length > 0) {
+        return dhanData;
+      }
+    } catch (err) {
+      console.warn('[OptionChain] DhanHQ live fetch failed:', String(err).substring(0, 120));
+    }
+  }
+
+  // 0b. Try NSE live data (best-effort, 5s timeout)
   let nseResult: OptionChainResult | null = null;
   try {
     const nseRaw = await Promise.race([
@@ -637,135 +644,8 @@ export async function fetchOptionChain(
   // Return NSE data if successful
   if (nseResult) return nseResult;
 
-  // ── THEORETICAL FALLBACK (original logic) ─────────────────
-  // 1. Fetch spot price and VIX in parallel
-  const [spotData, vixData] = await Promise.all([
-    fetchSpot(symbol),
-    fetchVIX().catch(() => null), // VIX is best-effort
-  ]);
-
-  const spot = spotData.price;
-  const symbolType = getSymbolType(symbol);
-  const settlementType = getSettlementType(symbol);
-  const lotSize = getOptionLotSize(symbol);
-  const dividendYield = getDividendYield(symbol);
-
-  // 2. Get expiry dates and classify
-  const expiryDates = getNextExpiries(symbol, 10);
-  const targetExpiry = expiryDate || expiryDates[0];
-  const expiryInfo = classifyExpiry(targetExpiry, symbol);
-
-  // 3. Time to expiry and risk-free rate
-  const T = timeToExpiryYears(targetExpiry);
-  const r = 0.07; // India risk-free rate (7% RBI repo rate approx)
-
-  // 4. Generate strikes
-  const strikes = generateStrikes(spot, symbol);
-
-  // 5. ATM strike
-  const step = getStrikeStep(symbol, spot);
-  const atmStrike = Math.round(spot / step) * step;
-
-  // 6. Get VIX value for IV estimation
-  const vixValue = vixData?.value ?? (symbolType === 'index' ? 13 : 22);
-
-  // 7. Build chain with VIX-adjusted IV
-  const chain: OptionChainRow[] = strikes.map((strike) => {
-    const dist = ((strike - spot) / spot) * 100;
-    const isATM = Math.abs(strike - atmStrike) < step / 2;
-
-    let moneyness: 'ITM' | 'ATM' | 'OTM';
-    if (isATM) {
-      moneyness = 'ATM';
-    } else if (strike < spot) {
-      moneyness = 'ITM'; // CE is ITM when strike < spot
-    } else {
-      moneyness = 'OTM';
-    }
-
-    const days = expiryInfo.daysToExpiry;
-
-    // VIX-adjusted IV for each leg
-    const ceIV = vixAdjustedIV(vixValue, symbolType, strike, spot, 'CE', days);
-    const peIV = vixAdjustedIV(vixValue, symbolType, strike, spot, 'PE', days);
-
-    // BSM pricing with dividend yield for stocks
-    const ceBS = blackScholes(spot, strike, T, r, ceIV, 'CE', dividendYield);
-    const peBS = blackScholes(spot, strike, T, r, peIV, 'PE', dividendYield);
-
-    // Liquidity-based bid/ask spread
-    const ceSpread = ceBS.premium > 0
-      ? Math.max(ceBS.premium * getSpreadMultiplier(getLiquidityTier(symbol), moneyness), 0.05)
-      : 0;
-    const peSpread = peBS.premium > 0
-      ? Math.max(peBS.premium * getSpreadMultiplier(getLiquidityTier(symbol), moneyness), 0.05)
-      : 0;
-
-    // Simulated OI (higher near ATM, more for liquid names)
-    const atmDist = Math.abs(strike - atmStrike);
-    const liquidityBase: Record<string, number> = {
-      NIFTY: 500000, BANKNIFTY: 300000, FINNIFTY: 100000,
-      NIFTYIT: 50000, MIDCPNIFTY: 30000,
-    };
-    const oiBase = Math.max(0, (liquidityBase[symbol] || 50000) - atmDist * 80);
-
-    return {
-      strike,
-      distance: Math.round(dist * 100) / 100,
-      moneyness,
-      ce: {
-        ltp: Math.round(ceBS.premium * 100) / 100,
-        iv: Math.round(ceIV * 10000) / 100, // as %
-        delta: ceBS.delta,
-        gamma: ceBS.gamma,
-        theta: ceBS.theta,
-        vega: ceBS.vega,
-        oi: Math.round(oiBase * (0.8 + Math.random() * 0.4)),
-        volume: Math.round(oiBase * (0.1 + Math.random() * 0.3)),
-        bid: Math.round((ceBS.premium - ceSpread) * 100) / 100,
-        ask: Math.round((ceBS.premium + ceSpread) * 100) / 100,
-        itm: strike < spot,
-        theoretical: true,
-      },
-      pe: {
-        ltp: Math.round(peBS.premium * 100) / 100,
-        iv: Math.round(peIV * 10000) / 100,
-        delta: peBS.delta,
-        gamma: peBS.gamma,
-        theta: peBS.theta,
-        vega: peBS.vega,
-        oi: Math.round(oiBase * (0.8 + Math.random() * 0.4)),
-        volume: Math.round(oiBase * (0.1 + Math.random() * 0.3)),
-        bid: Math.round((peBS.premium - peSpread) * 100) / 100,
-        ask: Math.round((peBS.premium + peSpread) * 100) / 100,
-        itm: strike > spot,
-        theoretical: true,
-      },
-    };
-  });
-
-  // 8. Calculate derived metrics
-  const pcr = calculatePCR(chain);
-  const maxPain = calculateMaxPain(chain, spot);
-
-  return {
-    symbol,
-    symbolType,
-    settlementType,
-    underlyingPrice: spot,
-    change: spotData.change,
-    changePct: spotData.changePct,
-    expiryDate: targetExpiry,
-    expiryInfo,
-    expiryDates,
-    chain,
-    vix: vixData,
-    pcr,
-    maxPain,
-    dividendYield,
-    lotSize,
-    dataSource: 'theoretical',
-  };
+  // ── STRICT USER MANDATE: DO NOT USE BOGUS/THEORETICAL DATA — REPORT UNAVAILABLE ──
+  throw new Error(`Live broker option data is unavailable for ${symbol}. Please verify broker connection or try refreshing.`);
 }
 
 // ── Expose spot fetcher for positions API ────────────────────

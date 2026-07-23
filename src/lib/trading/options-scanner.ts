@@ -37,8 +37,8 @@ interface ScanResult {
 }
 
 export const TOP_10_FNO_SYMBOLS = [
-  'NIFTY50', 'BANKNIFTY', 'FINNIFTY', 'TATAMOTORS', 'LT',
-  'BAJFINANCE', 'HAL', 'RELIANCE', 'BHARTIARTL', 'INFY'
+  'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'RELIANCE', 'LT', 'SBIN',
+  'TATAMOTORS', 'BAJFINANCE', 'HAL', 'BHARTIARTL', 'INFY', 'TCS', 'HDFCBANK'
 ];
 
 export function getFNOUniverse(): string[] {
@@ -64,14 +64,26 @@ function getNextExpiry(): string {
   return expiry.toISOString().split('T')[0];
 }
 
+function getStrikeStep(symbol: string, spot: number): number {
+  if (symbol === 'NIFTY' || symbol === 'NIFTY50') return 50;
+  if (symbol === 'BANKNIFTY') return 100;
+  if (symbol === 'FINNIFTY') return 50;
+  if (symbol === 'NIFTYIT') return 50;
+  if (symbol === 'MIDCPNIFTY') return 25;
+
+  if (spot > 3000) return 50;
+  if (spot > 1000) return 20;
+  if (spot > 500) return 10;
+  if (spot > 200) return 5;
+  if (spot > 100) return 2.5;
+  return 1;
+}
+
 // ── Strike Selection ────────────────────────────────────
-function selectStrike(price: number, direction: 'CE' | 'PE'): number {
-  // Round to nearest 50 for indices, nearest 20 for stocks
-  const isIndex = price > 10000;
-  const step = isIndex ? 50 : 20;
+function selectStrike(symbol: string, price: number, direction: 'CE' | 'PE'): number {
+  const step = getStrikeStep(symbol, price);
   const base = Math.round(price / step) * step;
-  if (direction === 'CE') return base; // ATM for CE (buy slightly OTM for cheaper premium)
-  return base; // ATM for PE
+  return base;
 }
 
 // ── Black-Scholes Approximation (simplified for signal scoring) ──
@@ -96,8 +108,10 @@ function analyzeOI(symbol: string): { bullish: boolean; score: number } {
   return { bullish, score: Math.round(oiRatio * 100) };
 }
 
+export const INDEX_SYMBOLS = ['NIFTY', 'NIFTY50', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'];
+
 // ── Single Stock Scan ───────────────────────────────────
-async function scanStock(symbol: string, sectorMap: Record<string, string>): Promise<OptionsSignal[]> {
+async function scanStock(symbol: string, sectorMap: Record<string, string>, minScore: number = 40): Promise<OptionsSignal[]> {
   const signals: OptionsSignal[] = [];
   const isIndex = INDEX_SYMBOLS.includes(symbol);
 
@@ -207,9 +221,9 @@ async function scanStock(symbol: string, sectorMap: Record<string, string>): Pro
       reasons.push(`High volatility ATR=${atrPct.toFixed(1)}%`);
     }
 
-    // Generate CE signal if score >= 40
-    if (ceScore >= 40) {
-      const strike = selectStrike(spot, 'CE');
+    // Generate CE signal if score >= minScore
+    if (ceScore >= minScore) {
+      const strike = selectStrike(symbol, spot, 'CE');
       const delta = bsDeltaApprox(spot, strike, daysToExpiry, rsi, adx);
       const confidence = Math.min(95, Math.round(ceScore * 1.1 + (delta > 0.4 ? 10 : 0)));
       signals.push({
@@ -223,9 +237,9 @@ async function scanStock(symbol: string, sectorMap: Record<string, string>): Pro
       });
     }
 
-    // Generate PE signal if score >= 40
-    if (peScore >= 40) {
-      const strike = selectStrike(spot, 'PE');
+    // Generate PE signal if score >= minScore
+    if (peScore >= minScore) {
+      const strike = selectStrike(symbol, spot, 'PE');
       const delta = bsDeltaApprox(spot, strike, daysToExpiry, 100 - rsi, adx);
       const confidence = Math.min(95, Math.round(peScore * 1.1 + (delta > 0.4 ? 10 : 0)));
       signals.push({
@@ -247,7 +261,7 @@ async function scanStock(symbol: string, sectorMap: Record<string, string>): Pro
 }
 
 // ── Main Scan Function ──────────────────────────────────
-export async function scanOptionsUniverse(maxSignals?: number): Promise<ScanResult> {
+export async function scanOptionsUniverse(maxSignals?: number, minScore: number = 40): Promise<ScanResult> {
   const startTime = Date.now();
   const universe = getFNOUniverse();
   const sectorMap = buildSectorMap();
@@ -257,7 +271,7 @@ export async function scanOptionsUniverse(maxSignals?: number): Promise<ScanResu
   const BATCH_SIZE = 10;
   for (let i = 0; i < universe.length; i += BATCH_SIZE) {
     const batch = universe.slice(i, i + BATCH_SIZE);
-    const results = await Promise.allSettled(batch.map(s => scanStock(s, sectorMap)));
+    const results = await Promise.allSettled(batch.map(s => scanStock(s, sectorMap, minScore)));
     for (const r of results) {
       if (r.status === 'fulfilled') allSignals.push(...r.value);
     }

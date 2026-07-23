@@ -422,11 +422,6 @@ export function getOptionLotSize(symbol: string): number {
   return LOT_SIZES[symbol] ?? 100; // Default lot size for unknown F&O stocks
 }
 
-// ── Settlement Type ───────────────────────────────────────────
-// All Indian options are European-style (exercise only at expiry)
-// Index options: Cash-settled
-// Stock options: Physical settlement (delivery of shares)
-
 export function getSettlementType(symbol: string): 'cash' | 'physical' {
   return isIndexSymbol(symbol) ? 'cash' : 'physical';
 }
@@ -438,7 +433,7 @@ export function timeToExpiryYears(expiryDate: string): number {
   const expiry = new Date(expiryDate + 'T15:30:00+05:30'); // Indian market close
   const diffMs = expiry.getTime() - now.getTime();
   const diffDays = diffMs / (1000 * 60 * 60 * 24);
-  return Math.max(diffDays / 365, 0);
+  return Math.max(diffDays / 365, 1 / 365);
 }
 
 export function daysToExpiry(expiryDate: string): number {

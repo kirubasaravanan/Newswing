@@ -66,8 +66,17 @@ model PaperTrade {
   status        String   @default("OPEN")  // OPEN / CLOSED / CANCELLED / AUTO
   exitDate      DateTime?
   exitPrice     Float?
-  pnl           Float?
+  pnl           Float?   // Alias for netPnl (backward compat)
   pnlPercent    Float?
+  // ── Transaction Cost Fields (Phase 2) ──
+  grossPnl      Float?   // P&L before any costs (raw entry-exit difference)
+  netPnl        Float?   // P&L after ALL costs deducted
+  totalCosts    Float?   // Sum of all charges
+  brokerageCost Float?   // Flat ₹20/order brokerage
+  sttCost       Float?   // Securities Transaction Tax
+  slippageCost  Float?   // Market impact / bid-ask slippage
+  otherCharges  Float?   // Exchange + GST + SEBI + Stamp duty
+  // ──────────────────────────────────────
   screenshot    String?  // path to screenshot
   notes         String?
   tags          String?  // comma-separated tags
@@ -155,8 +164,10 @@ model CapitalWallet {
   initialCapital Float    @default(200000)    // Original allocated capital (never changes from recalc)
   deployed       Float    @default(0)         // Currently invested
   available      Float    @default(200000)    // Available for new trades
-  realizedPnl    Float    @default(0)         // Total realized P&L
+  realizedPnl    Float    @default(0)         // Total realized NET P&L (after costs)
   unrealizedPnl  Float    @default(0)         // Current open positions P&L
+  peakCapital    Float    @default(0)         // Highest NAV reached — for drawdown HWM tracking
+  totalCostsPaid Float    @default(0)         // Cumulative costs paid (STT + brokerage + slippage + etc.)
   updatedAt      DateTime @updatedAt
   createdAt      DateTime @default(now())
 

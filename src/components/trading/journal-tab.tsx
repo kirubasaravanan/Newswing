@@ -37,6 +37,12 @@ interface Trade {
   exitPrice: number | null;
   pnl: number | null;
   pnlPercent: number | null;
+  grossPnl?: number | null;
+  netPnl?: number | null;
+  totalCosts?: number | null;
+  brokerageCost?: number | null;
+  sttCost?: number | null;
+  slippageCost?: number | null;
   notes: string | null;
   tags: string | null;
   journal?: {
@@ -93,7 +99,7 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
         direction: 'LONG',
         entryDate: new Date().toISOString().split('T')[0],
         entryPrice: String(prefillTrade.entryPrice),
-        qty: String(prefillTrade.sizing.qtyA),
+        qty: String(prefillTrade.sizing.qty),
         stopLoss: String(prefillTrade.stopLoss),
         targetPrice: String(prefillTrade.targetPrice),
         notes: `From screener: Score ${prefillTrade.score}/6, R:R ${prefillTrade.riskReward}x`,
@@ -536,6 +542,22 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
                             {Math.round((new Date(trade.exitDate || '').getTime() - new Date(trade.entryDate).getTime()) / (1000 * 60 * 60 * 24))}d
                           </div>
                         </div>
+                        {trade.grossPnl != null && (
+                          <div className="rounded bg-secondary/50 px-3 py-2">
+                            <div className="text-muted-foreground">Gross P&L</div>
+                            <div className={cn("font-mono font-semibold", trade.grossPnl >= 0 ? "text-emerald-400" : "text-red-400")}>
+                              {trade.grossPnl >= 0 ? '+' : ''}₹{Math.round(trade.grossPnl).toLocaleString()}
+                            </div>
+                          </div>
+                        )}
+                        {trade.totalCosts != null && (
+                          <div className="rounded bg-secondary/50 px-3 py-2">
+                            <div className="text-muted-foreground">Total Costs</div>
+                            <div className="font-mono font-semibold text-amber-400">
+                              −₹{Math.round(trade.totalCosts).toLocaleString()}
+                            </div>
+                          </div>
+                        )}
                       </>
                     )}
                     {trade.status === 'OPEN' && (

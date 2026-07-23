@@ -142,15 +142,15 @@ export function LivePnlTracker() {
                       'w-14 text-right text-[10px] font-mono shrink-0',
                       isProfit ? 'text-emerald-400/70' : 'text-red-400/70'
                     )}>
-                      {pos.pnlPercent >= 0 ? '+' : ''}{pos.pnlPercent.toFixed(2)}%
+                      {(pos.pnlPercent || 0) >= 0 ? '+' : ''}{(pos.pnlPercent || 0).toFixed(2)}%
                     </div>
                     <Badge variant="outline" className={cn(
                       'w-12 text-center text-[9px] px-1 py-0 shrink-0',
-                      pos.rMultiple >= 1 ? 'text-emerald-400 border-emerald-500/30' :
-                      pos.rMultiple >= 0 ? 'text-amber-400 border-amber-500/30' :
+                      (pos.rMultiple || 0) >= 1 ? 'text-emerald-400 border-emerald-500/30' :
+                      (pos.rMultiple || 0) >= 0 ? 'text-amber-400 border-amber-500/30' :
                       'text-red-400 border-red-500/30'
                     )}>
-                      {pos.rMultiple >= 0 ? '+' : ''}{pos.rMultiple.toFixed(1)}R
+                      {(pos.rMultiple || 0) >= 0 ? '+' : ''}{(pos.rMultiple || 0).toFixed(1)}R
                     </Badge>
                   </div>
                 );
@@ -186,7 +186,7 @@ export function LivePnlTracker() {
                     'text-sm font-mono font-bold',
                     pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'
                   )}>
-                    {pos.pnl >= 0 ? '+' : ''}₹{Math.round(pos.pnl).toLocaleString()}
+                    {pos.pnl >= 0 ? '+' : ''}₹{Math.round(pos.pnl || 0).toLocaleString()}
                   </span>
                 </div>
 
@@ -197,14 +197,14 @@ export function LivePnlTracker() {
                   </div>
                   <div className="rounded bg-secondary/50 px-2 py-1.5">
                     <div className="text-muted-foreground">Current</div>
-                    <div className={cn('font-mono font-semibold', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                      ₹{pos.currentPrice.toFixed(0)}
+                    <div className={cn('font-mono font-semibold', (pos.pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      ₹{pos.currentPrice != null ? pos.currentPrice.toFixed(2) : '--'}
                     </div>
                   </div>
                   <div className="rounded bg-secondary/50 px-2 py-1.5">
                     <div className="text-muted-foreground">R-Multiple</div>
-                    <div className={cn('font-mono font-semibold', pos.rMultiple >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                      {pos.rMultiple >= 0 ? '+' : ''}{pos.rMultiple.toFixed(2)}R
+                    <div className={cn('font-mono font-semibold', (pos.rMultiple || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      {(pos.rMultiple || 0) >= 0 ? '+' : ''}{(pos.rMultiple || 0).toFixed(2)}R
                     </div>
                   </div>
                 </div>

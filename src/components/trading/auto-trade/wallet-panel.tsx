@@ -44,10 +44,11 @@ export function WalletPanel({
           )}
         </div>
         {wallet && (
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
             <div className="rounded-lg bg-secondary/50 p-3">
               <div className="text-[10px] text-muted-foreground uppercase">Total Capital</div>
               <div className="text-lg font-bold font-mono mt-0.5">₹{wallet.totalCapital.toLocaleString()}</div>
+              <div className="text-[10px] text-muted-foreground">Init: ₹{wallet.initialCapital?.toLocaleString() || wallet.totalCapital.toLocaleString()}</div>
             </div>
             <div className="rounded-lg bg-blue-500/10 p-3">
               <div className="text-[10px] text-blue-400 uppercase">Deployed</div>
@@ -59,13 +60,20 @@ export function WalletPanel({
               <div className="text-lg font-bold font-mono mt-0.5 text-emerald-400">₹{wallet.available.toLocaleString()}</div>
             </div>
             <div className={cn('rounded-lg p-3', totalPnl >= 0 ? 'bg-emerald-500/10' : 'bg-red-500/10')}>
-              <div className={cn('text-[10px] uppercase', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>Total P&L</div>
+              <div className={cn('text-[10px] uppercase', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>Net P&L</div>
               <div className={cn('text-lg font-bold font-mono mt-0.5', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                 {totalPnl >= 0 ? '+' : ''}₹{totalPnl.toLocaleString()}
               </div>
               <div className="text-[10px] text-muted-foreground">R: {wallet.realizedPnl.toLocaleString()} | U: {wallet.unrealizedPnl.toLocaleString()}</div>
             </div>
-            {/* v2: Drawdown Card */}
+            <div className="rounded-lg bg-amber-500/10 p-3">
+              <div className="text-[10px] text-amber-400 uppercase">Costs Paid</div>
+              <div className="text-lg font-bold font-mono mt-0.5 text-amber-400">
+                −₹{Math.round(wallet.totalCostsPaid || 0).toLocaleString()}
+              </div>
+              <div className="text-[10px] text-muted-foreground">STT+Brokerage+Slip</div>
+            </div>
+            {/* Drawdown & Peak Card */}
             <div className={cn('rounded-lg p-3', (drawdown?.drawdownPct || 0) >= rules.maxDrawdownPct * 0.7 ? 'bg-red-500/10' : 'bg-orange-500/10')}>
               <div className="text-[10px] text-orange-400 uppercase flex items-center gap-1">
                 <Skull className="h-3 w-3" /> Drawdown
@@ -75,7 +83,7 @@ export function WalletPanel({
               )}>
                 {(drawdown?.drawdownPct || 0).toFixed(2)}%
               </div>
-              <div className="text-[10px] text-muted-foreground">Limit: {rules.maxDrawdownPct}%</div>
+              <div className="text-[10px] text-muted-foreground">Peak: ₹{Math.round(drawdown?.peakCapital || wallet.totalCapital).toLocaleString()}</div>
             </div>
           </div>
         )}

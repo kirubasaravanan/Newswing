@@ -1,8 +1,9 @@
 'use client';
 
 export interface WalletData {
-  id: string; totalCapital: number; deployed: number; available: number;
+  id: string; totalCapital: number; initialCapital: number; deployed: number; available: number;
   realizedPnl: number; unrealizedPnl: number;
+  peakCapital?: number; totalCostsPaid?: number;
 }
 
 export interface PositionRules {

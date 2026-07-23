@@ -15,6 +15,8 @@ export interface WalletData {
   available: number;
   realizedPnl: number;
   unrealizedPnl: number;
+  peakCapital: number;       // Persistent high-water mark (v3)
+  totalCostsPaid: number;    // Cumulative costs charged (STT + brokerage + slippage)
 }
 
 /**
@@ -78,12 +80,12 @@ export async function updateDeployed(
 export async function reconcileWallet(): Promise<WalletData> {
   const wallet = await getWallet();
 
-  // Equity paper trades
+  // Equity paper trades — prefer netPnl (v3 cost-aware), fallback to pnl (v2 legacy)
   const closedEquityTrades = await db.paperTrade.findMany({
     where: { status: { in: ['CLOSED', 'AUTO'] } },
-    select: { pnl: true },
+    select: { pnl: true, netPnl: true },
   });
-  const equityPnl = closedEquityTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
+  const equityPnl = closedEquityTrades.reduce((sum, t) => sum + (t.netPnl ?? t.pnl ?? 0), 0);
 
   // Option trades
   const closedOptionTrades = await db.optionTrade.findMany({

@@ -33,7 +33,7 @@ export interface ChainData {
   expiryDate: string;
   expiryDates: string[];
   chain: ChainRow[];
-  dataSource?: 'nse_live' | 'theoretical';
+  dataSource?: 'nse_live' | 'dhan_live' | 'theoretical';
   lotSize?: number;
   pcr?: { pcr: number; interpretation: string; signal: string };
   maxPain?: { maxPainStrike: number; reasoning: string };

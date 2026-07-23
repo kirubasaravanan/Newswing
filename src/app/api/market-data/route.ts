@@ -21,11 +21,55 @@ export async function GET() {
     const toFetch = watchlist.slice(0, 20);
     const rest = watchlist.slice(20);
 
+    // Batch quotes into 1 single API request if Dhan is configured
+    if (process.env.DATA_PROVIDER === 'dhan') {
+      const { getDhanMarketQuotes, DHAN_SECURITY_MAP } = await import('@/lib/trading/dhan-client');
+      const securities = toFetch
+        .map(s => DHAN_SECURITY_MAP[s.symbol.toUpperCase()])
+        .filter((meta): meta is NonNullable<typeof meta> => Boolean(meta))
+        .map(meta => ({ securityId: meta.securityId, exchangeSegment: meta.exchangeSegment }));
+
+      if (securities.length > 0) {
+        try {
+          const quotesRes = await getDhanMarketQuotes(securities);
+          for (const stock of toFetch) {
+            const meta = DHAN_SECURITY_MAP[stock.symbol.toUpperCase()];
+            const q = meta ? quotesRes?.data?.[meta.exchangeSegment]?.[meta.securityId] : null;
+            if (q && q.last_price > 0) {
+              const ltp = q.last_price;
+              const prevClose = q.ohlc?.close || ltp;
+              const change = ltp - prevClose;
+              const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
+              const entry = {
+                price: Math.round(ltp * 100) / 100,
+                change: Math.round(change * 100) / 100,
+                changePercent: Math.round(changePercent * 100) / 100,
+                high: q.ohlc?.high || ltp,
+                low: q.ohlc?.low || ltp,
+                volume: q.volume || 0,
+              };
+              quoteCache.set(stock.symbol, { quote: entry, fetchedAt: Date.now() });
+              quotes.push({ symbol: stock.symbol, name: stock.name, sector: stock.sector, ...entry });
+              continue;
+            }
+            // Fallback to cache/individual quote if batch missed item
+            const cached = quoteCache.get(stock.symbol);
+            if (cached) {
+              quotes.push({ symbol: stock.symbol, name: stock.name, sector: stock.sector, ...cached.quote });
+            }
+          }
+        } catch (err) {
+          console.warn('[MarketData] Batch quote fetch failed:', err);
+        }
+      }
+    }
+
+    // Process any remaining un-fetched stocks
     for (const stock of toFetch) {
+      if (quotes.some(q => q.symbol === stock.symbol)) continue;
       const cached = quoteCache.get(stock.symbol);
       if (cached && Date.now() - cached.fetchedAt < QUOTE_CACHE_TTL) {
-        const q = cached.quote;
-        quotes.push({ symbol: stock.symbol, name: stock.name, sector: stock.sector, ...q });
+        quotes.push({ symbol: stock.symbol, name: stock.name, sector: stock.sector, ...cached.quote });
         continue;
       }
       try {

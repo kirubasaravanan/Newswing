@@ -17,6 +17,7 @@ import {
 // NSE stocks use .NS suffix in Yahoo Finance
 
 const SYMBOL_MAP: Record<string, string> = {
+  'NIFTY': '^NSEI',
   'NIFTY50': '^NSEI',
   'BANKNIFTY': '^NSEBANK',
   'FINNIFTY': '^CNXFIN',
@@ -284,39 +285,23 @@ export async function getHistoricalData(
     }
   }
 
-  // ── 1. Try DhanHQ API v2 first if configured ─────────────
-  if (process.env.DATA_PROVIDER === 'dhan') {
-    const dhanCfg = getDhanConfig();
-    const secMeta = DHAN_SECURITY_MAP[symbol.toUpperCase()];
-    if (dhanCfg.accessToken && secMeta) {
-      try {
-        const toDateStr = new Date().toISOString().split('T')[0];
-        const fromDateObj = new Date(Date.now() - (days * 1.5 * 86400000));
-        const fromDateStr = fromDateObj.toISOString().split('T')[0];
+  // ── 1. Try DhanHQ API v2 first for 100% real broker OHLCV candles ─────────────
+  const dhanCfg = getDhanConfig();
+  const secMeta = DHAN_SECURITY_MAP[symbol.toUpperCase()];
+  if (dhanCfg.accessToken && secMeta) {
+    try {
+      const toDateStr = new Date().toISOString().split('T')[0];
+      const fromDateObj = new Date(Date.now() - (days * 1.5 * 86400000));
+      const fromDateStr = fromDateObj.toISOString().split('T')[0];
 
-        const dhanRes = await getDhanHistoricalDaily(symbol, fromDateStr, toDateStr);
-        if (dhanRes && dhanRes.close && dhanRes.close.length > 0) {
-          const candles: OHLCV[] = [];
-          for (let i = 0; i < dhanRes.close.length; i++) {
-            const time = dhanRes.start_Time?.[i];
-            const dateStr = time ? new Date(time * 1000).toISOString().split('T')[0] : '';
-            candles.push({
-              date: dateStr || `bar-${i}`,
-              open: Math.round((dhanRes.open[i] || dhanRes.close[i]) * 100) / 100,
-              high: Math.round((dhanRes.high[i] || dhanRes.close[i]) * 100) / 100,
-              low: Math.round((dhanRes.low[i] || dhanRes.close[i]) * 100) / 100,
-              close: Math.round(dhanRes.close[i] * 100) / 100,
-              volume: dhanRes.volume?.[i] || 0,
-            });
-          }
-          if (candles.length >= 10) {
-            historicalCache.set(cacheKey, { data: candles, fetchedAt: Date.now() });
-            return { data: candles, source: 'yahoo' }; // Return as primary source
-          }
-        }
-      } catch (err) {
-        console.warn(`DhanHQ historical fetch failed for ${symbol}, falling back to Yahoo:`, err);
+      const dhanCandles = await getDhanHistoricalDaily(symbol, fromDateStr, toDateStr);
+      if (Array.isArray(dhanCandles) && dhanCandles.length > 0) {
+        console.log(`[HISTORICAL DATA] Loaded ${dhanCandles.length} real candles for ${symbol} from DhanHQ Broker API`);
+        historicalCache.set(cacheKey, { data: dhanCandles, fetchedAt: Date.now() });
+        return { data: dhanCandles, source: 'dhan' as any };
       }
+    } catch (err) {
+      console.warn(`[HISTORICAL DATA] DhanHQ historical fetch failed for ${symbol}, falling back to Yahoo Finance:`, err);
     }
   }
 
@@ -357,9 +342,12 @@ export async function getCurrentPrice(symbol: string): Promise<{
     const secMeta = DHAN_SECURITY_MAP[symbol.toUpperCase()];
     if (secMeta) {
       try {
-        const secIdNum = parseInt(secMeta.securityId, 10);
-        const quotesRes = await getDhanMarketQuotes([secIdNum]);
-        const eqData = quotesRes?.data?.NSE_EQ?.[secMeta.securityId];
+        const quotesRes = await getDhanMarketQuotes([{
+          securityId: secMeta.securityId,
+          exchangeSegment: secMeta.exchangeSegment,
+        }]);
+        const segmentData = quotesRes?.data?.[secMeta.exchangeSegment];
+        const eqData = segmentData?.[secMeta.securityId];
         if (eqData) {
           const ltp = eqData.last_price || eqData.ohlc?.close || eqData.average_price || 0;
           if (ltp > 0) {
@@ -368,7 +356,7 @@ export async function getCurrentPrice(symbol: string): Promise<{
             const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
             return {
               price: Math.round(ltp * 100) / 100,
-              source: 'yahoo',
+              source: 'dhan' as any,
               quote: {
                 price: Math.round(ltp * 100) / 100,
                 change: Math.round(change * 100) / 100,
@@ -383,7 +371,7 @@ export async function getCurrentPrice(symbol: string): Promise<{
           }
         }
       } catch (err) {
-        console.warn(`DhanHQ quote failed for ${symbol}, falling back to Yahoo:`, err);
+        console.warn(`DhanHQ quote failed for ${symbol}:`, err);
       }
     }
   }
@@ -414,4 +402,42 @@ export function clearCache(): void {
   historicalCache.clear();
   yahooHealthy = null;
   symbolFailures.clear();
+}
+
+/**
+ * Multi-asset Current Price Resolver
+ * Handles option contract symbols (e.g., BANKNIFTY_CE_56500_2026-07-23) via DhanHQ Option Chain
+ * as well as normal equity stock symbols via DhanHQ Market Feed / Yahoo Finance.
+ */
+export async function getContractCurrentPrice(symbol: string, entryPrice: number = 0): Promise<number> {
+  const parts = symbol.split('_');
+  if (parts.length >= 4 && (parts[1] === 'CE' || parts[1] === 'PE')) {
+    const underlying = parts[0];
+    const direction = parts[1] as 'CE' | 'PE';
+    const strike = parseFloat(parts[2]);
+    const expiry = parts[3];
+
+    try {
+      const { fetchDhanOptionChain } = await import('@/lib/options/dhan-option-provider');
+      const chain = await fetchDhanOptionChain(underlying, expiry);
+      if (chain && chain.chain && chain.chain.length > 0) {
+        const row = chain.chain.find(r => Math.abs(r.strike - strike) < 0.5) || chain.chain.find(r => r.strike === strike);
+        const quote = direction === 'CE' ? row?.ce : row?.pe;
+        if (quote && quote.ltp > 0) {
+          return quote.ltp;
+        }
+      }
+    } catch (err) {
+      console.warn(`[getContractCurrentPrice] Option chain fetch failed for ${symbol}:`, err);
+    }
+    return entryPrice > 0 ? entryPrice : 0;
+  }
+
+  try {
+    const { price } = await getCurrentPrice(symbol);
+    if (price > 0) return price;
+  } catch (err) {
+    console.warn(`[getContractCurrentPrice] Stock quote fetch failed for ${symbol}:`, err);
+  }
+  return entryPrice > 0 ? entryPrice : 0;
 }

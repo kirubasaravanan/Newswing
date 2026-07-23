@@ -38,7 +38,7 @@ export function PositionsPanel({
                   const risk = pos.entryPrice - pos.stopLoss;
                   const agePct = rules.maxHoldingDays > 0 ? (days / rules.maxHoldingDays) * 100 : 0;
                   const isPartial = pos.tags?.includes('partial-booked');
-                  const rMultiple = risk > 0 ? ((pos.entryPrice - pos.entryPrice) / risk) : 0; // Will be calculated live
+                  const rrRatio = risk > 0 ? (pos.targetPrice - pos.entryPrice) / risk : 0;
                   return (
                     <div key={pos.id}
                       className={cn(
@@ -56,18 +56,18 @@ export function PositionsPanel({
                           <span className={cn('text-[10px]', agePct >= 80 ? 'text-amber-400 font-bold' : 'text-muted-foreground')}>
                             {days}/{rules.maxHoldingDays}d
                           </span>
-                          <span className="text-xs font-mono">₹{pos.entryPrice}</span>
+                          <span className="text-xs font-mono font-semibold">₹{pos.entryPrice.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
                           <span className="text-[10px] text-muted-foreground">x{pos.qty}</span>
                         </div>
                       </div>
                       <div className="mt-2 flex items-center gap-4 text-[10px]">
-                        <span className="text-red-400">SL: ₹{pos.stopLoss}</span>
-                        <span className="text-emerald-400">TP: ₹{pos.targetPrice}</span>
+                        <span className="text-red-400 font-mono">SL: ₹{pos.stopLoss.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
+                        <span className="text-emerald-400 font-mono">TP: ₹{pos.targetPrice.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
                         <span className="text-muted-foreground">
-                          Risk: ₹{risk > 0 ? (risk * pos.qty).toLocaleString() : 'N/A'}
+                          Risk: ₹{risk > 0 ? (risk * pos.qty).toLocaleString('en-IN', { maximumFractionDigits: 0 }) : 'N/A'}
                         </span>
-                        <span className="text-muted-foreground">
-                          {risk > 0 ? `R:R ${(Math.abs(pos.targetPrice - pos.entryPrice) / risk).toFixed(1)}x` : ''}
+                        <span className="text-muted-foreground font-semibold">
+                          {rrRatio > 0 ? `R:R ${rrRatio.toFixed(1)}x` : ''}
                         </span>
                         {/* v2: Show which factors are in tags */}
                         {pos.tags && (

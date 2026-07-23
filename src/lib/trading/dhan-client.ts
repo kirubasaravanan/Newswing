@@ -10,19 +10,28 @@
 
 const DHAN_BASE_URL = 'https://api.dhan.co/v2';
 
+declare global {
+  var _dhanRateLock: Promise<unknown> | undefined;
+  var _lastDhanCall: number | undefined;
+}
+
 export interface DhanConfig {
   clientId: string;
   accessToken: string;
 }
 
+function cleanStr(s: string): string {
+  return s.replace(/^["']|["']$/g, '').trim();
+}
+
 export function getDhanConfig(targetEngine: 'INTRADAY_OPTIONS' | 'EQUITY_SWING' = 'INTRADAY_OPTIONS'): DhanConfig {
   if (targetEngine === 'INTRADAY_OPTIONS') {
-    const clientId = process.env.OPTIONS_DHAN_CLIENT_ID || process.env.DHAN_CLIENT_ID || '';
-    const accessToken = process.env.OPTIONS_DHAN_ACCESS_TOKEN || process.env.DHAN_ACCESS_TOKEN || '';
+    const clientId = cleanStr(process.env.OPTIONS_DHAN_CLIENT_ID || process.env.DHAN_CLIENT_ID || '');
+    const accessToken = cleanStr(process.env.OPTIONS_DHAN_ACCESS_TOKEN || process.env.DHAN_ACCESS_TOKEN || '');
     return { clientId, accessToken };
   } else {
-    const clientId = process.env.SWING_DHAN_CLIENT_ID || process.env.DHAN_CLIENT_ID || '';
-    const accessToken = process.env.SWING_DHAN_ACCESS_TOKEN || process.env.DHAN_ACCESS_TOKEN || '';
+    const clientId = cleanStr(process.env.SWING_DHAN_CLIENT_ID || process.env.DHAN_CLIENT_ID || '');
+    const accessToken = cleanStr(process.env.SWING_DHAN_ACCESS_TOKEN || process.env.DHAN_ACCESS_TOKEN || '');
     return { clientId, accessToken };
   }
 }
@@ -44,6 +53,15 @@ export async function dhanFetch<T>(
     'client-id': config.clientId,
     'Content-Type': 'application/json',
   };
+
+  // ── Global DhanHQ API Rate Limiter Mutex (1.2s delay between all calls) ──
+  if (!globalThis._dhanRateLock) globalThis._dhanRateLock = Promise.resolve();
+  await (globalThis._dhanRateLock = globalThis._dhanRateLock.then(async () => {
+    const now = Date.now();
+    const gap = (globalThis._lastDhanCall || 0) + 1200 - now;
+    if (gap > 0) await new Promise(r => setTimeout(r, gap));
+    globalThis._lastDhanCall = Date.now();
+  }));
 
   const response = await fetch(url, {
     method,
@@ -138,10 +156,13 @@ export async function getDhanMarketQuotes(
   securities: Array<{ securityId: string; exchangeSegment: string }>,
   targetEngine: 'INTRADAY_OPTIONS' | 'EQUITY_SWING' = 'INTRADAY_OPTIONS'
 ) {
-  const payload: Record<string, string[]> = {};
+  const payload: Record<string, number[]> = {};
   for (const s of securities) {
     if (!payload[s.exchangeSegment]) payload[s.exchangeSegment] = [];
-    payload[s.exchangeSegment].push(s.securityId);
+    const secIdNum = parseInt(s.securityId, 10);
+    if (!isNaN(secIdNum)) {
+      payload[s.exchangeSegment].push(secIdNum);
+    }
   }
 
   return dhanFetch<any>('/marketfeed/quote', 'POST', payload, targetEngine);

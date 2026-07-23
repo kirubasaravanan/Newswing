@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { z } from 'zod';
+import { calculateEquityCosts } from '@/lib/trading/transaction-costs';
 
 // ── Zod Schemas ───────────────────────────────────────────────
 
@@ -93,19 +94,23 @@ export async function PUT(request: NextRequest) {
       const trade = await tx.paperTrade.findUnique({ where: { id } });
       if (!trade) throw new Error('Trade not found');
 
-      let pnl: number | null = null;
+      let grossPnl: number | null = null;
+      let netPnl: number | null = null;
+      let totalCosts: number | null = null;
       let pnlPercent: number | null = null;
+
+      let costs: ReturnType<typeof calculateEquityCosts> | null = null;
 
       if (exitPrice != null) {
         const ep = trade.entryPrice;
         const xp = exitPrice;
-        if (trade.direction === 'SHORT') {
-          pnl = (ep - xp) * trade.qty;
-          pnlPercent = ((ep - xp) / ep) * 100;
-        } else {
-          pnl = (xp - ep) * trade.qty;
-          pnlPercent = ((xp - ep) / ep) * 100;
-        }
+        const qty = trade.qty;
+        costs = calculateEquityCosts(ep, xp, qty, trade.symbol);
+        
+        grossPnl = trade.direction === 'SHORT' ? (ep - xp) * qty : (xp - ep) * qty;
+        totalCosts = costs.totalCosts;
+        netPnl = grossPnl - totalCosts;
+        pnlPercent = ((xp - ep) / ep) * 100;
       }
 
       const updated = await tx.paperTrade.update({
@@ -113,21 +118,29 @@ export async function PUT(request: NextRequest) {
         data: {
           exitDate: exitDate ? new Date(exitDate) : undefined,
           exitPrice: exitPrice ?? undefined,
-          pnl,
-          pnlPercent,
+          pnl: netPnl != null ? Math.round(netPnl * 100) / 100 : undefined,
+          pnlPercent: pnlPercent != null ? Math.round(pnlPercent * 100) / 100 : undefined,
+          grossPnl: grossPnl != null ? Math.round(grossPnl * 100) / 100 : undefined,
+          netPnl: netPnl != null ? Math.round(netPnl * 100) / 100 : undefined,
+          totalCosts: totalCosts != null ? Math.round(totalCosts * 100) / 100 : undefined,
+          brokerageCost: costs ? Math.round(costs.brokerage * 100) / 100 : undefined,
+          sttCost: costs ? Math.round(costs.stt * 100) / 100 : undefined,
+          slippageCost: costs ? Math.round(costs.slippage * 100) / 100 : undefined,
+          otherCharges: costs ? Math.round((costs.exchangeCharges + costs.gst + costs.sebiFees + costs.stampDuty) * 100) / 100 : undefined,
           status: status || 'CLOSED',
           exitReason: exitReason || 'MANUAL',
         },
       });
 
-      // Update wallet atomically in same transaction
-      if (pnl != null && (status === 'CLOSED' || !status)) {
+      // Update wallet atomically in same transaction with netPnl
+      if (netPnl != null && (status === 'CLOSED' || !status)) {
         const wallet = await tx.capitalWallet.findFirst();
         if (wallet) {
-          const newRealizedPnl = Math.round((wallet.realizedPnl + pnl) * 100) / 100;
+          const newRealizedPnl = Math.round((wallet.realizedPnl + netPnl) * 100) / 100;
+          const newCostsPaid = Math.round(((wallet.totalCostsPaid || 0) + (totalCosts || 0)) * 100) / 100;
           await tx.capitalWallet.update({
             where: { id: wallet.id },
-            data: { realizedPnl: newRealizedPnl },
+            data: { realizedPnl: newRealizedPnl, totalCostsPaid: newCostsPaid },
           });
         }
       }

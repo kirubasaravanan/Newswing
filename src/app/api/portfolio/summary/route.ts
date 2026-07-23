@@ -10,18 +10,16 @@ export async function GET() {
       db.capitalWallet.findFirst(),
     ]);
 
-    // Fetch live prices for open positions
-    const symbols = [...new Set(openTrades.map(t => t.symbol))];
+    // Fetch live prices for open positions (stocks & option contracts)
+    const { getContractCurrentPrice } = await import('@/lib/trading/data-provider');
     const priceMap: Record<string, number> = {};
-    for (const sym of symbols) {
-      try {
-        const { price } = await getCurrentPrice(sym);
-        if (price > 0) priceMap[sym] = price;
-      } catch { /* skip failed symbols */ }
-    }
+    await Promise.all(openTrades.map(async (t) => {
+      const price = await getContractCurrentPrice(t.symbol, t.entryPrice);
+      priceMap[t.symbol] = price;
+    }));
 
     const positions = openTrades.map(trade => {
-      const currentPrice = priceMap[trade.symbol] || 0;
+      const currentPrice = priceMap[trade.symbol] ?? trade.entryPrice;
       const direction = trade.direction || 'LONG';
       const priceDiff = direction === 'LONG' ? currentPrice - trade.entryPrice : trade.entryPrice - currentPrice;
       const pnl = priceDiff * trade.qty;

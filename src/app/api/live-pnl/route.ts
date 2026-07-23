@@ -9,19 +9,15 @@ export async function GET() {
       return NextResponse.json({ success: true, positions: [], totalPnL: 0 });
     }
 
-    const symbols = [...new Set(openTrades.map(t => t.symbol))];
+    const { getContractCurrentPrice } = await import('@/lib/trading/data-provider');
     const priceMap: Record<string, number> = {};
-
-    // Fetch real prices
-    for (const sym of symbols) {
-      try {
-        const { price } = await getCurrentPrice(sym);
-        if (price > 0) priceMap[sym] = price;
-      } catch { /* fallback below */ }
-    }
+    await Promise.all(openTrades.map(async (t) => {
+      const price = await getContractCurrentPrice(t.symbol, t.entryPrice);
+      priceMap[t.symbol] = price;
+    }));
 
     const positions = openTrades.map(trade => {
-      const currentPrice = priceMap[trade.symbol] || 0;
+      const currentPrice = priceMap[trade.symbol] ?? trade.entryPrice;
       if (!currentPrice) {
         // No live price available — return position without fake P&L
         return {
