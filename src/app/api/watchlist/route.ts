@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const items: { symbol: string; name?: string; sector?: string }[] = Array.isArray(body.stocks) ? body.stocks : [body];
 
-    const added = [];
+    const added: any[] = [];
     for (const item of items) {
       const existing = await db.watchlistStock.findUnique({ where: { symbol: item.symbol.toUpperCase() } });
       if (existing) continue;

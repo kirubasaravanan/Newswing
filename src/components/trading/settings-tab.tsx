@@ -384,7 +384,7 @@ function UniverseStatsCard() {
   }, []);
 
   if (!stats) return null;
-  const topSectors = Object.entries(stats.bySector).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const topSectors = Object.entries(stats.bySector).sort((a, b) => (b[1] as number) - (a[1] as number)).slice(0, 8);
 
   return (
     <div>
@@ -406,13 +406,13 @@ function UniverseStatsCard() {
       <h4 className="text-xs font-semibold mb-2">By Category</h4>
       <div className="flex flex-wrap gap-1.5 mb-3">
         {Object.entries(stats.byCategory).map(([cat, count]) => (
-          <Badge key={cat} variant="outline" className="text-[10px] h-5">{cat}: {count}</Badge>
+          <Badge key={cat} variant="outline" className="text-[10px] h-5">{cat}: {String(count)}</Badge>
         ))}
       </div>
       <h4 className="text-xs font-semibold mb-2">Top Sectors</h4>
       <div className="flex flex-wrap gap-1.5">
         {topSectors.map(([sector, count]) => (
-          <Badge key={sector} variant="secondary" className="text-[10px] h-5">{sector} ({count})</Badge>
+          <Badge key={sector} variant="secondary" className="text-[10px] h-5">{sector} ({String(count)})</Badge>
         ))}
       </div>
     </div>

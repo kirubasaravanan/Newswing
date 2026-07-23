@@ -85,9 +85,10 @@ export async function POST(request: NextRequest) {
             return { stock, data };
           })
         );
+        const isNiftyBullish = niftyData && niftyData.length >= 50 ? niftyData[niftyData.length - 1].close >= niftyData[niftyData.length - 50].close : true;
         for (const r of results) {
           if (r.status !== 'fulfilled') continue;
-          const signal = runScreening(r.value.stock.symbol, r.value.data, niftyData, config);
+          const signal = runScreening(r.value.stock.symbol, r.value.data, config, isNiftyBullish);
           if (signal) l2Signals.push(signal);
         }
       }

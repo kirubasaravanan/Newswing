@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { runScreening, DEFAULT_CONFIG, TOP_7_RANKED_SYMBOLS, type ScreeningConfig } from "@/lib/trading/screening-engine";
 import { getHistoricalData } from "@/lib/trading/data-provider";
 import { db } from "@/lib/db";
@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
           errors.push({ symbol, error: `Insufficient real candles (${candles?.length || 0}) from ${source}` });
           continue;
         }
-        const result = runScreening(symbol, candles, config, true);
+        const result = runScreening(symbol, candles, config, true, true);
         if (result) {
           results.push(result);
 
@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    results.sort((a, b) => ((b?.rank || 99) - (a?.rank || 99)) || ((b?.score || 0) - (a?.score || 0)));
+    results.sort((a, b) => ((a?.rank || 99) - (b?.rank || 99)) || ((b?.score || 0) - (a?.score || 0)));
 
     return NextResponse.json({
       success: true,

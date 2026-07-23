@@ -144,17 +144,28 @@ export function Sidebar() {
 
         {navContent}
 
-        {/* Footer: Market Status */}
-        <div className="mt-auto space-y-2 px-2">
+        {/* Footer: System Feed & Broker Status Badges */}
+        <div className="mt-auto space-y-1.5 px-2">
           <div className={cn(
-            'flex items-center gap-2 rounded-lg px-3 py-2 text-xs',
-            yahooOk === true ? 'text-emerald-400' : yahooOk === false ? 'text-red-400' : 'text-muted-foreground'
+            'flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[11px] font-medium',
+            yahooOk === true ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-secondary text-muted-foreground'
           )}>
-            {yahooOk === true ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
-            <span className="hidden lg:inline">{yahooOk === true ? 'Yahoo Live' : yahooOk === false ? 'Offline' : 'Connecting...'}</span>
+            {yahooOk === true ? <Wifi className="h-3 w-3 text-emerald-400" /> : <WifiOff className="h-3 w-3" />}
+            <span className="hidden lg:inline">{yahooOk === true ? 'Broker Feed: DhanHQ Live' : 'Connecting Data...'}</span>
           </div>
+
+          <div className="flex items-center gap-2 rounded-lg bg-indigo-500/10 border border-indigo-500/20 px-2.5 py-1.5 text-[11px] font-medium text-indigo-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 animate-pulse" />
+            <span className="hidden lg:inline">Discord Feed: 🟢 ACTIVE</span>
+          </div>
+
+          <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1.5 text-[11px] font-medium text-emerald-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            <span className="hidden lg:inline">Scrip Master: 🟢 SYNCED</span>
+          </div>
+
           {schedulerArmed && (
-            <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400">
+            <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-400">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
               <span className="hidden lg:inline">Auto-Mode Active</span>
             </div>

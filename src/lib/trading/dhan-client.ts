@@ -134,7 +134,7 @@ export async function getDhanHistoricalDaily(
 
   if (!res || !res.start_Time) return [];
 
-  const candles = [];
+  const candles: any[] = [];
   for (let i = 0; i < res.start_Time.length; i++) {
     candles.push({
       date: new Date(res.start_Time[i] * 1000).toISOString().split('T')[0],

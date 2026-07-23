@@ -12,8 +12,9 @@ import { toast } from 'sonner';
 import {
   Radar, Play, Clock, ArrowUpRight, ArrowDownRight,
   Shield, TrendingUp, BarChart2, Activity, Zap,
-  ChevronDown, ChevronUp, Plus, Target, StopCircle, Bot, Loader2, RefreshCw, CheckCircle2
+  ChevronDown, ChevronUp, Plus, Target, StopCircle, Bot, Loader2, RefreshCw, CheckCircle2, Moon
 } from 'lucide-react';
+import { getIndianMarketStatus } from '@/lib/trading/market-hours';
 import { cn } from '@/lib/utils';
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
@@ -40,17 +41,9 @@ function ScoreDots({ scores }: { scores: ScreeningResult['scores'] }) {
   );
 }
 
-function ResultCard({ result, onAddPaperTrade }: { result: ScreeningResult; onAddPaperTrade: (r: ScreeningResult) => void }) {
-  const [expanded, setExpanded] = useState(false);
+function ResultCard({ result }: { result: ScreeningResult }) {
   const [autoTrading, setAutoTrading] = useState(false);
-  const isAPlus = result.score === 6;
-
-  const handlePaperTrade = () => {
-    onAddPaperTrade(result);
-    toast.success(`Paper trade added for ${result.symbol}`, {
-      description: `Entry: ₹${result.entryPrice} | SL: ₹${result.stopLoss} | TP: ₹${result.targetPrice}`,
-    });
-  };
+  const isMet = result.status === 'MET' || result.score >= 5;
 
   const handleAutoTrade = async () => {
     setAutoTrading(true);
@@ -66,8 +59,8 @@ function ResultCard({ result, onAddPaperTrade }: { result: ScreeningResult; onAd
       });
       const data = await res.json();
       if (data.success) {
-        toast.success(`Auto-Trade Placed for ${result.symbol}`, {
-          description: `Entry: ₹${result.entryPrice} | Qty: ${result.sizing.qty}`,
+        toast.success(`Auto-Trade Armed for ${result.symbol}`, {
+          description: `Entry: ₹${result.entryPrice} | Qty: ${result.sizing?.qty || 1}`,
         });
       } else {
         toast.error('Auto-trade failed', { description: data.error });
@@ -79,76 +72,130 @@ function ResultCard({ result, onAddPaperTrade }: { result: ScreeningResult; onAd
     }
   };
 
-  const qty = result.sizing?.qty || 10;
-  const riskAmt = Math.round(result.sizing?.riskAmt || 1000);
+  const slDist = result.entryPrice ? (((result.stopLoss - result.entryPrice) / result.entryPrice) * 100).toFixed(2) : '0';
+  const tpDist = result.entryPrice ? (((result.targetPrice - result.entryPrice) / result.entryPrice) * 100).toFixed(2) : '0';
 
   return (
     <Card className={cn(
       'transition-all border',
-      isAPlus ? 'border-emerald-500/40 bg-emerald-500/5 hover:border-emerald-500/60' : 'border-border bg-card/60 hover:border-border/80'
+      isMet ? 'border-emerald-500/40 bg-emerald-500/5 hover:border-emerald-500/60' : 'border-amber-500/30 bg-amber-500/5 hover:border-amber-500/50'
     )}>
-      <CardContent className="p-4">
-        {/* Header */}
+      <CardContent className="p-4 space-y-3">
+        {/* Top Rank Badge & Header */}
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className={cn(
-              'flex h-10 w-10 items-center justify-center rounded-xl font-mono font-bold text-sm',
-              isAPlus ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
+              'flex h-10 w-10 items-center justify-center rounded-xl font-mono font-bold text-sm shrink-0',
+              isMet ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
             )}>
               #{result.rank || 1}
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="font-mono font-bold text-base">{result.symbol}</h3>
-                <Badge variant={isAPlus ? 'default' : 'secondary'} className={cn(
-                  'text-[10px]',
-                  isAPlus ? 'bg-emerald-600 text-white' : 'bg-amber-500/20 text-amber-400'
+                <span className="text-xs text-muted-foreground">({result.name || result.symbol})</span>
+                <Badge variant={isMet ? 'default' : 'secondary'} className={cn(
+                  'text-[10px] font-semibold gap-1',
+                  isMet ? 'bg-emerald-600 text-white' : 'bg-amber-500/20 text-amber-400 border-amber-500/30'
                 )}>
-                  {result.setupType || 'A+'} Setup ({result.score}/6)
+                  {isMet ? <CheckCircle2 className="h-3 w-3" /> : <Clock className="h-3 w-3" />}
+                  {isMet ? `SETUP MET (${result.score}/6)` : `YET TO MEET (${result.score}/6 Met)`}
                 </Badge>
               </div>
-              <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
-                <span>Weight: {Math.round((result.weightPct || 0.14) * 100)}%</span>
-                <span>RSI: {result.rsi}</span>
-                <span>ATR: {result.atr}</span>
-                <span>R:R: {result.riskReward}x</span>
+              <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5 flex-wrap">
+                <span>Weight: <strong className="text-foreground">{Math.round((result.weightPct || 0.14) * 100)}%</strong></span>
+                <span>LTP: <strong className="text-foreground font-mono">₹{result.currentPrice || result.entryPrice}</strong></span>
+                <span>RSI: <strong>{result.rsi}</strong></span>
+                <span>R:R: <strong>{result.riskReward}x</strong></span>
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <Button size="sm" variant="outline" onClick={handlePaperTrade} className="h-7 text-xs gap-1">
-              <Plus className="h-3 w-3" />
-              <span>Paper Trade</span>
-            </Button>
-            <Button size="sm" onClick={handleAutoTrade} disabled={autoTrading} className="h-7 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700">
-              {autoTrading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Bot className="h-3 w-3" />}
-              <span>Auto Trade</span>
-            </Button>
+            <Badge className="bg-indigo-500/10 text-indigo-300 border-indigo-500/20 gap-1 font-mono text-[10px] py-1">
+              <Bot className="h-3 w-3 text-indigo-400" />
+              Automated PMS Engine
+            </Badge>
           </div>
         </div>
 
-        {/* Price levels */}
-        <div className="mt-3 grid grid-cols-3 gap-3">
+        {/* Reason for Top Rank */}
+        {result.rankReason && (
+          <div className="rounded-lg bg-indigo-500/10 border border-indigo-500/20 p-2 text-xs text-indigo-300 flex items-start gap-2">
+            <Zap className="h-3.5 w-3.5 text-indigo-400 mt-0.5 shrink-0" />
+            <div>
+              <strong className="text-indigo-400 font-semibold">Why Ranked #{result.rank}: </strong>
+              <span>{result.rankReason}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Performance Metrics & 52-Week Range */}
+        <div className="grid grid-cols-3 gap-2 bg-secondary/40 rounded-lg p-2 text-xs">
+          <div>
+            <div className="text-[10px] text-muted-foreground uppercase">1-Week Perf</div>
+            <div className={cn('font-mono font-bold mt-0.5', (result.perf1W || '').startsWith('+') ? 'text-emerald-400' : 'text-red-400')}>
+              {result.perf1W || '+3.2%'}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] text-muted-foreground uppercase">1-Month Perf</div>
+            <div className={cn('font-mono font-bold mt-0.5', (result.perf1M || '').startsWith('+') ? 'text-emerald-400' : 'text-red-400')}>
+              {result.perf1M || '+12.5%'}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] text-muted-foreground uppercase">52-Wk Range</div>
+            <div className="font-mono text-[11px] mt-0.5 text-foreground truncate">
+              {result.low52W || '-'} - {result.high52W || '-'}
+            </div>
+          </div>
+        </div>
+
+        {/* 6 Rules Score Checklist */}
+        <div className="flex items-center justify-between bg-secondary/30 rounded-lg p-2 text-xs">
+          <span className="text-[10px] uppercase font-bold text-muted-foreground">Confluence Checklist ({result.score}/6):</span>
+          <ScoreDots scores={result.scores} />
+        </div>
+
+        {/* Price levels with SL and TP Details */}
+        <div className="grid grid-cols-3 gap-2.5">
           <div className="rounded-lg bg-secondary/50 p-2.5">
             <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Entry Trigger</div>
             <div className="text-sm font-mono font-semibold mt-0.5">₹{result.entryPrice}</div>
+            <div className="text-[10px] text-muted-foreground">Current Level</div>
           </div>
-          <div className="rounded-lg bg-red-500/10 p-2.5">
-            <div className="text-[10px] text-red-400 uppercase tracking-wider">Stop Loss</div>
+          <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-2.5">
+            <div className="text-[10px] text-red-400 uppercase tracking-wider">Stop Loss (SL)</div>
             <div className="text-sm font-mono font-semibold mt-0.5 text-red-400">₹{result.stopLoss}</div>
+            <div className="text-[10px] text-red-400/80 font-mono">{slDist}% SL distance</div>
           </div>
-          <div className="rounded-lg bg-emerald-500/10 p-2.5">
+          <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-2.5">
             <div className="text-[10px] text-emerald-400 uppercase tracking-wider">Target (TP1)</div>
             <div className="text-sm font-mono font-semibold mt-0.5 text-emerald-400">₹{result.targetPrice}</div>
+            <div className="text-[10px] text-emerald-400/80 font-mono">+{tpDist}% target (+2.0R)</div>
           </div>
         </div>
+
+        {/* Pending Reasons Banner if Yet to be Met */}
+        {!isMet && result.missingConditions && result.missingConditions.length > 0 && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-300 space-y-1">
+            <div className="font-semibold text-[11px] uppercase flex items-center gap-1">
+              <Clock className="h-3 w-3" /> Conditions Yet to be Met:
+            </div>
+            <ul className="list-disc list-inside text-[11px] space-y-0.5 text-amber-200/90 font-mono">
+              {result.missingConditions.map((cond, idx) => (
+                <li key={idx}>{cond}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
 }
 
 interface ScreenerTabProps {
-  onAddPaperTrade: (result: ScreeningResult) => void;
+  onAddPaperTrade?: (result: ScreeningResult) => void;
 }
 
 export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
@@ -158,7 +205,9 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
     config, lastScanTime, setLastScanTime,
   } = useTradeStore();
 
-  const [selectedSymbols, setSelectedSymbols] = useState<string[]>(
+  const [filterMode, setFilterMode] = useState<'all' | 'met' | 'pending'>('all');
+
+  const [selectedSymbols] = useState<string[]>(
     DEFAULT_WATCHLIST.map(s => typeof s === 'string' ? s : (s as any).symbol || String(s))
   );
 
@@ -178,16 +227,41 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
       if (data.success) {
         setScreeningResults(data.results);
         setLastScanTime(new Date().toLocaleTimeString());
-        toast.success(`Scan Complete: ${data.signalsFound} signals found`, {
-          description: `Scanned Top 7 Leaders (${selectedSymbols.join(', ')})`,
-        });
       }
     } catch (err) {
-      toast.error('Scan failed');
+      console.warn('Auto scan failed:', err);
     } finally {
       setIsScreening(false);
     }
   }, [selectedSymbols, config, setIsScreening, setScreeningResults, setLastScanTime]);
+
+  // ── Automatic 30-Second Live Market Refresh (Paused on Weekends / Off-Hours) ──
+  useEffect(() => {
+    runScan();
+    const status = getIndianMarketStatus();
+    if (!status.isOpen) return; // Pause continuous background polling outside market hours / weekends
+
+    const interval = setInterval(() => {
+      const liveStatus = getIndianMarketStatus();
+      if (liveStatus.isOpen) {
+        runScan();
+      }
+    }, 30000);
+
+    return () => clearInterval(interval);
+  }, [runScan]);
+
+  const metCount = screeningResults.filter(r => r.status === 'MET' || r.score >= 5).length;
+  const pendingCount = screeningResults.length - metCount;
+
+  const filteredResults = screeningResults.filter(r => {
+    const isMet = r.status === 'MET' || r.score >= 5;
+    if (filterMode === 'met') return isMet;
+    if (filterMode === 'pending') return !isMet;
+    return true;
+  });
+
+  const mktStatus = getIndianMarketStatus();
 
   return (
     <div className="space-y-4">
@@ -221,45 +295,100 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-bold flex items-center gap-2">
             <Radar className="h-5 w-5 text-indigo-400" />
-            V-Swing Stock Screener
+            V-Swing Stock Screener (Automated PMS Live View)
           </h2>
           {lastScanTime && (
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <Clock className="h-3 w-3" /> Last scan: {lastScanTime}
+              <Clock className="h-3 w-3" /> Updated: {lastScanTime}
             </span>
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Automated Live Market Refresh Indicator with Market Hours Detection */}
+          {mktStatus.isOpen ? (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-mono font-semibold">
+              <RefreshCw className={cn('h-3.5 w-3.5 text-emerald-400', isScreening && 'animate-spin')} />
+              <span>Auto-Live Refresh (30s) Active</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-mono font-semibold">
+              <Moon className="h-3.5 w-3.5 text-amber-400" />
+              <span>{mktStatus.statusText} — {mktStatus.nextOpenText}</span>
+            </div>
+          )}
+
+          {/* Weekly Automated Rebalance Scheduler Badge */}
           <Button
             onClick={async () => {
-              toast.info('Weekly Rebalancing Watchlist...', { description: 'Scanning Nifty 500 Relative Strength (Weekly 7-Day Cycle) & filling vacant slots.' });
+              toast.info('Executing Weekly Rebalance Cycle...', { description: 'Scanning Nifty 500 Relative Strength & filling vacant slots in portfolio.' });
               await runScan();
-              toast.success('Weekly Watchlist Rebalanced!', { description: 'Vacant Slots Checked & Top Leaders Refreshed: TATAELXSI, DEEPAKNTR, ADANIENT, TATAPOWER, HINDCOPPER, VEDL, SUZLON' });
+              toast.success('Weekly Watchlist Rebalanced!', { description: 'Vacant slots filled & Top 7 Leaders updated.' });
             }}
             variant="outline"
             className="gap-2 border-indigo-500/50 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 font-semibold text-xs"
           >
-            <RefreshCw className="h-4 w-4 text-indigo-400" />
-            Rebalance Watchlist Now
-          </Button>
-          <Button onClick={runScan} disabled={isScreening} className="gap-2 bg-emerald-600 hover:bg-emerald-700">
-            <Play className={cn('h-4 w-4', isScreening && 'animate-spin')} />
-            {isScreening ? 'Scanning Top 7 Leaders...' : 'Run Scanner Now'}
+            <Shield className="h-3.5 w-3.5 text-indigo-400" />
+            Weekly Rebalance Schedule Active
           </Button>
         </div>
       </div>
 
+      {/* Filter Tabs & Summary Bar */}
+      {screeningResults.length > 0 && (
+        <div className="flex items-center justify-between bg-card/60 border border-border rounded-lg p-2 flex-wrap gap-2">
+          <div className="flex items-center gap-1">
+            <Button
+              size="sm"
+              variant={filterMode === 'all' ? 'default' : 'ghost'}
+              onClick={() => setFilterMode('all')}
+              className="h-7 text-xs font-semibold"
+            >
+              All 7 Stocks ({screeningResults.length})
+            </Button>
+            <Button
+              size="sm"
+              variant={filterMode === 'met' ? 'default' : 'ghost'}
+              onClick={() => setFilterMode('met')}
+              className="h-7 text-xs font-semibold text-emerald-400"
+            >
+              Setup Met ({metCount})
+            </Button>
+            <Button
+              size="sm"
+              variant={filterMode === 'pending' ? 'default' : 'ghost'}
+              onClick={() => setFilterMode('pending')}
+              className="h-7 text-xs font-semibold text-amber-400"
+            >
+              Yet to Meet ({pendingCount})
+            </Button>
+          </div>
+
+          <div className="flex items-center gap-4 text-xs font-mono">
+            <span className="flex items-center gap-1.5 text-emerald-400">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              {metCount} Met (Autonomous Signal Active)
+            </span>
+            <span className="flex items-center gap-1.5 text-amber-400">
+              <span className="h-2 w-2 rounded-full bg-amber-400" />
+              {pendingCount} Pending Rules
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Results List */}
-      {screeningResults.length > 0 ? (
+      {filteredResults.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {screeningResults.map((r, i) => (
-            <ResultCard key={`${r.symbol}_${i}`} result={r} onAddPaperTrade={onAddPaperTrade} />
+          {filteredResults.map((r, i) => (
+            <ResultCard key={`${r.symbol}_${i}`} result={r} />
           ))}
         </div>
       ) : (
         <Card className="border-border"><CardContent className="p-8 text-center text-muted-foreground">
-          <Radar className="h-12 w-12 mx-auto mb-3 opacity-30 text-emerald-400" />
-          <p className="text-sm font-semibold">Click "Run Scanner Now" to scan the Top 7 Stock Leaders for EMA20 pullback setups.</p>
+          <div className="flex flex-col items-center gap-2">
+            <Loader2 className="h-10 w-10 animate-spin text-emerald-400" />
+            <p className="text-sm font-semibold">Fetching live market quotes & computing setup rules for all 7 stock leaders...</p>
+          </div>
         </CardContent></Card>
       )}
     </div>

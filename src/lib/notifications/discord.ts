@@ -354,3 +354,118 @@ export async function sendDiscordHealthCheck(report: HealthCheckReport): Promise
 
   return postToDiscord(embed);
 }
+
+// ── Scrip Master CSV Scheduled Update Alert ───────────────────
+export async function sendDiscordScripMasterUpdate(contractCount: number, updateTime: string): Promise<boolean> {
+  const embed = {
+    title: `📥 DHANHQ SCRIP MASTER UPDATED`,
+    description: `**Status**: ✅ Scrip Master CSV Successfully Downloaded & Cached\n**Total Option Contracts Loaded**: \`${contractCount.toLocaleString('en-IN')}\` contracts`,
+    color: 0x00d4aa,
+    fields: [
+      { name: '⏰ Update Timestamp', value: updateTime, inline: true },
+      { name: '📡 Exchange Segments', value: 'NSE_FNO, BSE_FNO', inline: true },
+      { name: '🔒 Security Feed Status', value: '100% Real Broker Tickers Synced', inline: true },
+    ],
+    footer: { text: 'Scheduled Scrip Master Update | DhanHQ Broker v2 API | NewSwing PMS' },
+    timestamp: new Date().toISOString(),
+  };
+  return postToDiscord(embed);
+}
+
+// ── Consolidated Daily EOD Performance Report ──────────────────
+export interface EODSummaryReport {
+  date: string;
+  totalTrades: number;
+  winTrades: number;
+  lossTrades: number;
+  winRate: number;
+  grossPnl: number;
+  statutoryCosts: number;
+  netPnl: number;
+  netPnlPct: number;
+  capitalDeployed: number;
+  winningTradesList: string[];
+  losingTradesList: string[];
+}
+
+export async function sendDiscordEODSummary(summary: EODSummaryReport): Promise<boolean> {
+  const isProfitable = summary.netPnl >= 0;
+  const emoji = isProfitable ? '🏆' : '📊';
+  const color = isProfitable ? 0x00d4aa : 0xff4444;
+
+  const winningText = summary.winningTradesList.length > 0
+    ? summary.winningTradesList.slice(0, 8).join('\n')
+    : 'No winning trades today';
+  const losingText = summary.losingTradesList.length > 0
+    ? summary.losingTradesList.slice(0, 8).join('\n')
+    : 'No losing trades today';
+
+  const embed = {
+    title: `${emoji} CONSOLIDATED EOD TRADING PERFORMANCE REPORT — ${summary.date}`,
+    description: `**Net Session Return**: **${summary.netPnl >= 0 ? '+' : ''}₹${fmt(summary.netPnl)} (${summary.netPnlPct >= 0 ? '+' : ''}${summary.netPnlPct.toFixed(2)}%)**`,
+    color,
+    fields: [
+      { name: '📊 Total Trades', value: `${summary.totalTrades} Trades`, inline: true },
+      { name: '✅ Win Rate', value: `${summary.winRate.toFixed(1)}% (${summary.winTrades}W / ${summary.lossTrades}L)`, inline: true },
+      { name: '💵 Deployed Capital', value: `₹${fmt(summary.capitalDeployed)}`, inline: true },
+      { name: '💰 Gross P&L', value: fmtPnl(summary.grossPnl), inline: true },
+      { name: '🏷️ Statutory Taxes & Fees', value: `−₹${fmt(summary.statutoryCosts)}`, inline: true },
+      { name: '🏆 Net Pre-Tax P&L', value: `**${fmtPnl(summary.netPnl)}**`, inline: true },
+      { name: '🟢 Winning Trades', value: `\`\`\`\n${winningText}\n\`\`\``, inline: false },
+      { name: '🔴 Losing Trades & SL Exits', value: `\`\`\`\n${losingText}\n\`\`\``, inline: false },
+    ],
+    footer: { text: 'Consolidated Market Close EOD Summary | NewSwing PMS Engine' },
+    timestamp: new Date().toISOString(),
+  };
+
+  return postToDiscord(embed);
+}
+
+// ── Lightweight Hourly Market Hours Heartbeat Alert ─────────────────────
+export interface HeartbeatPayload {
+  timeIST: string;
+  niftyRegime: string;
+  openPositions: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+  nextSquareOffTime: string;
+}
+
+export async function sendDiscordHeartbeat(payload: HeartbeatPayload): Promise<boolean> {
+  const pnlSign = payload.unrealizedPnl >= 0 ? '+' : '';
+  const pnlFormatted = `${pnlSign}₹${Math.round(payload.unrealizedPnl).toLocaleString('en-IN')}`;
+  const isPos = payload.unrealizedPnl >= 0;
+
+  const embed = {
+    title: `💓 PMS Hourly Heartbeat [${payload.timeIST}]`,
+    description: `• **Market**: OPEN (${payload.niftyRegime})\n• **Open Positions**: ${payload.openPositions}\n• **Unrealized PnL**: **${pnlFormatted}**\n• **3:10 PM Square-Off**: Armed (${payload.nextSquareOffTime})`,
+    color: isPos ? 0x00d4aa : 0xff4444,
+    footer: { text: 'NewSwing PMS Autonomous Engine | Hourly Status' },
+    timestamp: new Date().toISOString(),
+  };
+
+  return postToDiscord(embed);
+}
+
+// ── Weekly Monday 8:30 AM Rebalance Cycle Alert ─────────────────────────
+export interface WeeklyRebalancePayload {
+  rebalanceTime: string;
+  top7Symbols: string[];
+  vacantSlotsFilled: string[];
+}
+
+export async function sendDiscordWeeklyRebalanceNotice(payload: WeeklyRebalancePayload): Promise<boolean> {
+  const embed = {
+    title: `🔄 WEEKLY WATCHLIST REBALANCE EXECUTED [${payload.rebalanceTime}]`,
+    description: `**Schedule**: Every Monday at 8:30 AM IST\n**Nifty 500 Relative Strength Scan Completed**`,
+    color: 0x6366f1,
+    fields: [
+      { name: '🏆 Top 7 Leaders', value: payload.top7Symbols.join(', '), inline: false },
+      { name: '📥 Open Slots Filled', value: payload.vacantSlotsFilled.join(', '), inline: false },
+    ],
+    footer: { text: 'Nifty 500 RS 7-Day Cycle | NewSwing PMS' },
+    timestamp: new Date().toISOString(),
+  };
+
+  return postToDiscord(embed);
+}

@@ -42,24 +42,28 @@ export async function POST(request: NextRequest) {
       getHistoricalData('NIFTY50', totalDays + 50),
     ]);
 
-    if (!stockRes.data || stockRes.data.length < 300) {
+    if (!stockRes.data || stockRes.data.length < 20) {
       return NextResponse.json({
         success: false,
-        error: `Insufficient data for ${symbol}: ${stockRes.data?.length || 0} candles (need 300+)`,
+        error: `Insufficient historical data for ${symbol}: ${stockRes.data?.length || 0} candles (need 20+)`,
       }, { status: 400 });
     }
 
     const allCandles = stockRes.data;
-    const niftyCandles = niftyRes.data;
+    const niftyCandles = niftyRes.data || [];
     const windows: WindowResult[] = [];
 
+    // Convert calendar days to trading bar offsets
+    const totalBars = allCandles.length;
+    const windowBars = Math.max(20, Math.floor(totalBars * (windowDays / Math.max(totalDays, 1))));
+    const stepBars = Math.max(10, Math.floor(totalBars * (stepDays / Math.max(totalDays, 1))));
+
     // Run rolling windows
-    const startOffset = allCandles.length - totalDays;
-    for (let wStart = Math.max(0, startOffset); wStart + windowDays <= allCandles.length; wStart += stepDays) {
-      const wEnd = Math.min(wStart + windowDays, allCandles.length);
+    for (let wStart = 0; wStart + windowBars <= totalBars; wStart += stepBars) {
+      const wEnd = Math.min(wStart + windowBars, totalBars);
       const windowCandles = allCandles.slice(wStart, wEnd);
 
-      if (windowCandles.length < 200) continue;
+      if (windowCandles.length < 10) continue;
 
       // Align nifty candles to same date range
       const wStartDate = windowCandles[0].date;
@@ -68,9 +72,9 @@ export async function POST(request: NextRequest) {
 
       try {
         const result = runBacktest(symbol, windowCandles, niftyWindow, config);
-        const initialCapital = config.liveCapital;
-        const finalCapital = result.stats.finalCapital;
-        const tradingDays = Math.max(result.stats.totalTrades * 3, 40);
+        const initialCapital = config.liveCapital || 100000;
+        const finalCapital = result.stats.finalCapital || initialCapital;
+        const tradingDays = Math.max(result.stats.totalTrades * 3, 20);
         const cagr = ((finalCapital / initialCapital) ** (252 / tradingDays) - 1) * 100;
 
         windows.push({
@@ -83,7 +87,7 @@ export async function POST(request: NextRequest) {
           sharpeRatio: result.stats.sharpeRatio,
           maxDrawdown: result.stats.maxDrawdown,
           finalCapital: result.stats.finalCapital,
-          cagr: Math.round(cagr * 100) / 100,
+          cagr: isNaN(cagr) ? 0 : Math.round(cagr * 100) / 100,
         });
       } catch (err) {
         console.error(`Window ${windows.length + 1} failed:`, err);
@@ -92,7 +96,7 @@ export async function POST(request: NextRequest) {
           startDate: windowCandles[0].date,
           endDate: windowCandles[windowCandles.length - 1].date,
           totalTrades: 0, winRate: 0, profitFactor: 0, sharpeRatio: 0,
-          maxDrawdown: 0, finalCapital: config.liveCapital, cagr: 0,
+          maxDrawdown: 0, finalCapital: config.liveCapital || 100000, cagr: 0,
         });
       }
 
@@ -100,8 +104,30 @@ export async function POST(request: NextRequest) {
       if (Date.now() - startTime > 4 * 60 * 1000) break;
     }
 
+    // Fallback if no windows formed: slice allCandles into 3 equal windows
+    if (windows.length === 0 && allCandles.length >= 15) {
+      const chunkSize = Math.floor(allCandles.length / 3);
+      for (let i = 0; i < 3; i++) {
+        const sub = allCandles.slice(i * chunkSize, (i + 1) * chunkSize);
+        if (sub.length < 5) continue;
+        const result = runBacktest(symbol, sub, niftyCandles, config);
+        windows.push({
+          windowIndex: i + 1,
+          startDate: sub[0].date,
+          endDate: sub[sub.length - 1].date,
+          totalTrades: result.stats.totalTrades,
+          winRate: result.stats.winRate,
+          profitFactor: result.stats.profitFactor,
+          sharpeRatio: result.stats.sharpeRatio,
+          maxDrawdown: result.stats.maxDrawdown,
+          finalCapital: result.stats.finalCapital,
+          cagr: 0,
+        });
+      }
+    }
+
     if (windows.length === 0) {
-      return NextResponse.json({ success: false, error: 'No valid windows produced results' }, { status: 500 });
+      return NextResponse.json({ success: false, error: 'Insufficient candles to form walk-forward windows' }, { status: 400 });
     }
 
     // Compute consistency metrics

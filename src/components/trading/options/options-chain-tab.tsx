@@ -299,5 +299,3 @@ export function OptionChainTab({ selectedSymbol, onSymbolChange }: OptionChainTa
     </div>
   );
 }
-
-export { OptionChainTab };

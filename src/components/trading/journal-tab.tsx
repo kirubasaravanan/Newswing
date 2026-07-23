@@ -273,10 +273,15 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <h2 className="text-lg font-bold flex items-center gap-2">
-          <BookOpen className="h-5 w-5 text-primary" />
-          Paper Trade Journal
-        </h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-bold flex items-center gap-2">
+            <BookOpen className="h-5 w-5 text-primary" />
+            Automated PMS Execution Journal & Audit Log
+          </h2>
+          <Badge className="bg-indigo-500/20 text-indigo-400 border-indigo-500/30 gap-1 font-mono text-[10px]">
+            <Shield className="h-3 w-3" /> 100% Autonomous Engine Executions
+          </Badge>
+        </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => {
             window.open('/api/export', '_blank');
@@ -287,80 +292,6 @@ export function JournalTab({ prefillTrade, onPrefillConsumed }: JournalTabProps)
           </Button>
         </div>
       </div>
-
-      {/* New Trade Dialog (outside header flex) */}
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogTrigger asChild>
-          <Button className="gap-2">
-            <Plus className="h-4 w-4" />
-            New Trade
-          </Button>
-        </DialogTrigger>
-          <DialogContent className="max-w-md">
-            <DialogHeader>
-              <DialogTitle>Log Paper Trade</DialogTitle>
-            </DialogHeader>
-            <div className="grid gap-4 py-2">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label className="text-xs">Symbol *</Label>
-                  <Input value={form.symbol} onChange={e => setForm(f => ({ ...f, symbol: e.target.value }))} placeholder="RELIANCE" className="h-9 text-sm" />
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-xs">Direction</Label>
-                  <Select value={form.direction} onValueChange={v => setForm(f => ({ ...f, direction: v }))}>
-                    <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="LONG">LONG</SelectItem>
-                      <SelectItem value="SHORT">SHORT</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                <div className="space-y-2">
-                  <Label className="text-xs">Entry Date</Label>
-                  <Input type="date" value={form.entryDate} onChange={e => setForm(f => ({ ...f, entryDate: e.target.value }))} className="h-9 text-sm" />
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-xs">Entry Price *</Label>
-                  <Input type="number" value={form.entryPrice} onChange={e => setForm(f => ({ ...f, entryPrice: e.target.value }))} placeholder="0.00" className="h-9 text-sm" />
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-xs">Quantity *</Label>
-                  <Input type="number" value={form.qty} onChange={e => setForm(f => ({ ...f, qty: e.target.value }))} placeholder="0" className="h-9 text-sm" />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label className="text-xs">Stop Loss *</Label>
-                  <Input type="number" value={form.stopLoss} onChange={e => setForm(f => ({ ...f, stopLoss: e.target.value }))} placeholder="0.00" className="h-9 text-sm" />
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-xs">Target Price</Label>
-                  <Input type="number" value={form.targetPrice} onChange={e => setForm(f => ({ ...f, targetPrice: e.target.value }))} placeholder="0.00" className="h-9 text-sm" />
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label className="text-xs">Tags (comma separated)</Label>
-                <Input value={form.tags} onChange={e => setForm(f => ({ ...f, tags: e.target.value }))} placeholder="screener, breakout" className="h-9 text-sm" />
-              </div>
-              <div className="space-y-2">
-                <Label className="text-xs">Notes</Label>
-                <Textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} placeholder="Why did you take this trade?" className="text-sm min-h-[60px]" />
-              </div>
-            </div>
-            <DialogFooter>
-              <DialogClose asChild>
-                <Button variant="outline">Cancel</Button>
-              </DialogClose>
-              <Button onClick={openChecklist} disabled={!form.symbol || !form.entryPrice || !form.qty || !form.stopLoss}>
-                <Shield className="h-4 w-4 mr-2" />
-                Quality Check & Add
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

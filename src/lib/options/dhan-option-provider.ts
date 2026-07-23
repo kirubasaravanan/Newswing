@@ -211,6 +211,16 @@ async function getDhanScrips(): Promise<DhanScrip[]> {
     scripCache = parsed;
     scripFetchedAt = now;
     console.log(`[ScripMaster] ✅ Downloaded and cached ${parsed.length.toLocaleString()} option contracts`);
+
+    // Dispatch Discord Alert for Scrip Master Update
+    try {
+      const { sendDiscordScripMasterUpdate } = await import('@/lib/notifications/discord');
+      const timeStr = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' });
+      await sendDiscordScripMasterUpdate(parsed.length, `${timeStr} IST`);
+    } catch (alertErr) {
+      console.warn('[ScripMaster Alert] Non-blocking alert error:', alertErr);
+    }
+
     return scripCache;
   } catch (err) {
     console.error('[DhanOptionProvider] Failed to fetch Dhan scrip master:', err);
@@ -281,7 +291,7 @@ export async function fetchDhanOptionChain(
     // For each strike: prefer NSE scrips if available, else fall back to BSE
     const candidateScrips: DhanScrip[] = [];
     for (const [, scrips] of candidateByStrike) {
-      const nseScrips = scrips.filter(s => s.exchange === 'NSE');
+      const nseScrips = scrips.filter((s) => s.exchange === 'NSE');
       const chosen = nseScrips.length > 0 ? nseScrips : scrips;
       candidateScrips.push(...chosen);
     }
@@ -345,13 +355,13 @@ export async function fetchDhanOptionChain(
 
     if (quotesMap.size === 0) return null;
 
+    const midAtmIndex = Math.floor(allStrikes.length / 2);
+
     // Fallback: use mid-strike value if live spot not found in response
     if (underlyingPrice === 0) {
       underlyingPrice = allStrikes[midAtmIndex] || 0;
       console.warn(`[DhanOptionProvider] Spot not found for ${symUpper}, using mid-strike ${underlyingPrice} as estimate`);
     }
-
-
 
     // Filter scrips and build full quotes map for all scrips in this expiry
     const strikesMap = new Map<number, { ceScrip?: DhanScrip; peScrip?: DhanScrip }>();
@@ -366,8 +376,8 @@ export async function fetchDhanOptionChain(
     const rawRows: { strike: number; ceLtp: number; peLtp: number; ceOI: number; peOI: number; ceVol: number; peVol: number; ceQuote: any; peQuote: any }[] = [];
     for (const strike of Array.from(strikesMap.keys()).sort((a, b) => a - b)) {
       const pair = strikesMap.get(strike)!;
-      const ceQuote = pair.ceScrip ? quotesMap.get(parseInt(pair.ceScrip.securityId, 10)) : null;
-      const peQuote = pair.peScrip ? quotesMap.get(parseInt(pair.peScrip.securityId, 10)) : null;
+      const ceQuote = pair.ceScrip ? quotesMap.get(pair.ceScrip.securityId) : null;
+      const peQuote = pair.peScrip ? quotesMap.get(pair.peScrip.securityId) : null;
 
       const ceLtp = ceQuote?.last_price || 0;
       const peLtp = peQuote?.last_price || 0;

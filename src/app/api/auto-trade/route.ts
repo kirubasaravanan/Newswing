@@ -35,6 +35,7 @@ import {
   type CostBreakdown,
 } from '@/lib/trading/transaction-costs';
 import {
+  sendDiscordSignal,
   sendDiscordEquitySignal,
   sendDiscordEquityExit,
   sendDiscordEquityPartialBook,
@@ -596,12 +597,17 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
         timestamp: new Date().toISOString(),
       };
 
-      // ── v3: Post Discord BEFORE DB write (real-time validation) ────────
+      // ── ALWAYS Post Discord Signal Alert for ALL 399 NSE eligible setups ──
       try {
         await sendDiscordEquitySignal(discordSignal);
       } catch (discordErr) {
-        console.warn('[Discord] Signal send failed (non-blocking):', discordErr);
+        console.warn('[Discord] Equity signal alert failed (non-blocking):', discordErr);
       }
+
+      // ── Paper Trade Creation: Restricted to Top 7 Swing Watchlist Only ─────
+      const TOP_7_WATCHLIST = ['TATAELXSI', 'DEEPAKNTR', 'ADANIENT', 'TATAPOWER', 'HINDCOPPER', 'VEDL', 'SUZLON'];
+      const isEligibleForPaperTrade = TOP_7_WATCHLIST.includes(stock.symbol.toUpperCase());
+      if (!isEligibleForPaperTrade) continue;
 
       const trade = await db.paperTrade.create({
         data: {
@@ -656,7 +662,8 @@ async function autoCheckExits() {
 
   for (const trade of openTrades) {
     try {
-      const { price: cp } = await getCurrentPrice(trade.symbol);
+      const { getContractCurrentPrice } = await import('@/lib/trading/data-provider');
+      const cp = await getContractCurrentPrice(trade.symbol, trade.entryPrice);
       if (cp <= 0) { holding.push({ symbol: trade.symbol, error: 'Price unavailable' }); continue; }
 
       const days = Math.floor((Date.now() - new Date(trade.entryDate).getTime()) / 86400000);
@@ -935,7 +942,28 @@ async function runSchedulerTick() {
 }
 
 // ── Options Auto-Trade Functions ────────────────────────
-const OPTIONS_ENTRY_LOT_SIZE = 1; // 1 lot = N qty (varies by index/stock)
+export function getOptionLotSize(symbol: string): number {
+  const sym = symbol.toUpperCase();
+  if (sym === 'NIFTY' || sym === 'NIFTY50') return 25;
+  if (sym === 'BANKNIFTY') return 15;
+  if (sym === 'FINNIFTY') return 25;
+  if (sym === 'MIDCPNIFTY') return 50;
+
+  // Stock options official exchange lot sizes
+  if (sym === 'RELIANCE') return 250;
+  if (sym === 'SBIN') return 750;
+  if (sym === 'LT') return 150;
+  if (sym === 'TCS') return 175;
+  if (sym === 'INFY') return 400;
+  if (sym === 'HDFCBANK') return 550;
+  if (sym === 'ICICIBANK') return 700;
+  if (sym === 'BAJFINANCE') return 125;
+  if (sym === 'TATAMOTORS') return 550;
+  if (sym === 'BHARTIARTL') return 475;
+  if (sym === 'HAL') return 300;
+  
+  return 100;
+}
 
 async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: number = 40): Promise<{
   signalsGenerated: number; entriesCreated: number; errors: string[];
@@ -948,13 +976,12 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
     const today = new Date().toISOString().split('T')[0];
     const lastOptReset = (await db.appSettings.findUnique({ where: { key: 'opt_lastResetDate' } }))?.value;
     if (lastOptReset !== today) {
-      await setSchedulerKV('opt_todayEntries', '0');
-      await setSchedulerKV('opt_todayExits', '0');
-      await setSchedulerKV('opt_todayPnl', '0');
-      await setSchedulerKV('opt_lastResetDate', today);
+      await db.appSettings.upsert({ where: { key: 'opt_todayEntries' }, update: { value: '0' }, create: { key: 'opt_todayEntries', value: '0' } });
+      await db.appSettings.upsert({ where: { key: 'opt_lastResetDate' }, update: { value: today }, create: { key: 'opt_lastResetDate', value: today } });
     }
 
-    const todayEntries = parseInt((await db.appSettings.findUnique({ where: { key: 'opt_todayEntries' } }))?.value || '0');
+    const todayEntriesStr = (await db.appSettings.findUnique({ where: { key: 'opt_todayEntries' } }))?.value || '0';
+    let todayEntries = parseInt(todayEntriesStr, 10);
 
     // Max 30 options entries per day
     if (todayEntries >= 30) {
@@ -964,19 +991,17 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
     // Run the options scanner across full F&O universe
     const scanResult = await scanOptionsUniverse(35, minScore); // Get up to 35 signals
 
-    // Filter: take signals with confidence >= minConfidence (default 55)
-    const highConfidence = scanResult.signals.filter(s => s.confidence >= minConfidence);
-    const maxNewEntries = Math.min(highConfidence.length, 30 - todayEntries);
+    const PAPER_TRADE_OPTIONS_UNIVERSE = [
+      'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'RELIANCE', 'LT', 'SBIN',
+      'TATAMOTORS', 'BAJFINANCE', 'HAL', 'BHARTIARTL', 'INFY', 'TCS', 'HDFCBANK'
+    ];
 
-    for (let i = 0; i < maxNewEntries; i++) {
+    const highConfidence = scanResult.signals.filter(s => s.confidence >= minConfidence);
+
+    for (let i = 0; i < highConfidence.length; i++) {
       const sig = highConfidence[i];
       const tradeSymbol = `${sig.symbol}_${sig.direction}_${sig.strike}_${sig.expiry}`;
-
-      // Check if already in an open position for this exact contract
-      const existing = await db.paperTrade.findFirst({
-        where: { symbol: tradeSymbol, status: 'OPEN', tags: 'options' },
-      });
-      if (existing) continue;
+      const lotSize = getOptionLotSize(sig.symbol);
 
       // ── Phase 3: Fetch REAL live option premium from DhanHQ Option Chain ───────
       let premium = 0;
@@ -990,17 +1015,49 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
           }
         }
       } catch (err) {
-        console.warn(`[Options Auto-Trade] Real LTP fetch failed for ${sig.symbol} ${sig.strike} ${sig.direction}, fallback to formula:`, err);
+        console.warn(`[Options Auto-Trade] Real LTP fetch failed for ${sig.symbol} ${sig.strike} ${sig.direction}:`, err);
       }
 
-      if (premium <= 0) {
-        console.warn(`[Options Auto-Trade] Skipping trade for ${sig.symbol} ${sig.strike} ${sig.direction} — live DhanHQ premium unavailable`);
-        continue;
-      }
+      if (premium <= 0) continue;
 
-      // Intraday options rules: SL = -25% of premium, TP = +50% of premium
       const sl = Math.round(premium * 0.75 * 100) / 100; // -25% SL
       const tp = Math.round(premium * 1.50 * 100) / 100; // +50% TP
+      const totalCapNeeded = premium * lotSize;
+
+      // ── ALWAYS Send Discord Signal Alert for ALL eligible F&O Setups ──────
+      try {
+        await sendDiscordSignal({
+          symbol: sig.symbol,
+          strike: sig.strike,
+          optionType: sig.direction,
+          expiry: sig.expiry,
+          spotPrice: sig.entryPrice,
+          premium,
+          stopLoss: sl,
+          takeProfit: tp,
+          lotSize,
+          lots: 1,
+          totalCapital: totalCapNeeded,
+          confluenceScore: sig.score,
+          setupType: `Score:${sig.score}/100`,
+          direction: sig.direction,
+          engine: 'OPTIONS',
+          dataSource: 'DhanHQ Broker v2 API',
+          timestamp: new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }),
+        });
+      } catch (discordErr) {
+        console.warn('[Discord Options Signal] Alert dispatch failed:', discordErr);
+      }
+
+      // ── Paper Trade Creation: Restricted to Top 10 F&O Universe Only ──────
+      const isEligibleForPaperTrade = PAPER_TRADE_OPTIONS_UNIVERSE.includes(sig.symbol.toUpperCase());
+      if (!isEligibleForPaperTrade || todayEntries >= 30) continue;
+
+      // Check if already in an open position for this exact contract
+      const existing = await db.paperTrade.findFirst({
+        where: { symbol: tradeSymbol, status: 'OPEN', tags: 'options' },
+      });
+      if (existing) continue;
 
       await db.paperTrade.create({
         data: {
@@ -1009,7 +1066,7 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
           direction: sig.direction,
           entryDate: new Date(),
           entryPrice: premium,
-          qty: OPTIONS_ENTRY_LOT_SIZE,
+          qty: lotSize,
           stopLoss: sl,
           targetPrice: tp,
           status: 'OPEN',
@@ -1025,10 +1082,14 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
             rsi: sig.rsi,
             adx: sig.adx,
             atrPct: sig.atrPct,
-            realLtpFetched: premium > 0,
+            realLtpFetched: true,
           }),
         },
       });
+
+      todayEntries++;
+      entriesCreated++;
+      await db.appSettings.upsert({ where: { key: 'opt_todayEntries' }, update: { value: String(todayEntries) }, create: { key: 'opt_todayEntries', value: String(todayEntries) } });
 
       // Log the entry
       await db.autoTradeLog.create({

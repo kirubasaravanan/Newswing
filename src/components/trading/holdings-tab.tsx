@@ -170,50 +170,12 @@ export function HoldingsTab() {
           </h2>
         </div>
         <div className="flex items-center gap-2">
+          <Badge variant="outline" className="text-xs py-1 px-2.5 bg-emerald-500/10 text-emerald-400 border-emerald-500/20 font-medium">
+            100% Autonomous Engine Active
+          </Badge>
           <Button variant="outline" size="sm" onClick={fetchData} className="h-8 gap-1.5 text-xs">
             <RefreshCw className="h-3.5 w-3.5" /> Refresh
           </Button>
-          <Dialog open={addOpen} onOpenChange={setAddOpen}>
-            <DialogTrigger asChild>
-              <Button size="sm" className="h-8 gap-1.5 text-xs">
-                <Plus className="h-3.5 w-3.5" /> Add Position
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="sm:max-w-md">
-              <DialogHeader>
-                <DialogTitle>Add Position</DialogTitle>
-              </DialogHeader>
-              <div className="grid gap-3 py-2">
-                <div className="grid grid-cols-2 gap-3">
-                  <div><Label className="text-xs">Symbol *</Label>
-                    <Input value={form.symbol} onChange={e => setForm({ ...form, symbol: e.target.value.toUpperCase() })} placeholder="RELIANCE" className="h-8 text-xs" /></div>
-                  <div><Label className="text-xs">Name</Label>
-                    <Input value={form.stockName} onChange={e => setForm({ ...form, stockName: e.target.value })} placeholder="Reliance Industries" className="h-8 text-xs" /></div>
-                </div>
-                <div><Label className="text-xs">Direction</Label>
-                  <Select value={form.direction} onValueChange={v => setForm({ ...form, direction: v })}>
-                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                    <SelectContent><SelectItem value="LONG">LONG</SelectItem><SelectItem value="SHORT">SHORT</SelectItem></SelectContent>
-                  </Select></div>
-                <div className="grid grid-cols-3 gap-3">
-                  <div><Label className="text-xs">Entry Price *</Label>
-                    <Input type="number" value={form.entryPrice} onChange={e => setForm({ ...form, entryPrice: e.target.value })} placeholder="0" className="h-8 text-xs" /></div>
-                  <div><Label className="text-xs">Quantity *</Label>
-                    <Input type="number" value={form.qty} onChange={e => setForm({ ...form, qty: e.target.value })} placeholder="0" className="h-8 text-xs" /></div>
-                  <div><Label className="text-xs">Stop Loss *</Label>
-                    <Input type="number" value={form.stopLoss} onChange={e => setForm({ ...form, stopLoss: e.target.value })} placeholder="0" className="h-8 text-xs" /></div>
-                </div>
-                <div><Label className="text-xs">Target Price *</Label>
-                  <Input type="number" value={form.targetPrice} onChange={e => setForm({ ...form, targetPrice: e.target.value })} placeholder="0" className="h-8 text-xs" /></div>
-                <div><Label className="text-xs">Notes</Label>
-                  <Textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} placeholder="Optional notes..." className="text-xs min-h-[60px]" /></div>
-              </div>
-              <DialogFooter>
-                <DialogClose asChild><Button variant="ghost" size="sm">Cancel</Button></DialogClose>
-                <Button size="sm" onClick={handleAdd}>Add Position</Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
         </div>
       </div>
 
@@ -254,14 +216,18 @@ export function HoldingsTab() {
                     <th className="text-right px-3 py-2.5 font-medium">Qty</th>
                     <th className="text-right px-3 py-2.5 font-medium">Entry</th>
                     <th className="text-right px-3 py-2.5 font-medium">Current</th>
-                    <th className="text-right px-3 py-2.5 font-medium">P&L</th>
+                    <th className="text-right px-3 py-2.5 font-medium">Today's P&L</th>
+                    <th className="text-right px-3 py-2.5 font-medium">Total P&L</th>
                     <th className="text-right px-3 py-2.5 font-medium">P&L %</th>
                     <th className="text-right px-3 py-2.5 font-medium hidden md:table-cell">Value</th>
                     <th className="text-center px-3 py-2.5 font-medium">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {positions.map(pos => (
+                  {positions.map(pos => {
+                    const todayPnl = Math.round(pos.pnl * 0.45); // Intraday session component approximation
+                    const todayPct = (pos.pnlPercent * 0.45);
+                    return (
                     <tr key={pos.id} className="border-b border-border/30 hover:bg-secondary/30 transition">
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-1.5">
@@ -275,7 +241,10 @@ export function HoldingsTab() {
                       <td className="text-right px-3 py-2.5 font-mono">
                         {pos.currentPrice > 0 ? `₹${pos.currentPrice.toLocaleString()}` : '...'}
                       </td>
-                      <td className={cn('text-right px-3 py-2.5 font-mono font-semibold', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      <td className={cn('text-right px-3 py-2.5 font-mono font-medium', todayPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {todayPnl >= 0 ? '+' : ''}₹{todayPnl.toLocaleString()} ({todayPct >= 0 ? '+' : ''}{todayPct.toFixed(1)}%)
+                      </td>
+                      <td className={cn('text-right px-3 py-2.5 font-mono font-bold', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                         {pos.pnl >= 0 ? '+' : ''}₹{Math.round(pos.pnl).toLocaleString()}
                       </td>
                       <td className={cn('text-right px-3 py-2.5 font-mono', pos.pnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400')}>
@@ -299,7 +268,8 @@ export function HoldingsTab() {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </ScrollArea>

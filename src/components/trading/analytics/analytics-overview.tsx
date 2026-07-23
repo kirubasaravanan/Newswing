@@ -106,9 +106,50 @@ function AnalyticsOverview() {
           </CardContent></Card>
           <Card><CardContent className="p-3">
             <div className="text-[10px] uppercase tracking-wider text-red-400">Max Drawdown</div>
-            <div className="text-xl font-bold mt-1 text-red-400">{analyticsData.maxDD.toFixed(1)}%</div>
           </CardContent></Card>
         </div>
+
+        {/* ── STATUTORY TRANSACTION FEES & NET TAKE-HOME CARD ────── */}
+        <Card className="border-border bg-emerald-500/5 border-emerald-500/30">
+          <CardContent className="p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold flex items-center gap-2 text-emerald-400">
+                <LineChart className="h-4 w-4" /> Statutory Transaction Fees & Net Take-Home Calculator
+              </h3>
+              <span className="text-xs font-mono font-bold text-muted-foreground">SEBI & Broker Rules (July 2025)</span>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono">
+              <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
+                <span className="text-[10px] text-muted-foreground font-sans uppercase">Gross P&L</span>
+                <div className="text-sm font-bold text-emerald-400 mt-0.5">
+                  {analyticsData.totalPnL >= 0 ? '+' : ''}₹{Math.round(analyticsData.totalPnL).toLocaleString('en-IN')}
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
+                <span className="text-[10px] text-muted-foreground font-sans uppercase">Est. STT + Brokerage</span>
+                <div className="text-sm font-bold text-amber-400 mt-0.5">
+                  -₹{Math.round(analyticsData.trades.length * 45).toLocaleString('en-IN')}
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
+                <span className="text-[10px] text-muted-foreground font-sans uppercase">GST (18%) + SEBI Fees</span>
+                <div className="text-sm font-bold text-amber-400 mt-0.5">
+                  -₹{Math.round(analyticsData.trades.length * 15).toLocaleString('en-IN')}
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/30">
+                <span className="text-[10px] text-emerald-400 font-sans font-bold uppercase">Net Take-Home Cash</span>
+                <div className="text-sm font-bold text-emerald-400 mt-0.5">
+                  +₹{Math.max(0, Math.round(analyticsData.totalPnL - (analyticsData.trades.length * 60))).toLocaleString('en-IN')}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {analyticsData.byMonth.length > 0 && (

@@ -187,19 +187,23 @@ export function DashboardTab() {
             <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
               <span className="text-[10px] text-muted-foreground uppercase">Capital Wallet</span>
               <div className="text-base font-bold font-mono text-amber-400 mt-0.5">₹3,00,000</div>
-              <div className="text-[9px] text-muted-foreground">Fixed 8-10 Contracts</div>
+              <div className="text-[9px] text-muted-foreground">Live Deployed: ₹{Math.round(wallet?.deployed || 0).toLocaleString()}</div>
             </div>
 
-            <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/20">
-              <span className="text-[10px] text-emerald-400 uppercase font-semibold">5-Yr Compounded Bank PnL</span>
-              <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">+₹24,22,464</div>
-              <div className="text-[9px] text-emerald-400/80 font-mono">+1,515% ROI (Max DD 9.9%)</div>
+            <div className={cn('rounded-lg p-2.5 border', (s?.realizedPnl || 0) >= 0 ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-red-500/10 border-red-500/20')}>
+              <span className="text-[10px] uppercase font-semibold text-muted-foreground">Realized PnL</span>
+              <div className={cn('text-base font-bold font-mono mt-0.5', (s?.realizedPnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                {(s?.realizedPnl || 0) >= 0 ? '+' : ''}₹{Math.round(s?.realizedPnl || 0).toLocaleString()}
+              </div>
+              <div className="text-[9px] text-muted-foreground font-mono">Closed Trades</div>
             </div>
 
-            <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
-              <span className="text-[10px] text-muted-foreground uppercase">Win Rate & Rule</span>
-              <div className="text-base font-bold font-mono text-foreground mt-0.5">62.0%</div>
-              <div className="text-[9px] text-purple-400 font-semibold">3:15 PM EOD Square-off</div>
+            <div className={cn('rounded-lg p-2.5 border', (s?.unrealizedPnl || 0) >= 0 ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-red-500/10 border-red-500/20')}>
+              <span className="text-[10px] uppercase font-semibold text-muted-foreground">Unrealized PnL</span>
+              <div className={cn('text-base font-bold font-mono mt-0.5', (s?.unrealizedPnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                {(s?.unrealizedPnl || 0) >= 0 ? '+' : ''}₹{Math.round(s?.unrealizedPnl || 0).toLocaleString()}
+              </div>
+              <div className="text-[9px] text-purple-400 font-semibold">3:10 PM Auto-Square Off</div>
             </div>
           </div>
         </div>
@@ -218,19 +222,21 @@ export function DashboardTab() {
             <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
               <span className="text-[10px] text-muted-foreground uppercase">Capital Wallet</span>
               <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">₹3,00,000</div>
-              <div className="text-[9px] text-muted-foreground">Top 7 Weighted %</div>
+              <div className="text-[9px] text-muted-foreground">Top 7 Leader Allocation</div>
             </div>
 
-            <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/20">
-              <span className="text-[10px] text-emerald-400 uppercase font-semibold">5-Yr Net Bank PnL</span>
-              <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">+₹7,84,250</div>
-              <div className="text-[9px] text-emerald-400/80 font-mono">+161.4% ROI (Weekly Slot Fill Active)</div>
+            <div className={cn('rounded-lg p-2.5 border', totalPnl >= 0 ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-red-500/10 border-red-500/20')}>
+              <span className="text-[10px] uppercase font-semibold text-muted-foreground">Net Portfolio PnL</span>
+              <div className={cn('text-base font-bold font-mono mt-0.5', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                {totalPnl >= 0 ? '+' : ''}₹{Math.round(totalPnl).toLocaleString()}
+              </div>
+              <div className="text-[9px] text-emerald-400/80 font-mono">Live Swing Positions</div>
             </div>
 
             <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
               <span className="text-[10px] text-muted-foreground uppercase">Exit Strategy</span>
-              <div className="text-xs font-bold text-foreground mt-0.5">100% EMA10 Trail</div>
-              <div className="text-[9px] text-emerald-400">4.6 Days Avg Hold</div>
+              <div className="text-xs font-bold text-foreground mt-0.5">100% Dynamic Trail</div>
+              <div className="text-[9px] text-emerald-400 font-semibold">Weekly Slot Fill Active</div>
             </div>
           </div>
         </div>
@@ -260,8 +266,8 @@ export function DashboardTab() {
             <div className={cn('text-2xl font-bold font-mono', totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
               {totalPnl >= 0 ? '+' : ''}₹{Math.round(totalPnl).toLocaleString()}
             </div>
-            <div className={cn('text-xs mt-1', s?.returnPct >= 0 ? 'text-emerald-400/70' : 'text-red-400/70')}>
-              {s ? `${s.returnPct >= 0 ? '+' : ''}${s.returnPct.toFixed(2)}% overall` : ''}
+            <div className={cn('text-xs mt-1', (s?.returnPct ?? 0) >= 0 ? 'text-emerald-400/70' : 'text-red-400/70')}>
+              {s && s.returnPct !== undefined ? `${s.returnPct >= 0 ? '+' : ''}${s.returnPct.toFixed(2)}% overall` : ''}
             </div>
           </CardContent>
         </Card>

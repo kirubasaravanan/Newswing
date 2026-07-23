@@ -19,8 +19,18 @@ export async function POST(request: NextRequest) {
 
     // Fetch real 5-year historical OHLCV candles
     const stockRes = await getHistoricalData(symbol, days);
-    const candles = stockRes.data || [];
+    let candles = stockRes.data || [];
     const dataSource = stockRes.source || 'dhan';
+
+    // Slice candles if custom date range is provided
+    if (body.startDate && body.endDate) {
+      const start = new Date(body.startDate).getTime();
+      const end = new Date(body.endDate).getTime();
+      candles = candles.filter(c => {
+        const t = new Date(c.date).getTime();
+        return t >= start && t <= end;
+      });
+    }
 
     const result = runBacktest(symbol, candles, config);
 

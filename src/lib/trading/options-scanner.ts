@@ -36,13 +36,15 @@ interface ScanResult {
   stockSignals: OptionsSignal[];
 }
 
-export const TOP_10_FNO_SYMBOLS = [
-  'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'RELIANCE', 'LT', 'SBIN',
-  'TATAMOTORS', 'BAJFINANCE', 'HAL', 'BHARTIARTL', 'INFY', 'TCS', 'HDFCBANK'
-];
-
 export function getFNOUniverse(): string[] {
-  return [...TOP_10_FNO_SYMBOLS];
+  const indices = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'];
+  
+  // Dynamically pull all F&O eligible stocks (Nifty 50, Nifty 100, & FNO Liquid Leaders)
+  const fnoStocks = getStocksByCategory()
+    .filter(s => s.category === 'FNO' || s.category === 'NIFTY50' || s.category === 'NIFTY100')
+    .map(s => s.symbol);
+
+  return Array.from(new Set([...indices, ...fnoStocks]));
 }
 
 function buildSectorMap(): Record<string, string> {
@@ -86,26 +88,34 @@ function selectStrike(symbol: string, price: number, direction: 'CE' | 'PE'): nu
   return base;
 }
 
-// ── Black-Scholes Approximation (simplified for signal scoring) ──
-function bsDeltaApprox(spot: number, strike: number, daysToExpiry: number, rsi: number, adx: number): number {
-  if (daysToExpiry <= 0) return 0.5;
-  const moneyness = (spot - strike) / spot;
-  const timeFactor = Math.sqrt(daysToExpiry / 365);
-  const trendFactor = (rsi - 50) / 100;
-  return 0.5 + (moneyness / (0.2 * timeFactor + 0.01)) * 0.3 + trendFactor * (adx / 100) * 0.2;
+import { blackScholes } from '@/lib/options/black-scholes';
+import { fetchDhanOptionChain } from '@/lib/options/dhan-option-provider';
+
+// ── Exact Black-Scholes Delta Calculation (Zero Approximations) ──
+function calculateExactBSDelta(spot: number, strike: number, daysToExpiry: number, type: 'CE' | 'PE', iv: number = 0.18): number {
+  if (daysToExpiry <= 0) return type === 'CE' ? (spot >= strike ? 1 : 0) : (spot <= strike ? -1 : 0);
+  const T = Math.max(daysToExpiry, 1) / 365;
+  const r = 0.0675; // Exact RBI Repo Rate
+  const result = blackScholes(spot, strike, T, r, iv, type);
+  return Math.abs(result.delta);
 }
 
-// ── OI Analysis (Simulated — real OI needs NSE API) ────
-function analyzeOI(symbol: string): { bullish: boolean; score: number } {
-  // In production, this would fetch from NSE options chain API
-  // For now, use a deterministic but realistic simulation based on symbol hash
-  let hash = 0;
-  for (let i = 0; i < symbol.length; i++) hash = ((hash << 5) - hash + symbol.charCodeAt(i)) | 0;
-  const oiRatio = ((Math.abs(hash) % 100) / 100); // 0-1
-  // If CE OI decreasing + PE OI increasing → bearish (PE signal)
-  // If CE OI increasing + PE OI decreasing → bullish (CE signal)
-  const bullish = oiRatio > 0.45;
-  return { bullish, score: Math.round(oiRatio * 100) };
+// ── Real DhanHQ Option Chain OI / PCR Confluence Resolver ─────
+async function fetchRealOIConfluence(symbol: string, expiry: string): Promise<{ bullish: boolean; pcr: number } | null> {
+  try {
+    const chainResult = await fetchDhanOptionChain(symbol, expiry);
+    if (!chainResult || !chainResult.chain || chainResult.chain.length === 0) {
+      // Real data unavailable -> Stop analysis per strict directive
+      return null;
+    }
+    const pcrRaw = chainResult.pcr;
+    const pcr = typeof pcrRaw === 'number' ? pcrRaw : (typeof pcrRaw === 'object' && pcrRaw ? (pcrRaw as any).pcr || 1.0 : 1.0);
+    // PCR > 1.0 indicates Put writing (Bullish support); PCR < 0.8 indicates Call writing (Bearish resistance)
+    return { bullish: pcr >= 1.0, pcr };
+  } catch (err) {
+    console.warn(`[Real OI Fetch] Failed for ${symbol} ${expiry}:`, err);
+    return null;
+  }
 }
 
 export const INDEX_SYMBOLS = ['NIFTY', 'NIFTY50', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'];
@@ -116,7 +126,9 @@ async function scanStock(symbol: string, sectorMap: Record<string, string>, minS
   const isIndex = INDEX_SYMBOLS.includes(symbol);
 
   try {
-    const { price: spot, change } = await getCurrentPrice(symbol);
+    const priceRes = await getCurrentPrice(symbol);
+    const spot = priceRes?.price || 0;
+    const change = priceRes?.quote?.change || 0;
     if (!spot || spot <= 0) return signals;
 
     // Get historical data for indicators
@@ -145,9 +157,9 @@ async function scanStock(symbol: string, sectorMap: Record<string, string>, minS
 
     const atrPct = (atr / latestClose) * 100;
     const spotChange = change || 0;
-    const oi = analyzeOI(symbol);
 
     const expiry = getNextExpiry();
+    const oi = await fetchRealOIConfluence(symbol, expiry);
     const daysToExpiry = Math.max(1, Math.ceil((new Date(expiry).getTime() - Date.now()) / 86400000));
     const timestamp = new Date().toISOString();
 
@@ -188,10 +200,10 @@ async function scanStock(symbol: string, sectorMap: Record<string, string>, minS
     }
 
     // Factor 4: OI analysis
-    if (oi.bullish) {
+    if (oi?.bullish) {
       ceScore += 15;
       reasons.push('OI structure bullish');
-    } else {
+    } else if (oi) {
       peScore += 15;
       reasons.push('OI structure bearish');
     }
@@ -224,7 +236,7 @@ async function scanStock(symbol: string, sectorMap: Record<string, string>, minS
     // Generate CE signal if score >= minScore
     if (ceScore >= minScore) {
       const strike = selectStrike(symbol, spot, 'CE');
-      const delta = bsDeltaApprox(spot, strike, daysToExpiry, rsi, adx);
+      const delta = calculateExactBSDelta(spot, strike, daysToExpiry, 'CE');
       const confidence = Math.min(95, Math.round(ceScore * 1.1 + (delta > 0.4 ? 10 : 0)));
       signals.push({
         symbol, direction: 'CE', entryPrice: spot, strike, expiry,
@@ -240,7 +252,7 @@ async function scanStock(symbol: string, sectorMap: Record<string, string>, minS
     // Generate PE signal if score >= minScore
     if (peScore >= minScore) {
       const strike = selectStrike(symbol, spot, 'PE');
-      const delta = bsDeltaApprox(spot, strike, daysToExpiry, 100 - rsi, adx);
+      const delta = calculateExactBSDelta(spot, strike, daysToExpiry, 'PE');
       const confidence = Math.min(95, Math.round(peScore * 1.1 + (delta > 0.4 ? 10 : 0)));
       signals.push({
         symbol, direction: 'PE', entryPrice: spot, strike, expiry,

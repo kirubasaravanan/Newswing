@@ -173,19 +173,36 @@ export function OptionsTab() {
             </div>
 
             <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/20">
-              <span className="text-[10px] text-emerald-400 uppercase font-semibold">Take Profit (+50%)</span>
+              <span className="text-[10px] text-emerald-400 uppercase font-semibold">Target Price (+50%)</span>
               <div className="text-sm font-bold font-mono text-emerald-400 mt-0.5">
                 ₹{liveTp > 0 ? liveTp.toFixed(2) : '—'}
               </div>
-              <div className="text-[10px] text-muted-foreground">Target Lock</div>
+              <div className="text-[10px] text-muted-foreground font-mono">Exit Rule: Auto Square-off</div>
             </div>
 
             <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
-              <span className="text-[10px] text-muted-foreground uppercase">Spot Price</span>
-              <div className="text-sm font-bold font-mono text-indigo-400 mt-0.5">
-                ₹{liveChain?.underlyingPrice ? liveChain.underlyingPrice.toFixed(2) : '—'}
-              </div>
-              <div className="text-[10px] text-muted-foreground">Live Feed</div>
+              <span className="text-[10px] text-muted-foreground uppercase">Risk-Reward Ratio</span>
+              <div className="text-sm font-bold font-mono text-emerald-400 mt-0.5">2.0x (1:2 R:R)</div>
+              <div className="text-[10px] text-muted-foreground font-mono">Max Risk: 25% | Gain: 50%</div>
+            </div>
+          </div>
+
+          {/* ── VISUAL OPTION PAYOFF BAR CARD FOR COMMON USERS ────── */}
+          <div className="rounded-lg border border-border bg-secondary/20 p-3 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-semibold text-muted-foreground flex items-center gap-1">
+                📊 Payoff Profile & Loss/Gain Visualizer
+              </span>
+              <span className="font-mono text-emerald-400 text-[11px] font-bold">2.0 R:R Expectancy</span>
+            </div>
+            <div className="h-3 w-full bg-secondary rounded-full overflow-hidden flex border border-border/40">
+              <div className="h-full bg-red-500/80 w-[33%]" title="Max Loss: -25% Premium Risk" />
+              <div className="h-full bg-emerald-500 w-[67%]" title="Max Target Gain: +50% Profit" />
+            </div>
+            <div className="flex justify-between items-center text-[10px] font-mono">
+              <span className="text-red-400 font-bold">🔴 Max Risk: -25% (Stop Loss ₹{liveSl > 0 ? liveSl.toFixed(2) : '0.00'})</span>
+              <span className="text-muted-foreground">Breakeven: Entry Premium</span>
+              <span className="text-emerald-400 font-bold">🟢 Max Target: +50% (Target ₹{liveTp > 0 ? liveTp.toFixed(2) : '0.00'})</span>
             </div>
           </div>
 
@@ -208,13 +225,10 @@ export function OptionsTab() {
             </div>
           </div>
 
-          <Button
-            onClick={() => toast.success(`Order Placed on DhanHQ Broker Account A: ${liveStrike} @ ₹${livePremium}`)}
-            disabled={!livePremium}
-            className="w-full bg-amber-600 hover:bg-amber-700 text-xs font-bold gap-2 h-9"
-          >
-            <Zap className="h-4 w-4" /> Execute {liveStrike} Signal @ ₹{livePremium} (DhanHQ Broker Account A)
-          </Button>
+          <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-2.5 text-center text-xs font-semibold text-emerald-400 flex items-center justify-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-emerald-400" />
+            100% Autonomous Options Engine Active — Signal Orders Are Placed Automatically
+          </div>
         </div>
       </div>
 
@@ -222,9 +236,6 @@ export function OptionsTab() {
         <TabsList className="bg-secondary/50 h-9 p-0.5">
           <TabsTrigger value="chain" className="text-xs px-3 h-8 data-[state=active]:bg-amber-600 data-[state=active]:text-white">
             Option Chain
-          </TabsTrigger>
-          <TabsTrigger value="trade" className="text-xs px-3 h-8 data-[state=active]:bg-amber-600 data-[state=active]:text-white">
-            New Trade
           </TabsTrigger>
           <TabsTrigger value="positions" className="text-xs px-3 h-8 data-[state=active]:bg-amber-600 data-[state=active]:text-white">
             Positions
