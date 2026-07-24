@@ -101,7 +101,9 @@ function calculateExactBSDelta(spot: number, strike: number, daysToExpiry: numbe
 }
 
 // ── Real DhanHQ Option Chain OI / PCR Confluence Resolver ─────
-async function fetchRealOIConfluence(symbol: string, expiry: string): Promise<{ bullish: boolean; pcr: number } | null> {
+// Returns the PCR confluence AND the actual expiry from DhanHQ (which may
+// differ from the guessed expiry if the guess didn't match an available date).
+async function fetchRealOIConfluence(symbol: string, expiry: string): Promise<{ bullish: boolean; pcr: number; actualExpiry?: string } | null> {
   try {
     const chainResult = await fetchDhanOptionChain(symbol, expiry);
     if (!chainResult || !chainResult.chain || chainResult.chain.length === 0) {
@@ -111,7 +113,7 @@ async function fetchRealOIConfluence(symbol: string, expiry: string): Promise<{ 
     const pcrRaw = chainResult.pcr;
     const pcr = typeof pcrRaw === 'number' ? pcrRaw : (typeof pcrRaw === 'object' && pcrRaw ? (pcrRaw as any).pcr || 1.0 : 1.0);
     // PCR > 1.0 indicates Put writing (Bullish support); PCR < 0.8 indicates Call writing (Bearish resistance)
-    return { bullish: pcr >= 1.0, pcr };
+    return { bullish: pcr >= 1.0, pcr, actualExpiry: chainResult.expiryDate };
   } catch (err) {
     console.warn(`[Real OI Fetch] Failed for ${symbol} ${expiry}:`, err);
     return null;
@@ -158,8 +160,12 @@ async function scanStock(symbol: string, sectorMap: Record<string, string>, minS
     const atrPct = (atr / latestClose) * 100;
     const spotChange = change || 0;
 
-    const expiry = getNextExpiry();
-    const oi = await fetchRealOIConfluence(symbol, expiry);
+    const expiryGuess = getNextExpiry();
+    const oi = await fetchRealOIConfluence(symbol, expiryGuess);
+    // Use the ACTUAL expiry from DhanHQ (not the guess) — this fixes the bug
+    // where BANKNIFTY (Wed), FINNIFTY (Tue), MIDCPNIFTY (Mon) expiries were
+    // always guessed as Thursday, causing wrong expiry in signals/trades.
+    const expiry = oi?.actualExpiry || expiryGuess;
     const daysToExpiry = Math.max(1, Math.ceil((new Date(expiry).getTime() - Date.now()) / 86400000));
     const timestamp = new Date().toISOString();
 

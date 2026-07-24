@@ -254,3 +254,71 @@ Stage Summary:
 - Fixed 4 additional logic bugs: tags exact-match (×2), duplicate Discord signal, double entriesCreated counter, double-counted opt_todayEntries.
 - No architectural changes made — only wired up existing-but-unused functions and fixed logic bugs, exactly as the user requested.
 - Committed and pushed to origin/level4.
+
+---
+Task ID: 19
+Agent: Main Agent (Bug Fix Session 2)
+Task: Fix Discord duplicate-strike flooding, review strike selection, disable regime filter, always-on auto-trade
+
+Work Log:
+- User reported 3 issues:
+  1. Discord flooded with multiple notifications for the same strike price (slightly different premiums) every scan cycle
+  2. Nifty BEARISH regime filter blocking all equity entries — user wants it temporarily off to test performance
+  3. System should be "always auto trade only" — schedulers should auto-enable, no manual toggle needed
+
+- Reviewed the options scan loop in autoOptionsScanAndTrade() and found the root cause of the flooding:
+  * BUG: Discord signal was sent BEFORE the duplicate-position check. So every 15-min scan cycle, the same
+    strike got re-notified even if there was already an open position for that contract.
+  * BUG: For non-paper-traded symbols (not in PAPER_TRADE_OPTIONS_UNIVERSE), the code `continue`d before
+    the duplicate check, so there was NEVER any suppression — Discord got spammed every cycle.
+  * BUG: Strike fallback used chain.chain[middle] instead of nearest strike — could select a completely
+    wrong strike if the exact one wasn't found.
+  * BUG: getNextExpiry() always returned next Thursday, but NSE moved expiries: BANKNIFTY→Wed, FINNIFTY→Tue,
+    MIDCPNIFTY→Mon, stocks→monthly. The wrong expiry in the signal broke duplicate detection (same real
+    contract, different guessed expiry = not detected as duplicate).
+
+Fixes applied:
+
+1. src/app/api/auto-trade/route.ts — getRules():
+   - Changed niftyRegimeFilter default from true to false (m['rules_niftyRegimeFilter'] === 'true')
+   - Temporarily disabled so the engine takes entries in bearish markets for testing
+   - Can be re-enabled via Rules tab UI
+
+2. src/app/api/auto-trade/route.ts — maybeAutoEnableSchedulers() (NEW):
+   - Added function that auto-enables both equity + options schedulers on the first runSchedulerTick()
+   - Sets sched_enabled='true', opt_enabled='true', and initializes nextScanAt/nextExitAt
+   - Respects explicit 'false' (user can still disable via UI)
+   - Called at the top of runSchedulerTick()
+
+3. src/app/api/auto-trade/route.ts — autoOptionsScanAndTrade() loop restructured:
+   - Moved duplicate-position check BEFORE the Discord signal (was after = too late)
+   - Added 30-min cooldown check via autoTradeLog (catches non-paper-traded signals + post-close buffer)
+   - Every signal is now logged to autoTradeLog (action 'AUTO_ENTRY' for paper-traded, 'OPTIONS_SIGNAL' for
+     signal-only) so the cooldown check works for all symbols
+   - Fixed strike fallback: uses reduce() to find NEAREST strike instead of chain middle
+   - Removed the duplicate autoTradeLog.create for AUTO_ENTRY (now created once in the unified log step)
+
+4. src/lib/trading/options-scanner.ts — fetchRealOIConfluence():
+   - Now returns actualExpiry from the DhanHQ chain result (the real expiry that was selected)
+   - This fixes the expiry mismatch for BANKNIFTY/FINNIFTY/MIDCPNIFTY/stocks
+
+5. src/lib/trading/options-scanner.ts — scanStock():
+   - Uses oi.actualExpiry (from DhanHQ) instead of the guessed expiry from getNextExpiry()
+   - The guessed expiry is still used as the initial request parameter, but the signal/paper-trade now
+     stores the REAL expiry — fixing duplicate detection and Discord display
+
+Strike selection review (no change needed):
+- selectStrike() always returns ATM (nearest strike to spot) for both CE and PE — this is valid, the
+  unused `direction` parameter is dead code but not a bug
+- getStrikeStep() for stocks uses price-based heuristics that may not match exchange lot sizes, but
+  since we now find the NEAREST strike from the real DhanHQ chain (fix #3), a wrong step just rounds to
+  a non-existent strike which then gets mapped to the nearest real one — no crash, no wrong trade
+
+Verified: npx tsc --noEmit --skipLibCheck → 0 errors
+
+Stage Summary:
+- Discord flooding FIXED: duplicate check now runs before signal + 30-min cooldown for all symbols
+- Strike selection FIXED: nearest strike used, not chain middle
+- Expiry FIXED: uses real DhanHQ expiry, not Thursday guess
+- Regime filter: temporarily OFF (default false) for testing
+- Always-on: schedulers auto-enable on server start

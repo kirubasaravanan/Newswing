@@ -210,7 +210,9 @@ async function getRules(): Promise<PositionRules> {
       // v2 rules
       maxDrawdownPct: parseFloat(m['rules_maxDrawdownPct'] || '') || DEFAULT_RULES.maxDrawdownPct,
       dailyLossLimit: parseFloat(m['rules_dailyLossLimit'] || '') || DEFAULT_RULES.dailyLossLimit,
-      niftyRegimeFilter: m['rules_niftyRegimeFilter'] !== 'false',
+      // Temporarily disabled (default false) — user requested to test performance
+      // without the bearish regime filter. Re-enable via Rules tab UI if needed.
+      niftyRegimeFilter: m['rules_niftyRegimeFilter'] === 'true',
       atrTrailMultiplier: parseFloat(m['rules_atrTrailMultiplier'] || '') || DEFAULT_RULES.atrTrailMultiplier,
       adaptiveSizing: m['rules_adaptiveSizing'] !== 'false',
       streakPenaltyPct: parseFloat(m['rules_streakPenaltyPct'] || '') || DEFAULT_RULES.streakPenaltyPct,
@@ -247,6 +249,50 @@ async function getSchedulerState(): Promise<SchedulerState> {
 
 async function setSchedulerKV(k: string, v: string) {
   await db.appSettings.upsert({ where: { key: k }, create: { key: k, value: v }, update: { value: v } });
+}
+
+// ── Always-On Auto-Trade: auto-enable schedulers on first tick ──
+// User requirement: "IT should be always auto trade only" — the equity and
+// options schedulers should be enabled by default on server start, so no
+// manual toggle is needed. If the user explicitly disables via UI, that
+// is respected (we only auto-enable when the value is unset or 'true').
+let _autoEnableDone = false;
+async function maybeAutoEnableSchedulers() {
+  if (_autoEnableDone) return;
+  _autoEnableDone = true;
+  try {
+    const now = new Date();
+
+    // Equity scheduler
+    const schedEnabled = (await db.appSettings.findUnique({ where: { key: 'sched_enabled' } }))?.value;
+    if (schedEnabled !== 'false') {
+      await setSchedulerKV('sched_enabled', 'true');
+      const st = await getSchedulerState();
+      if (!st.nextScanAt) await setSchedulerKV('sched_nextScanAt', now.toISOString());
+      if (!st.nextExitAt) await setSchedulerKV('sched_nextExitAt', now.toISOString());
+      if (!st.scanIntervalMin) await setSchedulerKV('sched_scanIntervalMin', '15');
+      if (!st.exitIntervalMin) await setSchedulerKV('sched_exitIntervalMin', '1');
+    }
+
+    // Options auto-trader
+    const optEnabled = (await db.appSettings.findUnique({ where: { key: 'opt_enabled' } }))?.value;
+    if (optEnabled !== 'false') {
+      await setSchedulerKV('opt_enabled', 'true');
+      const optScanAt = (await db.appSettings.findUnique({ where: { key: 'opt_nextScanAt' } }))?.value;
+      const optExitAt = (await db.appSettings.findUnique({ where: { key: 'opt_nextExitAt' } }))?.value;
+      if (!optScanAt) await setSchedulerKV('opt_nextScanAt', now.toISOString());
+      if (!optExitAt) await setSchedulerKV('opt_nextExitAt', now.toISOString());
+      const optScanInt = (await db.appSettings.findUnique({ where: { key: 'opt_scanIntervalMin' } }))?.value;
+      const optExitInt = (await db.appSettings.findUnique({ where: { key: 'opt_exitIntervalMin' } }))?.value;
+      if (!optScanInt) await setSchedulerKV('opt_scanIntervalMin', '15');
+      if (!optExitInt) await setSchedulerKV('opt_exitIntervalMin', '1');
+    }
+
+    console.log('[AutoTrade] Schedulers auto-enabled (always-on mode)');
+  } catch (err) {
+    console.warn('[AutoTrade] Auto-enable failed (will retry next tick):', err);
+    _autoEnableDone = false; // Retry on next tick
+  }
 }
 
 async function resetDailyCounters() {
@@ -1064,6 +1110,9 @@ async function dispatchWeeklyRebalanceNotice(now: Date) {
 async function runSchedulerTick() {
   const now = new Date();
 
+  // Auto-enable schedulers on first run (always-on auto-trade mode)
+  await maybeAutoEnableSchedulers();
+
   // ── Always-on scheduled Discord dispatchers (run regardless of market hours) ──
   await dispatchEODSummary(now);
   await dispatchWeeklyRebalanceNotice(now);
@@ -1212,12 +1261,39 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
       const tradeSymbol = `${sig.symbol}_${sig.direction}_${sig.strike}_${sig.expiry}`;
       const lotSize = getOptionLotSize(sig.symbol);
 
-      // ── Phase 3: Fetch REAL live option premium from DhanHQ Option Chain ───────
+      // ── DUPLICATE SUPPRESSION (BEFORE sending any signal) ──────────────
+      // Rule: once a strike is triggered, don't re-trigger until that trade
+      // closes (profit or loss). Prevents Discord flooding with the same
+      // strike every scan cycle.
+      //
+      // 1. Skip if there's an OPEN position for this exact contract — the
+      //    trade is still active and hasn't resolved yet.
+      const existingOpen = await db.paperTrade.findFirst({
+        where: { symbol: tradeSymbol, status: 'OPEN', tags: { contains: 'options' } },
+      });
+      if (existingOpen) continue;
+
+      // 2. Skip if we signaled this contract in the last 30 minutes — this
+      //    catches non-paper-traded signals (where no position is created)
+      //    and provides a brief buffer after a trade closes before re-entry.
+      const recentSignal = await db.autoTradeLog.findFirst({
+        where: {
+          symbol: tradeSymbol,
+          createdAt: { gte: new Date(Date.now() - 30 * 60 * 1000) },
+        },
+      });
+      if (recentSignal) continue;
+
+      // ── Fetch REAL live option premium from DhanHQ Option Chain ───────
       let premium = 0;
       try {
         const chain = await fetchDhanOptionChain(sig.symbol, sig.expiry);
         if (chain && chain.chain && chain.chain.length > 0) {
-          const row = chain.chain.find(r => r.strike === sig.strike) || chain.chain[Math.floor(chain.chain.length / 2)];
+          // Find exact strike, or fall back to NEAREST strike (not middle)
+          const row = chain.chain.find(r => r.strike === sig.strike)
+            || chain.chain.reduce((closest, r) =>
+              Math.abs(r.strike - sig.strike) < Math.abs(closest.strike - sig.strike) ? r : closest
+            );
           const quote = sig.direction === 'CE' ? row?.ce : row?.pe;
           if (quote && quote.ltp > 0) {
             premium = quote.ltp;
@@ -1233,7 +1309,7 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
       const tp = Math.round(premium * 1.50 * 100) / 100; // +50% TP
       const totalCapNeeded = premium * lotSize;
 
-      // ── ALWAYS Send Discord Signal Alert for ALL eligible F&O Setups ──────
+      // ── Send Discord Signal Alert ──────────────────────────────────────
       try {
         await sendDiscordSignal({
           symbol: sig.symbol,
@@ -1258,15 +1334,22 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
         console.warn('[Discord Options Signal] Alert dispatch failed:', discordErr);
       }
 
-      // ── Paper Trade Creation: Restricted to Top 10 F&O Universe Only ──────
+      // ── Log the signal for cooldown tracking ───────────────────────────
+      // Every signal (paper-traded or not) is logged so the 30-min cooldown
+      // check above can suppress duplicates.
       const isEligibleForPaperTrade = PAPER_TRADE_OPTIONS_UNIVERSE.includes(sig.symbol.toUpperCase());
-      if (!isEligibleForPaperTrade || todayEntries >= 30) continue;
-
-      // Check if already in an open position for this exact contract
-      const existing = await db.paperTrade.findFirst({
-        where: { symbol: tradeSymbol, status: 'OPEN', tags: { contains: 'options' } },
+      await db.autoTradeLog.create({
+        data: {
+          action: isEligibleForPaperTrade ? 'AUTO_ENTRY' : 'OPTIONS_SIGNAL',
+          symbol: tradeSymbol,
+          signal: JSON.stringify(sig),
+          executed: isEligibleForPaperTrade,
+          reason: `Options ${sig.direction} signal @ ₹${premium} (conf:${sig.confidence}, score:${sig.score})${isEligibleForPaperTrade ? '' : ' — signal only (outside paper-trade universe)'}`,
+        },
       });
-      if (existing) continue;
+
+      // ── Paper Trade Creation: Restricted to Top 10 F&O Universe Only ──
+      if (!isEligibleForPaperTrade || todayEntries >= 30) continue;
 
       await db.paperTrade.create({
         data: {
@@ -1299,17 +1382,6 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
       todayEntries++;
       entriesCreated++;
       await db.appSettings.upsert({ where: { key: 'opt_todayEntries' }, update: { value: String(todayEntries) }, create: { key: 'opt_todayEntries', value: String(todayEntries) } });
-
-      // Log the entry
-      await db.autoTradeLog.create({
-        data: {
-          action: 'AUTO_ENTRY',
-          symbol: tradeSymbol,
-          signal: JSON.stringify(sig),
-          executed: true,
-          reason: `Intraday Options ${sig.direction} signal @ ₹${premium} (conf:${sig.confidence}, score:${sig.score})`,
-        },
-      });
     }
 
     // opt_todayEntries is already persisted inside the loop via upsert; refresh lastScanAt only
