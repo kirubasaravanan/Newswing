@@ -1664,22 +1664,32 @@ if (!globalThis._autoTradeTimer) {
 // ── API Endpoints ──────────────────────────────────────
 export async function GET() {
   try {
-    // Run background scheduler tick on poll to ensure 15-min health checks and scans execute
-    await runSchedulerTick().catch(() => null);
+    // NOTE: Do NOT await runSchedulerTick() here — it scans 399 stocks and
+    // takes 2+ minutes, which would block the GET response and freeze the UI.
+    // The background setInterval timer (30s) already handles scheduler ticks.
+    // Fire-and-forget to nudge the timer if it hasn't run yet.
+    runSchedulerTick().catch(() => null);
 
-    const wallet = await recalcWallet();
+    // Return cached wallet state (don't fetch live prices on every poll —
+    // that's the background timer's job). recalcWallet() fetches live prices
+    // for ALL open positions which can take 30+ seconds.
+    const wallet = await getWallet();
     const openTrades = await db.paperTrade.findMany({ where: { status: 'OPEN', autoTraded: true }, orderBy: { entryDate: 'desc' } });
     const recentLogs = await db.autoTradeLog.findMany({ orderBy: { createdAt: 'desc' }, take: 50 });
     const rules = await getRules();
     const scheduler = await getSchedulerState();
     const sectorAlloc = await getSectorAllocation();
-    const { drawdownPct, peakCapital, currentCapital } = await getPortfolioDrawdown();
+    // Skip live drawdown calc on GET (it fetches prices for all open positions)
+    // — use the persisted peakCapital and current wallet total instead
+    const drawdownPct = wallet.peakCapital > 0
+      ? Math.max(0, ((wallet.peakCapital - wallet.totalCapital) / wallet.peakCapital) * 100)
+      : 0;
     const optionsStatus = await getOptionsStatus();
     return NextResponse.json({
       success: true, wallet, rules, openTrades, recentLogs, scheduler, sectorAllocation: sectorAlloc,
       marketHours: isMarketHours(), timeToClose: timeToClose(),
       // v2 data
-      drawdown: { drawdownPct: Math.round(drawdownPct * 100) / 100, peakCapital, currentCapital },
+      drawdown: { drawdownPct: Math.round(drawdownPct * 100) / 100, peakCapital: wallet.peakCapital || wallet.initialCapital, currentCapital: wallet.totalCapital },
       consecutiveLosses: scheduler.consecutiveLosses,
       adaptiveFactor: scheduler.lastAdaptiveFactor,
       // Options data

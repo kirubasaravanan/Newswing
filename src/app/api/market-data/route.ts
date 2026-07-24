@@ -31,7 +31,14 @@ export async function GET() {
 
       if (securities.length > 0) {
         try {
-          const quotesRes = await getDhanMarketQuotes(securities);
+          // Wrap in a 5s timeout — if the DhanHQ rate limiter mutex is busy
+          // (background scan running), fall back to cache/Yahoo instead of
+          // blocking the UI for 30+ seconds.
+          const quotesPromise = getDhanMarketQuotes(securities);
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('DhanHQ batch quote timeout')), 5000)
+          );
+          const quotesRes = await Promise.race([quotesPromise, timeoutPromise]) as any;
           for (const stock of toFetch) {
             const meta = DHAN_SECURITY_MAP[stock.symbol.toUpperCase()];
             const q = meta ? quotesRes?.data?.[meta.exchangeSegment]?.[meta.securityId] : null;
