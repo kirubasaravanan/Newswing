@@ -209,3 +209,48 @@ Stage Summary:
 - Key files: src/lib/nse-data.ts (new), src/lib/options/option-chain.ts (modified), options-chain-tab.tsx (modified), types.ts (modified), new-trade-tab.tsx (modified)
 - Pushed to https://github.com/kirubasaravanan/Newswing.git (commit cd5404a)
 
+
+---
+Task ID: 18
+Agent: Main Agent (Bug Fix Session)
+Task: Fix live data, live options Discord notifications, and live swing notifications on level4 branch — no architectural changes
+
+Work Log:
+- Cloned https://github.com/kirubasaravanan/Newswing.git and checked out level4 branch
+- Diagnosed 3 user-reported issues by reading the auto-trade engine, Discord notification service, DhanHQ option provider, data provider, and frontend scheduler:
+  1. "Not taking live data" — DhanHQ access token (JWT) EXPIRED. Token exp claim = 2026-07-24 05:09:57 UTC; current time already past it. Equity data silently falls back to Yahoo Finance (works); option chain has NO fallback → returns null → zero options signals.
+  2. "No live options notifications in Discord" — autoOptionsScanAndTrade() and autoOptionsCheckExits() were ONLY callable via manual POST actions; they were NEVER wired into runSchedulerTick(). Even with the scheduler armed, the options engine never ran automatically.
+  3. "No live swing notifications" — sendDiscordHeartbeat() (hourly), sendDiscordEODSummary() (3:30 PM), and sendDiscordWeeklyRebalanceNotice() (Mon 8:30 AM) were all defined in discord.ts but NEVER called anywhere in the codebase.
+- Additional bugs found during diagnosis:
+  - getOptionsStatus() used exact match `tags: 'options'` but entries are created with `tags: 'options,intraday'` → open options count always reported as 0.
+  - autoOptionsScanAndTrade() duplicate-position check used the same exact match → duplicate options positions could be created for the same contract.
+  - Options scan sent sendDiscordSignal() TWICE per paper-trade-eligible entry (once before creation, once after) → duplicate Discord spam.
+  - entriesCreated++ was incremented twice per entry (double-counted return value).
+  - Final `setSchedulerKV('opt_todayEntries', String(todayEntries + entriesCreated))` double-counted because todayEntries was already persisted inside the loop via upsert.
+
+Fixes applied to src/app/api/auto-trade/route.ts (NO architectural changes — only wiring up already-defined functions and fixing logic bugs):
+- Added IST time helpers (getISTDate, istTimeStr, istDateString)
+- Added checkDhanHQTokenExpiry() — decodes the DhanHQ JWT exp claim and returns whether the token is expired + a human-readable message. Surfaced in buildSystemHealthReport() so the 15-min Discord health check now explicitly tells the user when the token is expired (the root cause of "no live data").
+- Added dispatchHourlyHeartbeat(now) — calls sendDiscordHeartbeat() once per hour during market hours with niftyRegime, open positions, unrealized/realized PnL.
+- Added dispatchEODSummary(now) — calls sendDiscordEODSummary() once per day after 3:30 PM IST market close, with today's closed-trade stats (wins/losses/gross/net PnL/costs/win rate).
+- Added dispatchWeeklyRebalanceNotice(now) — calls sendDiscordWeeklyRebalanceNotice() once per week on Monday 8:30–11:00 AM IST with Top 7 + vacant slot candidates.
+- Rewrote runSchedulerTick() to:
+  * Call dispatchEODSummary + dispatchWeeklyRebalanceNotice at the TOP (before the market-hours early return) so they fire regardless of market hours.
+  * Add an Options scan & exit block that runs autoOptionsScanAndTrade() and autoOptionsCheckExits() automatically when opt_enabled is true, using new opt_nextScanAt / opt_nextExitAt / opt_scanIntervalMin / opt_exitIntervalMin KV pairs (default 15-min scan / 1-min exit).
+  * Call dispatchHourlyHeartbeat(now) during market hours.
+  * Kept the existing 15-min health check + equity scan/exit logic unchanged.
+- Updated options_toggle POST handler to initialize opt_nextScanAt/opt_nextExitAt (set to now) and opt_scanIntervalMin/opt_exitIntervalMin (default 15/1) when enabled, and clear them when disabled.
+- Fixed getOptionsStatus() tags query: `tags: 'options'` → `tags: { contains: 'options' }` so open options positions are correctly counted.
+- Fixed autoOptionsScanAndTrade() duplicate-position check: `tags: 'options'` → `tags: { contains: 'options' }` so duplicate contracts are blocked.
+- Removed the duplicate second sendDiscordSignal() call in autoOptionsScanAndTrade() (the first call already covers all eligible setups; merged the better direction label "CALL BUY 🟢"/"PUT BUY 🔴" and setupType A+/B into the first call).
+- Removed the duplicate entriesCreated++ at the end of the loop.
+- Removed the incorrect final `setSchedulerKV('opt_todayEntries', String(todayEntries + entriesCreated))` (todayEntries is already persisted inside the loop via upsert; this final line was double-counting).
+- Verified: npx tsc --noEmit --skipLibCheck → 0 errors.
+
+Stage Summary:
+- Root cause of "no live data": DhanHQ JWT token expired (user must refresh daily). Now surfaced clearly in the 15-min Discord health check so the user knows exactly when to refresh.
+- Root cause of "no live options Discord notifications": options scan/exit functions were never scheduled. Now wired into runSchedulerTick() — when opt_enabled is true, the options engine runs automatically every 15 min (scan) and 1 min (exit) during market hours, posting real Discord signals.
+- Root cause of "no live swing notifications": heartbeat/EOD/weekly-rebalance Discord functions were defined but never called. Now all three are wired into runSchedulerTick() with proper once-per-hour / once-per-day / once-per-week gating.
+- Fixed 4 additional logic bugs: tags exact-match (×2), duplicate Discord signal, double entriesCreated counter, double-counted opt_todayEntries.
+- No architectural changes made — only wired up existing-but-unused functions and fixed logic bugs, exactly as the user requested.
+- Committed and pushed to origin/level4.

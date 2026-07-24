@@ -893,16 +893,189 @@ async function autoCheckExits() {
   return { exits, holding, partialBooks, warnings, timeToClose: minsToClose, marketHours: isMarketHours() };
 }
 
+// ── IST Time Helpers ───────────────────────────────────
+function getISTDate(d: Date = new Date()): Date {
+  // Shift the absolute moment by IST offset so getHours()/getDay() reflect IST
+  return new Date(d.getTime() + (5.5 * 60 * 60 * 1000) + (d.getTimezoneOffset() * 60 * 1000));
+}
+
+function istTimeStr(d: Date = new Date()): string {
+  return d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' });
+}
+
+function istDateString(d: Date = new Date()): string {
+  return getISTDate(d).toISOString().split('T')[0];
+}
+
+// ── DhanHQ Token Expiry Check ──────────────────────────
+// DhanHQ access tokens are JWTs that expire every 24 hours. When expired,
+// ALL live data calls fail and the app silently falls back to Yahoo Finance
+// (equities only — options chain has NO fallback and returns null).
+// This surfaces the expiry in the Discord health check so the user knows to refresh.
+function checkDhanHQTokenExpiry(): { configured: boolean; expired: boolean; expiresAt?: string; message: string } {
+  const token = process.env.OPTIONS_DHAN_ACCESS_TOKEN || process.env.DHAN_ACCESS_TOKEN || '';
+  if (!token) {
+    return { configured: false, expired: false, message: 'DhanHQ token NOT configured — live broker data unavailable' };
+  }
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return { configured: true, expired: true, message: 'DhanHQ token malformed' };
+    const payloadB64 = parts[1];
+    const padded = payloadB64 + '='.repeat((4 - (payloadB64.length % 4)) % 4);
+    const payload = JSON.parse(Buffer.from(padded, 'base64url').toString('utf8'));
+    const exp = payload.exp;
+    if (typeof exp !== 'number') return { configured: true, expired: false, message: 'DhanHQ token has no exp claim' };
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expired = nowSec >= exp;
+    const expiresAt = new Date(exp * 1000).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    return {
+      configured: true,
+      expired,
+      expiresAt,
+      message: expired
+        ? `🚨 DHANHQ TOKEN EXPIRED at ${expiresAt} IST — refresh token to restore live data & options chain`
+        : `✅ DhanHQ token valid (expires ${expiresAt} IST)`,
+    };
+  } catch {
+    return { configured: true, expired: true, message: 'DhanHQ token decode failed — treat as expired' };
+  }
+}
+
+// ── Hourly Heartbeat Dispatcher ─────────────────────────
+async function dispatchHourlyHeartbeat(now: Date) {
+  const lastHbStr = (await db.appSettings.findUnique({ where: { key: 'sched_lastHeartbeatAt' } }))?.value;
+  const lastHbTime = lastHbStr ? new Date(lastHbStr).getTime() : 0;
+  if (now.getTime() - lastHbTime < 60 * 60000) return; // 1 hour cadence
+
+  try {
+    const { sendDiscordHeartbeat } = await import('@/lib/notifications/discord');
+    const st = await getSchedulerState();
+    const w = await recalcWallet();
+    const openCount = await db.paperTrade.count({ where: { status: 'OPEN', autoTraded: true } });
+
+    await sendDiscordHeartbeat({
+      timeIST: istTimeStr(now),
+      niftyRegime: st.niftyRegime || 'UNKNOWN',
+      openPositions: openCount,
+      unrealizedPnl: w.unrealizedPnl || 0,
+      realizedPnl: w.realizedPnl || 0,
+      nextSquareOffTime: '3:10 PM IST',
+    });
+    await setSchedulerKV('sched_lastHeartbeatAt', now.toISOString());
+  } catch (err) {
+    console.warn('[AutoTrade] Hourly heartbeat dispatch error:', err);
+  }
+}
+
+// ── EOD Summary Dispatcher (fires once per day after 3:30 PM IST market close) ──
+async function dispatchEODSummary(now: Date) {
+  const ist = getISTDate(now);
+  const istMins = ist.getHours() * 60 + ist.getMinutes();
+
+  // Only fire after 15:30 IST (3:30 PM market close)
+  if (istMins < 930) return;
+
+  const today = istDateString(now);
+  const lastEODDate = (await db.appSettings.findUnique({ where: { key: 'sched_lastEODDate' } }))?.value;
+  if (lastEODDate === today) return; // Already sent today
+
+  try {
+    const { sendDiscordEODSummary } = await import('@/lib/notifications/discord');
+
+    // Query today's closed auto-trades (IST day boundary)
+    const dayStart = new Date(today + 'T00:00:00+05:30');
+    const dayEnd = new Date(today + 'T23:59:59+05:30');
+    const closedTrades = await db.paperTrade.findMany({
+      where: {
+        status: 'CLOSED',
+        autoTraded: true,
+        exitDate: { gte: dayStart, lte: dayEnd },
+      },
+    });
+
+    const totalTrades = closedTrades.length;
+    const winTrades = closedTrades.filter(t => (t.netPnl ?? t.pnl ?? 0) > 0).length;
+    const lossTrades = closedTrades.filter(t => (t.netPnl ?? t.pnl ?? 0) < 0).length;
+    const winRate = totalTrades > 0 ? (winTrades / totalTrades) * 100 : 0;
+    const grossPnl = closedTrades.reduce((s, t) => s + (t.grossPnl ?? 0), 0);
+    const statutoryCosts = closedTrades.reduce((s, t) => s + (t.totalCosts ?? 0), 0);
+    const netPnl = closedTrades.reduce((s, t) => s + (t.netPnl ?? t.pnl ?? 0), 0);
+    const w = await getWallet();
+    const capitalDeployed = w.deployed || 0;
+    const netPnlPct = w.totalCapital > 0 ? (netPnl / w.totalCapital) * 100 : 0;
+
+    const winningTradesList = closedTrades
+      .filter(t => (t.netPnl ?? t.pnl ?? 0) > 0)
+      .map(t => `${t.symbol}: +₹${Math.round(t.netPnl ?? t.pnl ?? 0).toLocaleString('en-IN')} (${t.exitReason || 'CLOSED'})`);
+    const losingTradesList = closedTrades
+      .filter(t => (t.netPnl ?? t.pnl ?? 0) < 0)
+      .map(t => `${t.symbol}: ₹${Math.round(t.netPnl ?? t.pnl ?? 0).toLocaleString('en-IN')} (${t.exitReason || 'CLOSED'})`);
+
+    await sendDiscordEODSummary({
+      date: today,
+      totalTrades,
+      winTrades,
+      lossTrades,
+      winRate,
+      grossPnl: Math.round(grossPnl * 100) / 100,
+      statutoryCosts: Math.round(statutoryCosts * 100) / 100,
+      netPnl: Math.round(netPnl * 100) / 100,
+      netPnlPct: Math.round(netPnlPct * 100) / 100,
+      capitalDeployed: Math.round(capitalDeployed * 100) / 100,
+      winningTradesList,
+      losingTradesList,
+    });
+    await setSchedulerKV('sched_lastEODDate', today);
+  } catch (err) {
+    console.warn('[AutoTrade] EOD summary dispatch error:', err);
+  }
+}
+
+// ── Weekly Monday 8:30 AM Rebalance Notice Dispatcher ──
+async function dispatchWeeklyRebalanceNotice(now: Date) {
+  const ist = getISTDate(now);
+  const istDay = ist.getDay(); // 0=Sun, 1=Mon, ... 6=Sat
+  const istMins = ist.getHours() * 60 + ist.getMinutes();
+
+  // Only fire on Monday (1) between 8:30 AM and 11:00 AM IST
+  if (istDay !== 1) return;
+  if (istMins < 510 || istMins > 660) return; // 8:30 AM = 510, 11:00 AM = 660
+
+  const today = istDateString(now);
+  const lastRebalDate = (await db.appSettings.findUnique({ where: { key: 'sched_lastRebalanceDate' } }))?.value;
+  if (lastRebalDate === today) return; // Already sent today
+
+  try {
+    const { sendDiscordWeeklyRebalanceNotice } = await import('@/lib/notifications/discord');
+    const { TOP_7_RANKED_SYMBOLS, VACANT_SLOT_CANDIDATES } = await import('@/lib/trading/screening-engine');
+
+    await sendDiscordWeeklyRebalanceNotice({
+      rebalanceTime: istTimeStr(now),
+      top7Symbols: TOP_7_RANKED_SYMBOLS.map(s => `${s.symbol} (${Math.round(s.weightPct * 100)}%)`),
+      vacantSlotsFilled: VACANT_SLOT_CANDIDATES.map(s => `${s.symbol} (${Math.round(s.weightPct * 100)}%)`),
+    });
+    await setSchedulerKV('sched_lastRebalanceDate', today);
+  } catch (err) {
+    console.warn('[AutoTrade] Weekly rebalance notice dispatch error:', err);
+  }
+}
+
 // ── Scheduler Control ──────────────────────────────────
 async function runSchedulerTick() {
+  const now = new Date();
+
+  // ── Always-on scheduled Discord dispatchers (run regardless of market hours) ──
+  await dispatchEODSummary(now);
+  await dispatchWeeklyRebalanceNotice(now);
+
   if (!isMarketHours()) return { marketHours: false, message: 'Market closed' };
   const state = await getSchedulerState();
   if (!state.enabled) return { marketHours: true, enabled: false };
 
   await resetDailyCounters();
-  const now = new Date();
   const results: any = { scanResult: null, exitResult: null };
 
+  // ── Equity Swing scan & exit ──
   if (state.nextScanAt) {
     const nextScan = new Date(state.nextScanAt);
     if (now >= nextScan) {
@@ -922,6 +1095,42 @@ async function runSchedulerTick() {
       await setSchedulerKV('sched_nextExitAt', nextExitDate.toISOString());
     }
   }
+
+  // ── Options scan & exit (auto-scheduled when opt_enabled) ──
+  const optEnabled = (await db.appSettings.findUnique({ where: { key: 'opt_enabled' } }))?.value === 'true';
+  if (optEnabled) {
+    const optScanAtStr = (await db.appSettings.findUnique({ where: { key: 'opt_nextScanAt' } }))?.value;
+    const optExitAtStr = (await db.appSettings.findUnique({ where: { key: 'opt_nextExitAt' } }))?.value;
+    const optScanInt = parseInt((await db.appSettings.findUnique({ where: { key: 'opt_scanIntervalMin' } }))?.value || '15', 10);
+    const optExitInt = parseInt((await db.appSettings.findUnique({ where: { key: 'opt_exitIntervalMin' } }))?.value || '1', 10);
+
+    const optScanAt = optScanAtStr ? new Date(optScanAtStr) : now;
+    if (now >= optScanAt) {
+      try {
+        results.optionsScanResult = await autoOptionsScanAndTrade();
+        await setSchedulerKV('opt_lastScanAt', now.toISOString());
+        const next = new Date(now.getTime() + optScanInt * 60000);
+        await setSchedulerKV('opt_nextScanAt', next.toISOString());
+      } catch (err) {
+        console.warn('[AutoTrade] Options scan error:', err);
+      }
+    }
+
+    const optExitAt = optExitAtStr ? new Date(optExitAtStr) : now;
+    if (now >= optExitAt) {
+      try {
+        results.optionsExitResult = await autoOptionsCheckExits();
+        await setSchedulerKV('opt_lastExitAt', now.toISOString());
+        const next = new Date(now.getTime() + optExitInt * 60000);
+        await setSchedulerKV('opt_nextExitAt', next.toISOString());
+      } catch (err) {
+        console.warn('[AutoTrade] Options exit check error:', err);
+      }
+    }
+  }
+
+  // ── Hourly Heartbeat (market hours only) ──
+  await dispatchHourlyHeartbeat(now);
 
   // ── Automatic 15-Minute Discord Health Check Dispatcher ──
   const lastHealthStr = (await db.appSettings.findUnique({ where: { key: 'sched_lastHealthCheckAt' } }))?.value;
@@ -1038,9 +1247,9 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
           lotSize,
           lots: 1,
           totalCapital: totalCapNeeded,
-          confluenceScore: sig.score,
-          setupType: `Score:${sig.score}/100`,
-          direction: sig.direction,
+          confluenceScore: sig.confidence,
+          setupType: sig.score >= 40 ? 'A+' : 'B',
+          direction: sig.direction === 'CE' ? 'CALL BUY 🟢' : 'PUT BUY 🔴',
           engine: 'OPTIONS',
           dataSource: 'DhanHQ Broker v2 API',
           timestamp: new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }),
@@ -1055,7 +1264,7 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
 
       // Check if already in an open position for this exact contract
       const existing = await db.paperTrade.findFirst({
-        where: { symbol: tradeSymbol, status: 'OPEN', tags: 'options' },
+        where: { symbol: tradeSymbol, status: 'OPEN', tags: { contains: 'options' } },
       });
       if (existing) continue;
 
@@ -1101,37 +1310,9 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
           reason: `Intraday Options ${sig.direction} signal @ ₹${premium} (conf:${sig.confidence}, score:${sig.score})`,
         },
       });
-
-      // Dispatch live Discord signal alert for Options Trade
-      try {
-        const { sendDiscordSignal } = await import('@/lib/notifications/discord');
-        await sendDiscordSignal({
-          symbol: sig.symbol,
-          strike: sig.strike,
-          optionType: sig.direction,
-          expiry: sig.expiry,
-          spotPrice: sig.entryPrice,
-          premium,
-          stopLoss: sl,
-          takeProfit: tp,
-          lotSize: 1,
-          lots: 1,
-          totalCapital: premium,
-          confluenceScore: sig.confidence,
-          setupType: sig.score >= 40 ? 'A+' : 'B',
-          direction: sig.direction === 'CE' ? 'CALL BUY 🟢' : 'PUT BUY 🔴',
-          engine: 'OPTIONS',
-          dataSource: 'DhanHQ Live Quote',
-          timestamp: new Date().toISOString(),
-        });
-      } catch (err) {
-        console.warn('[Options Auto-Trade] Discord signal dispatch error:', err);
-      }
-
-      entriesCreated++;
     }
 
-    await setSchedulerKV('opt_todayEntries', String(todayEntries + entriesCreated));
+    // opt_todayEntries is already persisted inside the loop via upsert; refresh lastScanAt only
     await setSchedulerKV('opt_lastScanAt', new Date().toISOString());
 
     return { signalsGenerated: scanResult.signals.length, entriesCreated, errors };
@@ -1279,7 +1460,7 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
 
 async function getOptionsStatus() {
   const openOptions = await db.paperTrade.findMany({
-    where: { status: 'OPEN', tags: 'options', autoTraded: true },
+    where: { status: 'OPEN', tags: { contains: 'options' }, autoTraded: true },
     orderBy: { entryDate: 'desc' },
   });
   const recentOptsLogs = await db.autoTradeLog.findMany({
@@ -1442,6 +1623,17 @@ export async function POST(request: NextRequest) {
       case 'options_toggle': {
         const enabled = body.enabled;
         await setSchedulerKV('opt_enabled', String(!!enabled));
+        if (enabled) {
+          const now = new Date();
+          // Initialize options scheduler cadence so runSchedulerTick picks it up
+          await setSchedulerKV('opt_nextScanAt', now.toISOString());
+          await setSchedulerKV('opt_nextExitAt', now.toISOString());
+          await setSchedulerKV('opt_scanIntervalMin', String(typeof body.scanIntervalMin === 'number' ? body.scanIntervalMin : 15));
+          await setSchedulerKV('opt_exitIntervalMin', String(typeof body.exitIntervalMin === 'number' ? body.exitIntervalMin : 1));
+        } else {
+          await setSchedulerKV('opt_nextScanAt', '');
+          await setSchedulerKV('opt_nextExitAt', '');
+        }
         return NextResponse.json({ success: true, options: await getOptionsStatus() });
       }
       case 'health_check': {
@@ -1473,10 +1665,15 @@ async function buildSystemHealthReport() {
   const openEquityCount = (await db.paperTrade.findMany({ where: { status: 'OPEN', autoTraded: true } })).length;
   const openOptCount = optStatus.openPositions;
 
+  // Check DhanHQ token health (root cause of "no live data" when expired)
+  const dhanStatus = checkDhanHQTokenExpiry();
+
   // Determine Equity Trading Reason
   let equityReason = 'ℹ️ Engine scanning 500+ NSE universe. No new A+ setup met min 1.5 R:R threshold';
   if (!mHours) {
     equityReason = '🌙 Market is closed (Trading hours: 9:15 AM – 3:30 PM IST)';
+  } else if (dhanStatus.expired) {
+    equityReason = dhanStatus.message + ' (equity falling back to Yahoo Finance)';
   } else if (st.circuitBreaker) {
     equityReason = `🚨 HALTED: Circuit Breaker active (${st.circuitBreakerReason})`;
   } else if (st.niftyRegime === 'BEARISH' && rules.niftyRegimeFilter) {
@@ -1491,6 +1688,9 @@ async function buildSystemHealthReport() {
   let optReason = 'ℹ️ DhanHQ Live Feed Active. No ATM momentum breakout setup triggered on indices/stocks';
   if (!mHours) {
     optReason = '🌙 Market is closed (Intraday Options trade 9:15 AM – 3:15 PM IST)';
+  } else if (dhanStatus.expired) {
+    // Options chain has NO Yahoo fallback — expired token means zero options signals
+    optReason = dhanStatus.message + ' — options chain UNAVAILABLE (no fallback)';
   } else if (!optStatus.enabled) {
     optReason = '⏸️ Options Auto-Trader is currently disabled in app settings';
   } else if (optStatus.todayEntries >= 30) {
