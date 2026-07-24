@@ -251,59 +251,67 @@ async function setSchedulerKV(k: string, v: string) {
   await db.appSettings.upsert({ where: { key: k }, create: { key: k, value: v }, update: { value: v } });
 }
 
-// ── Always-On Auto-Trade: auto-enable schedulers on first tick ──
-// User requirement: "IT should be always auto trade only" — the equity and
-// options schedulers should be enabled by default on server start, so no
-// manual toggle is needed. If the user explicitly disables via UI, that
-// is respected (we only auto-enable when the value is unset or 'true').
+// ── Always-On Auto-Trade: one-time migration forces both schedulers ON ──
+// User requirement: "IT should be always auto trade only" — both equity and
+// options schedulers should be ON. This migration runs ONCE on first server
+// start after the update, forces both schedulers ON + upgrades capital to
+// ₹10L. After that, the user can toggle via UI and their choice is respected.
 let _autoEnableDone = false;
 async function maybeAutoEnableSchedulers() {
   if (_autoEnableDone) return;
   _autoEnableDone = true;
   try {
     const now = new Date();
+    const migrationDone = (await db.appSettings.findUnique({ where: { key: 'sched_migrationDone' } }))?.value === 'true';
 
-    // Equity scheduler
-    const schedEnabled = (await db.appSettings.findUnique({ where: { key: 'sched_enabled' } }))?.value;
-    if (schedEnabled !== 'false') {
+    if (!migrationDone) {
+      // ── ONE-TIME MIGRATION: force both schedulers ON + upgrade capital ──
+      console.log('[AutoTrade] Running one-time migration: force schedulers ON + capital → ₹10L');
+
+      // Force equity scheduler ON
       await setSchedulerKV('sched_enabled', 'true');
-      const st = await getSchedulerState();
-      if (!st.nextScanAt) await setSchedulerKV('sched_nextScanAt', now.toISOString());
-      if (!st.nextExitAt) await setSchedulerKV('sched_nextExitAt', now.toISOString());
-      if (!st.scanIntervalMin) await setSchedulerKV('sched_scanIntervalMin', '15');
-      if (!st.exitIntervalMin) await setSchedulerKV('sched_exitIntervalMin', '1');
-    }
+      await setSchedulerKV('sched_nextScanAt', now.toISOString());
+      await setSchedulerKV('sched_nextExitAt', now.toISOString());
+      await setSchedulerKV('sched_scanIntervalMin', '15');
+      await setSchedulerKV('sched_exitIntervalMin', '1');
 
-    // Options auto-trader
-    const optEnabled = (await db.appSettings.findUnique({ where: { key: 'opt_enabled' } }))?.value;
-    if (optEnabled !== 'false') {
+      // Force options auto-trader ON
       await setSchedulerKV('opt_enabled', 'true');
-      const optScanAt = (await db.appSettings.findUnique({ where: { key: 'opt_nextScanAt' } }))?.value;
-      const optExitAt = (await db.appSettings.findUnique({ where: { key: 'opt_nextExitAt' } }))?.value;
-      if (!optScanAt) await setSchedulerKV('opt_nextScanAt', now.toISOString());
-      if (!optExitAt) await setSchedulerKV('opt_nextExitAt', now.toISOString());
-      const optScanInt = (await db.appSettings.findUnique({ where: { key: 'opt_scanIntervalMin' } }))?.value;
-      const optExitInt = (await db.appSettings.findUnique({ where: { key: 'opt_exitIntervalMin' } }))?.value;
-      if (!optScanInt) await setSchedulerKV('opt_scanIntervalMin', '15');
-      if (!optExitInt) await setSchedulerKV('opt_exitIntervalMin', '1');
-    }
+      await setSchedulerKV('opt_nextScanAt', now.toISOString());
+      await setSchedulerKV('opt_nextExitAt', now.toISOString());
+      await setSchedulerKV('opt_scanIntervalMin', '15');
+      await setSchedulerKV('opt_exitIntervalMin', '1');
 
-    console.log('[AutoTrade] Schedulers auto-enabled (always-on mode)');
+      // Upgrade capital to ₹10L (regardless of current value — user requested)
+      const w = await db.capitalWallet.findFirst();
+      if (w) {
+        await db.capitalWallet.update({
+          where: { id: w.id },
+          data: {
+            totalCapital: 1000000,
+            initialCapital: 1000000,
+            available: 1000000 - w.deployed,
+          },
+        });
+        console.log('[AutoTrade] Capital upgraded to ₹10L (forced migration)');
+      }
 
-    // One-time capital upgrade: bump untouched ₹2L wallets to ₹10L for paper-trading
-    // all eligible options signals (user request: "increase the capital amount to 10 lakhs").
-    // Only fires if the wallet is still at the old default (200000) with zero P&L.
-    const w = await db.capitalWallet.findFirst();
-    if (w && w.initialCapital === 200000 && w.realizedPnl === 0) {
-      await db.capitalWallet.update({
-        where: { id: w.id },
-        data: {
-          totalCapital: 1000000,
-          initialCapital: 1000000,
-          available: 1000000 - w.deployed,
-        },
-      });
-      console.log('[AutoTrade] Capital upgraded from ₹2L → ₹10L (paper-trading all eligible options)');
+      await setSchedulerKV('sched_migrationDone', 'true');
+      console.log('[AutoTrade] Migration complete — both schedulers ON, capital ₹10L');
+    } else {
+      // Migration already done — just ensure nextScanAt/nextExitAt are set
+      // (in case the server restarted and they expired)
+      const st = await getSchedulerState();
+      if (st.enabled && !st.nextScanAt) await setSchedulerKV('sched_nextScanAt', now.toISOString());
+      if (st.enabled && !st.nextExitAt) await setSchedulerKV('sched_nextExitAt', now.toISOString());
+
+      const optEnabled = (await db.appSettings.findUnique({ where: { key: 'opt_enabled' } }))?.value !== 'false';
+      if (optEnabled) {
+        const optScanAt = (await db.appSettings.findUnique({ where: { key: 'opt_nextScanAt' } }))?.value;
+        const optExitAt = (await db.appSettings.findUnique({ where: { key: 'opt_nextExitAt' } }))?.value;
+        if (!optScanAt) await setSchedulerKV('opt_nextScanAt', now.toISOString());
+        if (!optExitAt) await setSchedulerKV('opt_nextExitAt', now.toISOString());
+      }
     }
   } catch (err) {
     console.warn('[AutoTrade] Auto-enable failed (will retry next tick):', err);
