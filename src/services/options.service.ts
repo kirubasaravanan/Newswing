@@ -156,7 +156,9 @@ export async function closeOptionTrade(dto: CloseOptionTradeDTO) {
     if (!trade) throw new Error('Trade not found');
     if (trade.status !== 'OPEN') throw new Error('Trade is already closed');
 
-    const exitPrem = dto.exitPremium || trade.currentPremium || trade.entryPremium;
+    // Use ?? not || — an option expiring worthless has a legitimate exitPremium
+    // of 0, which `||` would silently discard in favor of currentPremium/entryPremium.
+    const exitPrem = dto.exitPremium ?? trade.currentPremium ?? trade.entryPremium;
     const direction = trade.action === 'BUY' ? 1 : -1;
     const pnl = (exitPrem - trade.entryPremium) * trade.qty * trade.lotSize * direction;
     const pnlPct = trade.marginUsed && trade.marginUsed > 0

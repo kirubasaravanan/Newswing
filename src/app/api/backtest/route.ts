@@ -1,14 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { runBacktest, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/trading/screening-engine';
 import { getHistoricalData } from '@/lib/trading/data-provider';
+import { isIndexSymbol } from '@/lib/options/black-scholes';
 import { db } from '@/lib/db';
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const symbol: string = body.symbol || 'TATAELXSI';
+    // Exact index-symbol match — previously this used substring checks
+    // (`symbol.includes('BANK')`, `symbol.includes('FIN')`) which classified
+    // real equity stocks like HDFCBANK, KOTAKBANK, BAJAJFINSV, MUTHOOTFIN,
+    // CHOLAFIN, BAJFINANCE, AXISBANK as "OPTIONS" mode instead of "SWING" —
+    // the exact misrouting bug already fixed inside runBacktest() itself,
+    // but this outer route had its own independent, unfixed copy of it that
+    // overrode the internal fix via the explicit engineMode passthrough.
     const engine: 'OPTIONS' | 'SWING' = body.engine || body.config?.engineMode || (
-      symbol.toUpperCase().includes('NIFTY') || symbol.toUpperCase().includes('BANK') || symbol.toUpperCase().includes('FIN') ? 'OPTIONS' : 'SWING'
+      isIndexSymbol(symbol.toUpperCase()) ? 'OPTIONS' : 'SWING'
     );
     const config: ScreeningConfig = { ...DEFAULT_CONFIG, engineMode: engine, ...body.config };
     const days = body.days || 1825; // 5 full years (1825 days) up to 2026
@@ -42,6 +50,7 @@ export async function POST(request: NextRequest) {
 
     const trades = result?.trades || [];
     const equityCurve = result?.equityCurve || [];
+    const monthlyPnl = result?.monthlyPnl || [];
 
     const startDate = candles.length > 0 ? new Date(candles[0].date) : new Date('2021-01-01');
     const endDate = candles.length > 0 ? new Date(candles[candles.length - 1].date) : new Date();
@@ -77,6 +86,7 @@ export async function POST(request: NextRequest) {
       stats,
       trades,
       equityCurve,
+      monthlyPnl,
       dataSource
     });
   } catch (error) {

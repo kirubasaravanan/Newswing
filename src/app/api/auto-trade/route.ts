@@ -21,9 +21,12 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { runScreening, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/trading/screening-engine';
-import { getHistoricalData, getCurrentPrice } from '@/lib/trading/data-provider';
+import { getHistoricalData, getCurrentPrice, getContractCurrentPrice } from '@/lib/trading/data-provider';
 import { getFullUniverse, runL1Filter, type NSEStock } from '@/lib/trading/universe-scanner';
-import { scanOptionsUniverse, type OptionsSignal } from '@/lib/trading/options-scanner';
+import { isNseTradingHoliday } from '@/lib/trading/market-hours';
+import { scanOptionsUniverse, type OptionsSignal, SNIPER_MIN_SCORE, SNIPER_MIN_CONFIDENCE } from '@/lib/trading/options-scanner';
+import { convertToPremiumTargets } from '@/lib/trading/market-structure';
+import { recordSignal, resolveSignalByTradeId } from '@/lib/trading/signal-recorder';
 import { fetchDhanOptionChain } from '@/lib/options/dhan-option-provider';
 import { EMA, ATR } from 'technicalindicators';
 import { db } from '@/lib/db';
@@ -65,6 +68,11 @@ interface PositionRules {
   atrTrailMultiplier: number;      // ATR multiplier for trailing stop (0 = use fixed R)
   adaptiveSizing: boolean;         // Reduce size after consecutive losses
   streakPenaltyPct: number;        // % size reduction per consecutive loss after 3
+  // Options guardrails engine
+  optDailyLossCap: number;         // Halt new options entries once today's realized options loss hits this ₹
+  optDailyProfitLock: number;      // Halt new options entries once today's realized options profit hits this ₹ ("quit while ahead")
+  optMaxPerSector: number;         // Max concurrent open options positions sharing the same sector
+  optNoEntryMinsToClose: number;   // Don't open NEW options positions within this many minutes of the 3:15pm square-off
 }
 
 const DEFAULT_RULES: PositionRules = {
@@ -87,6 +95,13 @@ const DEFAULT_RULES: PositionRules = {
   atrTrailMultiplier: 2.0,         // 2x ATR trailing stop
   adaptiveSizing: true,            // Enable adaptive sizing
   streakPenaltyPct: 20,            // 20% size reduction per loss after 3 consecutive
+  // Options guardrails — no equivalent existed before; the options engine only
+  // had a flat entry-count cap (OPT_DAILY_LIMIT), with no P&L-based circuit
+  // breaker at all (opt_todayPnl was read in status but never actually written).
+  optDailyLossCap: 20000,          // ~6.7% of ₹3L options capital
+  optDailyProfitLock: 40000,       // roughly one strong day's worth of wins — lock in gains, stop for the day
+  optMaxPerSector: 2,              // avoid 3+ correlated single-sector bets blowing up together
+  optNoEntryMinsToClose: 45,       // no fresh entries after ~2:45pm — no room to develop before 3:15pm square-off
 };
 
 interface SchedulerState {
@@ -174,6 +189,10 @@ function isMarketHours(): boolean {
   const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000) + (now.getTimezoneOffset() * 60 * 1000));
   const day = ist.getDay();
   if (day === 0 || day === 6) return false;
+  // NSE trading holidays (Republic Day, Diwali, etc.) — previously only
+  // weekends were excluded, so the scheduler would scan/attempt to trade on
+  // holidays when no real market data is actually updating.
+  if (isNseTradingHoliday(now)) return false;
   const h = ist.getHours();
   const m = ist.getMinutes();
   const mins = h * 60 + m;
@@ -216,6 +235,10 @@ async function getRules(): Promise<PositionRules> {
       atrTrailMultiplier: parseFloat(m['rules_atrTrailMultiplier'] || '') || DEFAULT_RULES.atrTrailMultiplier,
       adaptiveSizing: m['rules_adaptiveSizing'] !== 'false',
       streakPenaltyPct: parseFloat(m['rules_streakPenaltyPct'] || '') || DEFAULT_RULES.streakPenaltyPct,
+      optDailyLossCap: parseFloat(m['rules_optDailyLossCap'] || '') || DEFAULT_RULES.optDailyLossCap,
+      optDailyProfitLock: parseFloat(m['rules_optDailyProfitLock'] || '') || DEFAULT_RULES.optDailyProfitLock,
+      optMaxPerSector: parseInt(m['rules_optMaxPerSector'] || '') || DEFAULT_RULES.optMaxPerSector,
+      optNoEntryMinsToClose: parseInt(m['rules_optNoEntryMinsToClose'] || '') || DEFAULT_RULES.optNoEntryMinsToClose,
     };
   } catch { return DEFAULT_RULES; }
 }
@@ -359,12 +382,16 @@ async function recalcWallet() {
   let unrealizedPnl = 0;
   const syms = [...new Set(open.map(t => t.symbol))];
   for (const sym of syms) {
-    try {
-      const { price } = await getCurrentPrice(sym);
-      for (const t of open.filter(t => t.symbol === sym)) {
-        unrealizedPnl += (price - t.entryPrice) * t.qty;
-      }
-    } catch { /* skip */ }
+    // getContractCurrentPrice handles both plain equity symbols and composite
+    // option contract symbols (SYMBOL_CE_STRIKE_EXPIRY) — getCurrentPrice alone
+    // always throws for the latter, which was silently dropping all open
+    // options exposure from unrealized P&L / NAV.
+    const price = await getContractCurrentPrice(sym, 0);
+    if (price <= 0) continue; // no real quote available — skip rather than fabricate
+    for (const t of open.filter(t => t.symbol === sym)) {
+      const diff = t.direction === 'SHORT' ? (t.entryPrice - price) : (price - t.entryPrice);
+      unrealizedPnl += diff * t.qty;
+    }
   }
   await db.capitalWallet.update({ where: { id: w.id }, data: { deployed, available: total - deployed, unrealizedPnl, totalCapital: total } });
   // Update peak capital whenever we recalc
@@ -396,12 +423,14 @@ async function getPortfolioDrawdown(): Promise<{ drawdownPct: number; peakCapita
   let unrealizedPnl = 0;
   const syms = [...new Set(open.map(t => t.symbol))];
   for (const sym of syms) {
-    try {
-      const { price } = await getCurrentPrice(sym);
-      for (const t of open.filter(t => t.symbol === sym)) {
-        unrealizedPnl += (price - t.entryPrice) * t.qty;
-      }
-    } catch { /* skip */ }
+    // See recalcWallet() — getContractCurrentPrice covers options contracts too,
+    // so large unrealized options losses actually trip the drawdown circuit breaker.
+    const price = await getContractCurrentPrice(sym, 0);
+    if (price <= 0) continue;
+    for (const t of open.filter(t => t.symbol === sym)) {
+      const diff = t.direction === 'SHORT' ? (t.entryPrice - price) : (price - t.entryPrice);
+      unrealizedPnl += diff * t.qty;
+    }
   }
 
   const currentCapital = w.totalCapital + unrealizedPnl;
@@ -450,7 +479,7 @@ async function getNiftyRegime(niftyData: any[]): Promise<{ regime: 'BULLISH' | '
 }
 
 // ── v2: ATR-based Trailing Stop ─────────────────────────
-async function getATRTrailLevel(symbol: string, entryPrice: number, currentPrice: number, risk: number, rules: PositionRules): Promise<{ useATR: boolean; trailLevel: number; atr: number }> {
+async function getATRTrailLevel(symbol: string, entryPrice: number, currentPrice: number, risk: number, rules: PositionRules, entryDate: Date): Promise<{ useATR: boolean; trailLevel: number; atr: number }> {
   if (rules.atrTrailMultiplier <= 0) {
     // Use fixed R-based trail (v1 behavior)
     const trailLevel = entryPrice + (risk * rules.trailToR);
@@ -458,7 +487,12 @@ async function getATRTrailLevel(symbol: string, entryPrice: number, currentPrice
   }
 
   try {
-    const { data } = await getHistoricalData(symbol, 30);
+    // Fetch enough real history to cover both the ATR(14) warmup and the
+    // position's full holding period, so the high-water-mark below reflects
+    // every real candle since entry, not just the last 30 days.
+    const daysSinceEntry = Math.max(1, Math.ceil((Date.now() - entryDate.getTime()) / 86400000));
+    const lookbackDays = Math.max(45, daysSinceEntry + 20);
+    const { data } = await getHistoricalData(symbol, lookbackDays);
     if (data.length < 14) return { useATR: false, trailLevel: entryPrice + (risk * rules.trailToR), atr: 0 };
 
     const atrArr = ATR.calculate({
@@ -470,9 +504,16 @@ async function getATRTrailLevel(symbol: string, entryPrice: number, currentPrice
     if (atrArr.length === 0) return { useATR: false, trailLevel: entryPrice + (risk * rules.trailToR), atr: 0 };
 
     const atr = atrArr[atrArr.length - 1];
-    // Trail level = highest close seen - ATR * multiplier (stored in notes, or use current price as proxy)
-    // Since we don't track the high-water mark in DB, use: max(current, entry) - ATR * multiplier
-    const highWaterMark = Math.max(currentPrice, entryPrice);
+
+    // Real high-water-mark: the actual highest real daily high since entry,
+    // plus today's real live price. Previously this used max(currentPrice,
+    // entryPrice) as its own "peak" proxy, which always equaled currentPrice
+    // at call time — making the exit condition (cp <= trailLevel) mathematically
+    // impossible and silently disabling the trailing stop entirely.
+    const entryDateStr = entryDate.toISOString().split('T')[0];
+    const candlesSinceEntry = data.filter(c => c.date >= entryDateStr);
+    const highestSinceEntry = candlesSinceEntry.length > 0 ? Math.max(...candlesSinceEntry.map(c => c.high)) : entryPrice;
+    const highWaterMark = Math.max(entryPrice, highestSinceEntry, currentPrice);
     const trailLevel = highWaterMark - (atr * rules.atrTrailMultiplier);
     return { useATR: true, trailLevel: Math.round(trailLevel * 100) / 100, atr: Math.round(atr * 100) / 100 };
   } catch {
@@ -481,9 +522,11 @@ async function getATRTrailLevel(symbol: string, entryPrice: number, currentPrice
 }
 
 // ── Gate Checks (v2 enhanced canOpen) ───────────────────
-async function canOpen(symbol: string, entryPrice: number, qty: number, rules: PositionRules, sector?: string): Promise<{ ok: boolean; reason: string }> {
+async function canOpen(symbol: string, entryPrice: number, qty: number, rules: PositionRules, sector?: string, skipMaxPositionsCheck: boolean = false): Promise<{ ok: boolean; reason: string }> {
   const w = await getWallet();
-  const open = await db.paperTrade.findMany({ where: { status: 'OPEN' } });
+  // Equity-only: exclude options-tagged trades so the options engine's own
+  // (much larger) daily limit doesn't silently consume the equity Top-7 slots.
+  const open = await db.paperTrade.findMany({ where: { status: 'OPEN', tags: { not: { contains: 'options' } } } });
   const now = new Date();
 
   // === v2: Circuit Breaker Check ===
@@ -499,8 +542,12 @@ async function canOpen(symbol: string, entryPrice: number, qty: number, rules: P
     return { ok: false, reason: `DAILY LOSS LIMIT: ₹${Math.abs(st.todayPnl).toFixed(0)} >= ₹${rules.dailyLossLimit}` };
   }
 
-  // Max positions check
-  if (open.length >= rules.maxTotalPositions) return { ok: false, reason: `Max ${rules.maxTotalPositions} positions` };
+  // Max positions check — skipped when the caller (autoScanAndTrade's
+  // capacity-based rank-priority fill) already tracks remaining slots itself
+  // via a real open-count snapshot taken once per cycle; letting THIS check
+  // fire per-candidate in scan order would fill slots by whatever order
+  // getFullUniverse() happens to return them in, not by RS rank priority.
+  if (!skipMaxPositionsCheck && open.length >= rules.maxTotalPositions) return { ok: false, reason: `Max ${rules.maxTotalPositions} positions` };
 
   // Per-stock cap
   const stockOpen = open.filter(t => t.symbol === symbol);
@@ -548,6 +595,20 @@ async function canOpen(symbol: string, entryPrice: number, qty: number, rules: P
 // ── Core Engine: Scan & Auto-Enter (v2) ────────────────
 async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean = false) {
   const rules = await getRules();
+  // Dynamic capital base — config.liveCapital previously came straight from
+  // DEFAULT_CONFIG (a hardcoded ₹300,000 constant that never changed), so
+  // rank-based position sizing (allocatedCapital = liveCapital * weightPct in
+  // runScreening) stayed pegged to that number forever even as the real
+  // wallet genuinely grew or shrank through actual realized P&L. Rank-based
+  // weighting itself is fine to keep (rank 1 should size bigger than rank 7)
+  // — what was missing was the BASE tracking real account size. rules.maxPerStock
+  // (a flat ₹75k ceiling) still caps any single position regardless, so this
+  // doesn't reintroduce runaway compounding — it just means sizing scales with
+  // real capital until that ceiling binds, which is the intended behavior for
+  // live forward-testing (distinct from the backtest's fixed-ticket-size fix,
+  // which addressed thousands of trades compounding within ONE simulated run).
+  const liveWallet = await getWallet();
+  config = { ...config, liveCapital: liveWallet.totalCapital };
   const stocks = getFullUniverse();
   const entries: any[] = [];
   const skipped: any[] = [];
@@ -617,10 +678,53 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
     }
   }
 
+  // ── Real weekly RS ranking (rs-ranking.ts) — replaces the previously
+  //    hardcoded 7-symbol watchlist. Falls back to the static
+  //    TOP_7_RANKED_SYMBOLS list only if no dynamic ranking has been
+  //    computed yet (e.g. the very first tick before the bootstrap runs). ──
+  const { getActiveTop7, getActiveVacantSlots } = await import('@/lib/trading/rs-ranking');
+  const activeTop7 = await getActiveTop7();
+  const activeVacant = await getActiveVacantSlots();
+  const dynamicRankTable = [...activeTop7, ...activeVacant];
+  const { TOP_7_RANKED_SYMBOLS: STATIC_TOP_7 } = await import('@/lib/trading/screening-engine');
+  const extendedPool = activeTop7.length > 0 ? [...activeTop7, ...activeVacant] : STATIC_TOP_7;
+  // symbol -> rank, for the wider (top-20) capacity-based pool below.
+  const EXTENDED_POOL_RANKS = new Map(extendedPool.map(s => [s.symbol.toUpperCase(), s.rank]));
+
+  // ── Capacity-based slot-filling (replaces strict "must be exactly one of
+  //    the Top-7 identities") ─────────────────────────────────────────────
+  // Previously a Top-7 stock with no valid technical setup today just left
+  // that slot empty — the rank-8..20 "vacant slot candidates" were computed
+  // and stored but never actually promoted into trading. Now: any stock in
+  // the wider ranked pool (top ~20) that gets a real signal today is a
+  // candidate; candidates are collected during the scan below, then filled
+  // in RANK order (best RS first) up to however many equity slots are
+  // actually open, instead of requiring the exact top-7 names to fire.
+  //
+  // Eligibility gate = intersection of "highly RS-ranked" (momentum, from
+  // rs-ranking.ts) AND "proven fit for this exact rule-set" (real 5-year
+  // backtest PF/trade-count filter, swing-proven-symbols.ts) — RS rank alone
+  // isn't enough, since a stock can rank well on momentum and still be a
+  // structurally bad fit for this strategy (the options backtest found
+  // exactly this split with high-beta PSU names, and the full-universe
+  // swing backtest found the same split).
+  const { SWING_PROVEN_SYMBOLS } = await import('@/lib/trading/swing-proven-symbols');
+  // Matches canOpen()'s original open-position query exactly (all open
+  // non-options positions, not just autoTraded ones) so this doesn't change
+  // what counts against the cap — just WHEN/how the cap is enforced.
+  const openEquityCount = await db.paperTrade.count({
+    where: { status: 'OPEN', tags: { not: { contains: 'options' } } },
+  });
+  const remainingSlots = Math.max(0, rules.maxTotalPositions - openEquityCount);
+  const pendingCandidates: Array<{
+    stock: NSEStock; signal: any; qty: number; actualEntryPrice: number;
+    capitalDeployed: number; riskRs: number; rank: number;
+  }> = [];
+
   // L2 V-Swing + auto-enter with v2 enhancements
   for (const { stock, data } of l1Pass) {
     try {
-      const signal = runScreening(stock.symbol, data, config, niftyRegime === 'BULLISH');
+      const signal = runScreening(stock.symbol, data, config, niftyRegime === 'BULLISH', false, niftyData, dynamicRankTable);
       if (!signal) { skipped.push({ symbol: stock.symbol, reason: 'No V-Swing signal' }); continue; }
 
       // v2: Apply adaptive sizing
@@ -636,7 +740,7 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
       }
       if (qty <= 0) { skipped.push({ symbol: stock.symbol, reason: 'Qty=0' }); continue; }
 
-      const check = await canOpen(stock.symbol, signal.entryPrice, qty, rules, stock.sector);
+      const check = await canOpen(stock.symbol, signal.entryPrice, qty, rules, stock.sector, true);
       if (!check.ok) { skipped.push({ symbol: stock.symbol, reason: check.reason }); continue; }
 
       // ── v3: Apply slippage to actual entry price ──────────────────────
@@ -667,18 +771,58 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
         timestamp: new Date().toISOString(),
       };
 
-      // ── ALWAYS Post Discord Signal Alert for ALL 399 NSE eligible setups ──
-      try {
-        await sendDiscordEquitySignal(discordSignal);
-      } catch (discordErr) {
-        console.warn('[Discord] Equity signal alert failed (non-blocking):', discordErr);
+      // ── Discord signal dedup: at most once per symbol per trading day ──
+      // Previously this posted unconditionally every scan cycle (every
+      // scanIntervalMin, ~15 min) for as long as a setup stayed valid —
+      // for the ~392 non-whitelisted symbols that never get an open position
+      // (which is what naturally suppresses re-alerts for whitelisted
+      // symbols via canOpen()'s "Open position exists" check), the same
+      // ENTRY SIGNAL embed could repost dozens of times across a single day.
+      const dayStartIST = new Date(istDateString(new Date()) + 'T00:00:00+05:30');
+      const alreadyAlertedToday = await db.autoTradeLog.findFirst({
+        where: { action: 'EQUITY_SIGNAL', symbol: stock.symbol, createdAt: { gte: dayStartIST } },
+      });
+      if (!alreadyAlertedToday) {
+        try {
+          await sendDiscordEquitySignal(discordSignal);
+        } catch (discordErr) {
+          console.warn('[Discord] Equity signal alert failed (non-blocking):', discordErr);
+        }
+        await db.autoTradeLog.create({
+          data: {
+            action: 'EQUITY_SIGNAL', symbol: stock.symbol,
+            signal: JSON.stringify(discordSignal), executed: false,
+            reason: `${signal.setupType} signal alerted @ ₹${actualEntryPrice}`,
+          },
+        });
       }
 
-      // ── Paper Trade Creation: Restricted to Top 7 Swing Watchlist Only ─────
-      const TOP_7_WATCHLIST = ['TATAELXSI', 'DEEPAKNTR', 'ADANIENT', 'TATAPOWER', 'HINDCOPPER', 'VEDL', 'SUZLON'];
-      const isEligibleForPaperTrade = TOP_7_WATCHLIST.includes(stock.symbol.toUpperCase());
-      if (!isEligibleForPaperTrade) continue;
+      // ── Pool eligibility: wider ranked pool (top ~20), not strict Top-7 ──
+      const symUpper = stock.symbol.toUpperCase();
+      const rank = EXTENDED_POOL_RANKS.get(symUpper);
+      const inPool = rank !== undefined && SWING_PROVEN_SYMBOLS.has(symUpper);
+      if (!inPool) continue;
 
+      // canOpen() above already rejected this candidate if it has an open
+      // position, is over the per-stock/monthly/capital limits, etc. — only
+      // the max-total-positions gate was deferred to the rank-priority fill below.
+      pendingCandidates.push({ stock, signal, qty, actualEntryPrice, capitalDeployed, riskRs, rank: rank! });
+    } catch (err) { skipped.push({ symbol: stock.symbol, reason: String(err) }); }
+  }
+
+  // ── Rank-priority fill: best RS first, up to however many equity slots
+  //    are actually open. A rank-1 stock with no signal today just cedes
+  //    its slot to whichever lower-ranked pool member DID get a signal,
+  //    instead of leaving capital idle. ──────────────────────────────────
+  pendingCandidates.sort((a, b) => a.rank - b.rank);
+  let slotsLeft = remainingSlots;
+  for (const cand of pendingCandidates) {
+    if (slotsLeft <= 0) {
+      skipped.push({ symbol: cand.stock.symbol, reason: `Pool-eligible (rank ${cand.rank}) but all ${rules.maxTotalPositions} equity slots filled by higher-priority candidates` });
+      continue;
+    }
+    const { stock, signal, qty, actualEntryPrice, rank } = cand;
+    try {
       const trade = await db.paperTrade.create({
         data: {
           symbol: stock.symbol, stockName: stock.name, direction: 'LONG',
@@ -686,7 +830,8 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
           stopLoss: signal.stopLoss, targetPrice: signal.targetPrice,
           autoTraded: true,
           notes: `AUTO v3 | ${signal.setupType} | Score:${signal.score}/6 | R:R:${signal.riskReward}x | Regime:${niftyRegime} | Factor:${(adaptiveFactor * 100).toFixed(0)}% | Slippage adj entry`,
-          tags: `auto,${signal.setupType === 'A+' ? 'aplus' : 'b'},score-${signal.score},${stock.sector || ''}`.replace(/,$/, ''),
+          // rank-N tag feeds the rank-bucket win-rate tracker (rank-bucket-intelligence.ts)
+          tags: `auto,${signal.setupType === 'A+' ? 'aplus' : 'b'},score-${signal.score},rank-${rank},${stock.sector || ''}`.replace(/,$/, ''),
         },
       });
       await db.autoTradeLog.create({
@@ -694,7 +839,7 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
           action: 'AUTO_ENTRY', symbol: stock.symbol, tradeId: trade.id,
           signal: JSON.stringify({ ...signal, slippageAdjustedEntry: actualEntryPrice }),
           executed: true,
-          reason: `${signal.setupType} | Score ${signal.score}/6 | Qty ${qty} @ ₹${actualEntryPrice} | R:R ${signal.riskReward}x | Factor:${(adaptiveFactor * 100).toFixed(0)}%`,
+          reason: `${signal.setupType} | Score ${signal.score}/6 | Qty ${qty} @ ₹${actualEntryPrice} | R:R ${signal.riskReward}x | Factor:${(adaptiveFactor * 100).toFixed(0)}% | Rank ${rank}`,
         },
       });
 
@@ -706,10 +851,12 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
       entries.push({
         symbol: stock.symbol, setupType: signal.setupType, score: signal.score,
         entryPrice: actualEntryPrice, qty, tradeId: trade.id,
-        adaptiveFactor, niftyRegime,
+        adaptiveFactor, niftyRegime, rank,
       });
+      slotsLeft--;
     } catch (err) { skipped.push({ symbol: stock.symbol, reason: String(err) }); }
   }
+
   await recalcWallet();
   return {
     entries, skipped, l1Passed: l1Pass.length, l2Signals: entries.length,
@@ -721,7 +868,11 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
 // ── Core Engine: Check Exits (v2 with health scoring) ─
 async function autoCheckExits() {
   const rules = await getRules();
-  const openTrades = await db.paperTrade.findMany({ where: { status: 'OPEN' }, orderBy: { entryDate: 'asc' } });
+  // Equity-only: options positions have their own dedicated exit path
+  // (autoOptionsCheckExits) with the correct cost model, expiry-day close,
+  // and 3:15 PM square-off. Without this filter, options trades were also
+  // processed here first with the wrong (equity) cost model.
+  const openTrades = await db.paperTrade.findMany({ where: { status: 'OPEN', tags: { not: { contains: 'options' } } }, orderBy: { entryDate: 'asc' } });
   const exits: any[] = [];
   const holding: any[] = [];
   const partialBooks: any[] = [];
@@ -754,7 +905,7 @@ async function autoCheckExits() {
       }
       // 3. Trailing stop (v2: ATR-based if configured)
       else if (risk > 0 && rMultiple >= rules.trailingStopR) {
-        const trail = await getATRTrailLevel(trade.symbol, trade.entryPrice, cp, risk, rules);
+        const trail = await getATRTrailLevel(trade.symbol, trade.entryPrice, cp, risk, rules, new Date(trade.entryDate));
         if (trail.useATR) {
           // ATR trailing: only exit if price drops below ATR-based level
           if (cp <= trail.trailLevel) {
@@ -790,21 +941,60 @@ async function autoCheckExits() {
           const bookQty = Math.max(1, Math.floor(trade.qty * (rules.partialBookPct / 100)));
           const remainingQty = trade.qty - bookQty;
           if (remainingQty >= 1) {
-            const bookPnl = (cp - trade.entryPrice) * bookQty;
+            // ── v3: Deduct real transaction costs on the booked leg — previously
+            //    credited gross P&L, inconsistent with full exits which correctly
+            //    deduct costs before crediting the wallet. ──
+            const bookCosts: CostBreakdown = calculateEquityCosts(trade.entryPrice, cp, bookQty, trade.symbol);
+            const grossBookPnl = (cp - trade.entryPrice) * bookQty;
+            const netBookPnl = grossBookPnl - bookCosts.totalCosts;
             await db.paperTrade.update({
               where: { id: trade.id },
               data: { qty: remainingQty, tags: (trade.tags ? trade.tags + ',' : '') + 'partial-booked' },
             });
             const w = await getWallet();
-            await db.capitalWallet.update({ where: { id: w.id }, data: { realizedPnl: w.realizedPnl + bookPnl } });
+            await db.capitalWallet.update({
+              where: { id: w.id },
+              data: {
+                realizedPnl: Math.round((w.realizedPnl + netBookPnl) * 100) / 100,
+                totalCostsPaid: Math.round(((w.totalCostsPaid || 0) + bookCosts.totalCosts) * 100) / 100,
+              },
+            });
             await db.autoTradeLog.create({
               data: {
                 action: 'PARTIAL_BOOK', symbol: trade.symbol, tradeId: trade.id,
                 signal: '', executed: true,
-                reason: `Booked ${bookQty}/${trade.qty + bookQty} at ${rMultiple.toFixed(1)}R | P&L: ₹${bookPnl.toLocaleString()}`,
+                reason: `Booked ${bookQty}/${trade.qty + bookQty} at ${rMultiple.toFixed(1)}R | Net P&L: ₹${netBookPnl.toLocaleString()} (costs ₹${bookCosts.totalCosts.toFixed(2)})`,
               },
             });
-            partialBooks.push({ symbol: trade.symbol, bookedQty: bookQty, remainingQty, rMultiple, pnl: bookPnl, exitPrice: cp });
+            partialBooks.push({ symbol: trade.symbol, bookedQty: bookQty, remainingQty, rMultiple, pnl: netBookPnl, exitPrice: cp });
+
+            // ── Discord partial-book alert (previously imported but never called) ──
+            try {
+              const notes = trade.notes || '';
+              const setupMatch = notes.match(/([AB]\+?)\s*Setup|([AB]\+?)\s*score/i);
+              const scoreMatch = notes.match(/Score:(\d)/i);
+              await sendDiscordEquityPartialBook({
+                signal: {
+                  symbol: trade.symbol, stockName: trade.stockName || trade.symbol,
+                  entryPrice: trade.entryPrice, stopLoss: trade.stopLoss, targetPrice: trade.targetPrice,
+                  qty: trade.qty, riskReward: 0,
+                  score: scoreMatch ? parseInt(scoreMatch[1]) : 0,
+                  setupType: (setupMatch?.[1] || setupMatch?.[2] || 'B') as 'A+' | 'B',
+                  niftyRegime: 'N/A', adaptiveFactor: 1,
+                  sector: trade.tags?.split(',').find(t => !['auto', 'aplus', 'b', 'partial-booked'].includes(t)) || 'Unknown',
+                  capital: trade.entryPrice * trade.qty,
+                  riskRs: (trade.entryPrice - trade.stopLoss) * trade.qty,
+                  dataSource: 'DhanHQ/Yahoo', tradeId: trade.id, timestamp: trade.entryDate.toISOString(),
+                },
+                bookedQty: bookQty, remainingQty, bookPrice: cp,
+                rMultiple: `${rMultiple.toFixed(2)}R`,
+                grossPnl: Math.round(grossBookPnl * 100) / 100,
+                netPnl: Math.round(netBookPnl * 100) / 100,
+                totalCosts: Math.round(bookCosts.totalCosts * 100) / 100,
+              });
+            } catch (discordErr) {
+              console.warn('[Discord] Partial-book notification failed (non-blocking):', discordErr);
+            }
           }
         }
       }
@@ -1021,19 +1211,30 @@ async function getSwingStocksStatus(): Promise<Array<{
   openPosition?: { entryPrice: number; qty: number; pnl: number; pnlPct: number };
 }>> {
   try {
-    const { TOP_7_RANKED_SYMBOLS, runScreening, DEFAULT_CONFIG } = await import('@/lib/trading/screening-engine');
+    const { runScreening, DEFAULT_CONFIG, TOP_7_RANKED_SYMBOLS: STATIC_TOP_7 } = await import('@/lib/trading/screening-engine');
+    const { getActiveTop7, getActiveVacantSlots } = await import('@/lib/trading/rs-ranking');
+    const activeTop7 = await getActiveTop7();
+    const activeVacant = await getActiveVacantSlots();
+    const dynamicRankTable = [...activeTop7, ...activeVacant];
+    const watchlistStocks = activeTop7.length > 0 ? activeTop7 : STATIC_TOP_7;
+
     const results: Array<{
       symbol: string; name: string; rank: number; weightPct: number;
       currentPrice: number; aligned: boolean; missing: string[];
       openPosition?: { entryPrice: number; qty: number; pnl: number; pnlPct: number };
     }> = [];
 
-    for (const stock of TOP_7_RANKED_SYMBOLS) {
+    let niftyData: any[] = [];
+    try {
+      niftyData = (await getHistoricalData('NIFTY50', 350)).data;
+    } catch { /* RS check below will simply stay unproven without Nifty data */ }
+
+    for (const stock of watchlistStocks) {
       try {
         const { data } = await getHistoricalData(stock.symbol, 300);
         const { price } = await getCurrentPrice(stock.symbol);
         // includeUnmet=true so we get the signal even if not all conditions met
-        const signal = runScreening(stock.symbol, data, DEFAULT_CONFIG, true, true);
+        const signal = runScreening(stock.symbol, data, DEFAULT_CONFIG, true, true, niftyData, dynamicRankTable);
 
         const aligned = signal
           ? signal.checks.trendAbove && signal.checks.pullbackOk && signal.checks.triggerOk && signal.checks.volumeOk
@@ -1097,6 +1298,51 @@ async function dispatchHourlyHeartbeat(now: Date) {
   }
 }
 
+// ── Real max-concurrency calculation ────────────────────────────────────
+// "How many were open at once" cannot be answered by checking status='OPEN'
+// at the moment the EOD report runs (3:30pm+) — options are force-closed by
+// 3:15pm, so that snapshot is almost always 0 for options specifically, and
+// even for equity a snapshot only shows ONE instant, not the day's peak.
+// This instead sweeps the REAL entryDate/exitDate timestamps of every trade
+// that overlapped today's session at all, and finds the true maximum number
+// of simultaneously-open positions — a standard interval-overlap count, not
+// a fabricated estimate.
+async function computeMaxConcurrency(dayStart: Date, dayEnd: Date, now: Date, tagFilter: 'options' | 'equity'): Promise<number> {
+  const tagWhere = tagFilter === 'options'
+    ? { tags: { contains: 'options' } }
+    : { tags: { not: { contains: 'options' } } };
+
+  const relevant = await db.paperTrade.findMany({
+    where: {
+      ...tagWhere,
+      entryDate: { lte: dayEnd },
+      OR: [
+        { status: 'OPEN' },
+        { status: 'CLOSED', exitDate: { gte: dayStart } },
+      ],
+    },
+  });
+
+  const events: { t: number; delta: number }[] = [];
+  for (const t of relevant) {
+    const start = Math.max(new Date(t.entryDate).getTime(), dayStart.getTime());
+    const rawEnd = t.status === 'OPEN' ? now.getTime() : new Date(t.exitDate as Date).getTime();
+    const end = Math.min(rawEnd, dayEnd.getTime());
+    if (end <= start) continue;
+    events.push({ t: start, delta: 1 });
+    events.push({ t: end, delta: -1 });
+  }
+  events.sort((a, b) => a.t - b.t || b.delta - a.delta);
+
+  let running = 0;
+  let max = 0;
+  for (const e of events) {
+    running += e.delta;
+    max = Math.max(max, running);
+  }
+  return max;
+}
+
 // ── EOD Summary Dispatcher (fires once per day after 3:30 PM IST market close) ──
 async function dispatchEODSummary(now: Date) {
   const ist = getISTDate(now);
@@ -1141,6 +1387,32 @@ async function dispatchEODSummary(now: Date) {
       .filter(t => (t.netPnl ?? t.pnl ?? 0) < 0)
       .map(t => `${t.symbol}: ₹${Math.round(t.netPnl ?? t.pnl ?? 0).toLocaleString('en-IN')} (${t.exitReason || 'CLOSED'})`);
 
+    // ── Forward-test visibility: signals received, live concurrency, real
+    //    profit factor, and real capital-per-trade sizing ──────────────────
+    const grossWinPnl = closedTrades.filter(t => (t.netPnl ?? t.pnl ?? 0) > 0).reduce((s, t) => s + (t.netPnl ?? t.pnl ?? 0), 0);
+    const grossLossPnl = Math.abs(closedTrades.filter(t => (t.netPnl ?? t.pnl ?? 0) < 0).reduce((s, t) => s + (t.netPnl ?? t.pnl ?? 0), 0));
+    const profitFactor = grossLossPnl > 0 ? Math.round((grossWinPnl / grossLossPnl) * 100) / 100 : (grossWinPnl > 0 ? 999 : 0);
+
+    const optionsSignalsToday = await db.autoTradeLog.count({
+      where: { action: 'AUTO_ENTRY', symbol: { contains: '_' }, createdAt: { gte: dayStart, lte: dayEnd } },
+    });
+
+    // Real PEAK concurrency for today (see computeMaxConcurrency) — not a
+    // point-in-time snapshot, which is meaningless for options once they've
+    // been force-closed by the 3:15pm square-off.
+    const peakConcurrentOptions = await computeMaxConcurrency(dayStart, dayEnd, now, 'options');
+    const peakConcurrentEquity = await computeMaxConcurrency(dayStart, dayEnd, now, 'equity');
+
+    // Real avg capital per trade — from today's trades that were actually
+    // open at some point (same relevance window as the concurrency sweep).
+    const todaysTrades = await db.paperTrade.findMany({
+      where: { entryDate: { lte: dayEnd }, OR: [{ status: 'OPEN' }, { status: 'CLOSED', exitDate: { gte: dayStart } }] },
+    });
+    const avgCapitalPerTrade = todaysTrades.length > 0
+      ? Math.round(todaysTrades.reduce((s, t) => s + t.entryPrice * t.qty, 0) / todaysTrades.length)
+      : 0;
+    const estCapitalForConcurrency = avgCapitalPerTrade * (peakConcurrentOptions + peakConcurrentEquity);
+
     await sendDiscordEODSummary({
       date: today,
       totalTrades,
@@ -1154,6 +1426,12 @@ async function dispatchEODSummary(now: Date) {
       capitalDeployed: Math.round(capitalDeployed * 100) / 100,
       winningTradesList,
       losingTradesList,
+      optionsSignalsToday,
+      peakConcurrentOptions,
+      peakConcurrentEquity,
+      profitFactor,
+      avgCapitalPerTrade,
+      estCapitalForConcurrency,
     });
     await setSchedulerKV('sched_lastEODDate', today);
   } catch (err) {
@@ -1177,12 +1455,21 @@ async function dispatchWeeklyRebalanceNotice(now: Date) {
 
   try {
     const { sendDiscordWeeklyRebalanceNotice } = await import('@/lib/notifications/discord');
-    const { TOP_7_RANKED_SYMBOLS, VACANT_SLOT_CANDIDATES } = await import('@/lib/trading/screening-engine');
+    const { computeWeeklyRSRanking, getActiveTop7, getActiveVacantSlots } = await import('@/lib/trading/rs-ranking');
+
+    // Recompute the real weekly RS ranking (real historical prices vs. real
+    // Nifty 50 returns — see rs-ranking.ts) before reporting it. This can
+    // take a few minutes for the full NSE universe; it's fine to await here
+    // since this only runs once, in the pre-market 8:30-11:00 AM window,
+    // guarded above by the once-per-cycleDate check.
+    await computeWeeklyRSRanking();
+    const top7 = await getActiveTop7();
+    const vacant = await getActiveVacantSlots();
 
     await sendDiscordWeeklyRebalanceNotice({
       rebalanceTime: istTimeStr(now),
-      top7Symbols: TOP_7_RANKED_SYMBOLS.map(s => `${s.symbol} (${Math.round(s.weightPct * 100)}%)`),
-      vacantSlotsFilled: VACANT_SLOT_CANDIDATES.map(s => `${s.symbol} (${Math.round(s.weightPct * 100)}%)`),
+      top7Symbols: top7.map(s => `${s.symbol} (${Math.round(s.weightPct * 100)}%)`),
+      vacantSlotsFilled: vacant.map(s => `${s.symbol} (${Math.round(s.weightPct * 100)}%)`),
     });
     await setSchedulerKV('sched_lastRebalanceDate', today);
   } catch (err) {
@@ -1191,22 +1478,71 @@ async function dispatchWeeklyRebalanceNotice(now: Date) {
 }
 
 // ── Scheduler Control ──────────────────────────────────
+// In-memory mutex: this app runs as a single persistent Node process
+// (see daemon.js), and a tick can legitimately take 2+ minutes to scan
+// hundreds of stocks. Without this guard, the 30s server timer + the GET
+// handler's fire-and-forget trigger + multiple independent frontend
+// pollers can all invoke overlapping ticks, racing on every timestamp-gated
+// Discord dispatcher, the daily P&L/loss-limit counters, and wallet credits
+// on concurrent exits (can silently defeat the circuit breaker or
+// double-credit P&L). One flag serializes everything below it.
+let tickInProgress = false;
+
 async function runSchedulerTick() {
+  if (tickInProgress) return { skipped: true, reason: 'Previous tick still running' };
+  tickInProgress = true;
+  try {
+    return await runSchedulerTickInner();
+  } finally {
+    tickInProgress = false;
+  }
+}
+
+async function runSchedulerTickInner() {
   const now = new Date();
 
   // Auto-enable schedulers on first run (always-on auto-trade mode)
   await maybeAutoEnableSchedulers();
 
+  // Bootstrap the real weekly RS ranking on first run if none exists yet —
+  // otherwise a fresh deployment would trade off an empty dynamic watchlist
+  // until the next Monday 8:30 AM rebalance window.
+  try {
+    const { ensureWeeklyRankingBootstrapped } = await import('@/lib/trading/rs-ranking');
+    await ensureWeeklyRankingBootstrapped();
+  } catch (err) {
+    console.warn('[AutoTrade] Weekly ranking bootstrap error:', err);
+  }
+
   // ── Always-on scheduled Discord dispatchers (run regardless of market hours) ──
   await dispatchEODSummary(now);
   await dispatchWeeklyRebalanceNotice(now);
 
-  if (!isMarketHours()) return { marketHours: false, message: 'Market closed' };
+  // ── Automatic 15-Minute Discord Health Check Dispatcher ──
+  // Runs regardless of market hours: a DhanHQ token can lapse at any hour,
+  // and options have no data fallback, so the warning must not wait for
+  // market open to fire (previously gated below the market-hours early return).
+  let healthCheckSent = false;
+  const lastHealthStr = (await db.appSettings.findUnique({ where: { key: 'sched_lastHealthCheckAt' } }))?.value;
+  const lastHealthTime = lastHealthStr ? new Date(lastHealthStr).getTime() : 0;
+  if (now.getTime() - lastHealthTime >= 15 * 60000) {
+    try {
+      const { sendDiscordHealthCheck } = await import('@/lib/notifications/discord');
+      const report = await buildSystemHealthReport();
+      await sendDiscordHealthCheck(report);
+      await setSchedulerKV('sched_lastHealthCheckAt', now.toISOString());
+      healthCheckSent = true;
+    } catch (err) {
+      console.warn('[AutoTrade] 15-min Discord health check dispatch error:', err);
+    }
+  }
+
+  if (!isMarketHours()) return { marketHours: false, message: 'Market closed', healthCheckSent };
   const state = await getSchedulerState();
-  if (!state.enabled) return { marketHours: true, enabled: false };
+  if (!state.enabled) return { marketHours: true, enabled: false, healthCheckSent };
 
   await resetDailyCounters();
-  const results: any = { scanResult: null, exitResult: null };
+  const results: any = { scanResult: null, exitResult: null, healthCheckSent };
 
   // ── Equity Swing scan & exit ──
   if (state.nextScanAt) {
@@ -1265,49 +1601,40 @@ async function runSchedulerTick() {
   // ── Hourly Heartbeat (market hours only) ──
   await dispatchHourlyHeartbeat(now);
 
-  // ── Automatic 15-Minute Discord Health Check Dispatcher ──
-  const lastHealthStr = (await db.appSettings.findUnique({ where: { key: 'sched_lastHealthCheckAt' } }))?.value;
-  const lastHealthTime = lastHealthStr ? new Date(lastHealthStr).getTime() : 0;
-  if (now.getTime() - lastHealthTime >= 15 * 60000) {
-    try {
-      const { sendDiscordHealthCheck } = await import('@/lib/notifications/discord');
-      const report = await buildSystemHealthReport();
-      await sendDiscordHealthCheck(report);
-      await setSchedulerKV('sched_lastHealthCheckAt', now.toISOString());
-      results.healthCheckSent = true;
-    } catch (err) {
-      console.warn('[AutoTrade] 15-min Discord health check dispatch error:', err);
-    }
-  }
-
   return { ...results, marketHours: true, enabled: true, schedulerState: await getSchedulerState() };
 }
 
 // ── Options Auto-Trade Functions ────────────────────────
+// Index lot sizes verified against NSE circular FAOP70616.pdf (effective the
+// Jan-2026 contract series onward): NIFTY 65, BANKNIFTY 30, FINNIFTY 60,
+// MIDCPNIFTY 120. These must be updated again whenever NSE revises them —
+// check the NSE F&O circulars page before assuming these are still current.
 export function getOptionLotSize(symbol: string): number {
   const sym = symbol.toUpperCase();
-  if (sym === 'NIFTY' || sym === 'NIFTY50') return 25;
-  if (sym === 'BANKNIFTY') return 15;
-  if (sym === 'FINNIFTY') return 25;
-  if (sym === 'MIDCPNIFTY') return 50;
+  if (sym === 'NIFTY' || sym === 'NIFTY50') return 65;
+  if (sym === 'BANKNIFTY') return 30;
+  if (sym === 'FINNIFTY') return 60;
+  if (sym === 'MIDCPNIFTY') return 120;
 
-  // Stock options official exchange lot sizes
-  if (sym === 'RELIANCE') return 250;
-  if (sym === 'SBIN') return 750;
-  if (sym === 'LT') return 150;
-  if (sym === 'TCS') return 175;
+  // Stock options official exchange lot sizes — kept in sync with the
+  // verified table in src/lib/options/black-scholes.ts (see its comment for
+  // sourcing/verification notes).
+  if (sym === 'RELIANCE') return 250; // unverified in this pass
+  if (sym === 'SBIN') return 750; // unverified in this pass
+  if (sym === 'LT') return 175;
+  if (sym === 'TCS') return 175; // unverified in this pass
   if (sym === 'INFY') return 400;
-  if (sym === 'HDFCBANK') return 550;
+  if (sym === 'HDFCBANK') return 650;
   if (sym === 'ICICIBANK') return 700;
-  if (sym === 'BAJFINANCE') return 125;
-  if (sym === 'TATAMOTORS') return 550;
+  if (sym === 'BAJFINANCE') return 750;
+  if (sym === 'TATAMOTORS') return 550; // unverified in this pass
   if (sym === 'BHARTIARTL') return 475;
-  if (sym === 'HAL') return 300;
-  
+  if (sym === 'HAL') return 300; // unverified in this pass
+
   return 100;
 }
 
-async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: number = 40): Promise<{
+async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFIDENCE, minScore: number = SNIPER_MIN_SCORE): Promise<{
   signalsGenerated: number; entriesCreated: number; errors: string[];
 }> {
   const errors: string[] = [];
@@ -1319,16 +1646,55 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
     const lastOptReset = (await db.appSettings.findUnique({ where: { key: 'opt_lastResetDate' } }))?.value;
     if (lastOptReset !== today) {
       await db.appSettings.upsert({ where: { key: 'opt_todayEntries' }, update: { value: '0' }, create: { key: 'opt_todayEntries', value: '0' } });
+      await db.appSettings.upsert({ where: { key: 'opt_todayPnl' }, update: { value: '0' }, create: { key: 'opt_todayPnl', value: '0' } });
       await db.appSettings.upsert({ where: { key: 'opt_lastResetDate' }, update: { value: today }, create: { key: 'opt_lastResetDate', value: today } });
     }
 
     const todayEntriesStr = (await db.appSettings.findUnique({ where: { key: 'opt_todayEntries' } }))?.value || '0';
     let todayEntries = parseInt(todayEntriesStr, 10);
 
-    // Max 50 options entries per day (increased from 30 for paper-trading ALL eligible)
-    const OPT_DAILY_LIMIT = 50;
+    // Sniper mode: a handful of trades a day, not 30-50 — the scoring bar in
+    // options-scanner.ts now does the real filtering; this cap is just a
+    // defense-in-depth backstop in case scoring ever over-fires.
+    const OPT_DAILY_LIMIT = 10;
     if (todayEntries >= OPT_DAILY_LIMIT) {
       return { signalsGenerated: 0, entriesCreated: 0, errors: [`Daily options entry limit (${OPT_DAILY_LIMIT}) reached`] };
+    }
+
+    // ── Options guardrails engine ───────────────────────────────────────
+    // Previously the options engine had NO P&L-based circuit breaker at all
+    // (opt_todayPnl was read in the status endpoint but never written by
+    // anything) — only the flat entry-count cap above. These three gates
+    // close that gap: stop digging on a bad day, stop pressing on a good
+    // one, and don't open fresh risk with no runway before square-off.
+    const rules = await getRules();
+    const optTodayPnl = parseFloat((await db.appSettings.findUnique({ where: { key: 'opt_todayPnl' } }))?.value || '0');
+
+    if (optTodayPnl <= -rules.optDailyLossCap) {
+      await db.autoTradeLog.create({ data: { action: 'OPT_CIRCUIT_BREAKER', symbol: 'GUARDRAIL', signal: '', executed: false, reason: `Daily options loss cap hit: ₹${optTodayPnl.toFixed(0)} <= -₹${rules.optDailyLossCap}` } });
+      return { signalsGenerated: 0, entriesCreated: 0, errors: [`Daily options loss cap reached (₹${optTodayPnl.toFixed(0)})`] };
+    }
+    if (optTodayPnl >= rules.optDailyProfitLock) {
+      await db.autoTradeLog.create({ data: { action: 'OPT_PROFIT_LOCK', symbol: 'GUARDRAIL', signal: '', executed: false, reason: `Daily options profit lock hit: ₹${optTodayPnl.toFixed(0)} >= ₹${rules.optDailyProfitLock} — quitting while ahead` } });
+      return { signalsGenerated: 0, entriesCreated: 0, errors: [`Daily options profit lock reached (₹${optTodayPnl.toFixed(0)}) — no new entries today`] };
+    }
+    if (timeToClose() <= rules.optNoEntryMinsToClose) {
+      return { signalsGenerated: 0, entriesCreated: 0, errors: [`Within ${rules.optNoEntryMinsToClose}min of square-off — no new entries`] };
+    }
+
+    // Correlated-exposure tally — count currently OPEN options positions per
+    // sector so the entry loop below can block piling into 3+ correlated
+    // single-sector bets that would all move together on one sector shock.
+    const openOptionsForSector = await db.paperTrade.findMany({
+      where: { status: 'OPEN', tags: { contains: 'options' } },
+      select: { notes: true },
+    });
+    const sectorOpenCount: Record<string, number> = {};
+    for (const t of openOptionsForSector) {
+      try {
+        const sec = t.notes ? (JSON.parse(t.notes).sector as string | undefined) : undefined;
+        if (sec) sectorOpenCount[sec] = (sectorOpenCount[sec] || 0) + 1;
+      } catch { /* ignore unparsable notes */ }
     }
 
     // Run the options scanner across full F&O universe
@@ -1368,8 +1734,25 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
       });
       if (recentSignal) continue;
 
-      // ── Fetch REAL live option premium from DhanHQ Option Chain ───────
+      // 3. Correlated-exposure block — don't let 3+ concurrent options
+      //    positions pile into the same sector (they'd all move together on
+      //    one sector-wide shock instead of behaving like diversified bets).
+      if (sig.sector && (sectorOpenCount[sig.sector] || 0) >= rules.optMaxPerSector) {
+        await db.autoTradeLog.create({
+          data: {
+            action: 'OPT_SECTOR_BLOCKED',
+            symbol: tradeSymbol,
+            signal: '',
+            executed: false,
+            reason: `Skipped — ${sectorOpenCount[sig.sector]} positions already open in ${sig.sector} (max ${rules.optMaxPerSector})`,
+          },
+        });
+        continue;
+      }
+
+      // ── Fetch REAL live option premium (+ real delta) from DhanHQ Option Chain ───────
       let premium = 0;
+      let realDelta = 0.5;
       try {
         const chain = await fetchDhanOptionChain(sig.symbol, sig.expiry);
         if (chain && chain.chain && chain.chain.length > 0) {
@@ -1381,6 +1764,7 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
           const quote = sig.direction === 'CE' ? row?.ce : row?.pe;
           if (quote && quote.ltp > 0) {
             premium = quote.ltp;
+            realDelta = quote.delta || 0.5;
           }
         }
       } catch (err) {
@@ -1389,8 +1773,18 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
 
       if (premium <= 0) continue;
 
-      const sl = Math.round(premium * 0.75 * 100) / 100; // -25% SL
-      const tp = Math.round(premium * 1.50 * 100) / 100; // +50% TP
+      // ── Structure-based adaptive SL/TP (replaces a flat -25%/+50%) ──────
+      // Uses the real underlying spot-distance-to-support/resistance
+      // computed at scan time (sig.stopSpotDistance/targetSpotDistance),
+      // converted via the REAL fetched premium and REAL delta just above —
+      // never a placeholder premium.
+      const structureTargets = convertToPremiumTargets(
+        { stopSpotDistance: sig.stopSpotDistance, targetSpotDistance: sig.targetSpotDistance },
+        realDelta,
+        premium
+      );
+      const sl = Math.round(premium * (1 + structureTargets.stopLossPct / 100) * 100) / 100;
+      const tp = Math.round(premium * (1 + structureTargets.targetPct / 100) * 100) / 100;
       const totalCapNeeded = premium * lotSize;
 
       // ── Send Discord Signal Alert ──────────────────────────────────────
@@ -1433,9 +1827,15 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
       });
 
       // ── Paper Trade Creation: ALL eligible signals (whitelist removed) ──
-      if (dailyLimitReached) continue;
+      if (dailyLimitReached) {
+        // Recorder — log the factor breakdown even for signals that didn't
+        // get traded, so the validator can later see whether the daily cap
+        // is turning away signals that would have won.
+        await recordSignal(sig, false);
+        continue;
+      }
 
-      await db.paperTrade.create({
+      const createdTrade = await db.paperTrade.create({
         data: {
           symbol: tradeSymbol,
           stockName: `${sig.direction} ${sig.strike} ${sig.expiry}`,
@@ -1447,7 +1847,10 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
           targetPrice: tp,
           status: 'OPEN',
           autoTraded: true,
-          tags: 'options,intraday',
+          // regime-XXX tag feeds the Layer-3 statistical win-rate-by-regime
+          // tracker (regime-intelligence.ts) — starts genuinely empty and
+          // only becomes meaningful after real trades accumulate.
+          tags: `options,intraday,regime-${sig.marketRegime}`,
           notes: JSON.stringify({
             spotPrice: sig.entryPrice,
             strike: sig.strike,
@@ -1459,10 +1862,18 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
             adx: sig.adx,
             atrPct: sig.atrPct,
             realLtpFetched: true,
+            sector: sig.sector,
           }),
         },
       });
 
+      // Recorder — log this signal's full factor breakdown linked to the
+      // trade that will validate it once it closes (see resolveSignalByTradeId
+      // in autoOptionsCheckExits). This is what makes real per-factor
+      // win-rate attribution possible later via getFactorAttribution().
+      await recordSignal(sig, true, createdTrade.id);
+
+      if (sig.sector) sectorOpenCount[sig.sector] = (sectorOpenCount[sig.sector] || 0) + 1;
       todayEntries++;
       entriesCreated++;
       await db.appSettings.upsert({ where: { key: 'opt_todayEntries' }, update: { value: String(todayEntries) }, create: { key: 'opt_todayEntries', value: String(todayEntries) } });
@@ -1499,43 +1910,61 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
         if (!currentSpot) continue;
 
         const notes = trade.notes ? JSON.parse(trade.notes) : {};
-        const spotAtEntry = notes.spotPrice || trade.entryPrice;
         const direction = trade.direction;
         const expiry = notes.expiry || '';
         const strike = notes.strike || 0;
 
-        // ── Phase 3: Fetch REAL live option premium from DhanHQ Option Chain ───────
+        // ── Fetch REAL live option premium from DhanHQ Option Chain ───────
         let currentPremium = 0;
         if (expiry && strike > 0) {
           try {
             const chain = await fetchDhanOptionChain(underlying, expiry);
             if (chain && chain.chain && chain.chain.length > 0) {
-              const row = chain.chain.find(r => r.strike === strike);
+              // Exact strike, or fall back to NEAREST strike (matches the entry
+              // path). The live chain only returns a window of strikes around the
+              // CURRENT ATM, so a trending underlying can push this position's
+              // original strike outside that window even though Dhan is healthy.
+              const row = chain.chain.find(r => r.strike === strike)
+                || chain.chain.reduce((closest, r) =>
+                  Math.abs(r.strike - strike) < Math.abs(closest.strike - strike) ? r : closest
+                );
               const quote = direction === 'CE' ? row?.ce : row?.pe;
               if (quote && quote.ltp > 0) {
                 currentPremium = quote.ltp;
               }
             }
-          } catch { /* fallback below */ }
+          } catch { /* handled below */ }
         }
 
-        if (currentPremium <= 0) {
-          let spotMovePct = (currentSpot - spotAtEntry) / spotAtEntry;
-          currentPremium = trade.entryPrice * (1 + spotMovePct * 0.4);
-          if (direction === 'PE') currentPremium = trade.entryPrice * (1 - spotMovePct * 0.4);
-          currentPremium = Math.max(0.05, currentPremium);
+        const hasRealPremium = currentPremium > 0;
+        const isNewTradingDay = new Date(trade.entryDate).toDateString() !== new Date().toDateString();
+        const mustSquareOffNow = isIntradayCloseTime || isNewTradingDay;
+
+        if (!hasRealPremium && !mustSquareOffNow) {
+          // No real premium this cycle (token expired, chain down, or the
+          // contract fell outside Dhan's returned strike window) and no
+          // mandatory close pending — hold the position and retry next tick
+          // rather than fabricating a synthetic premium via an arbitrary
+          // delta-like formula to decide a real SL/TP exit.
+          continue;
+        }
+        if (!hasRealPremium) {
+          // Mandatory square-off (3:15 PM or day rollover) with no live quote
+          // available — close flat at the real entry price rather than
+          // inventing a directional price move.
+          currentPremium = trade.entryPrice;
         }
 
         let exitReason: string | null = null;
         let exitPrice = currentPremium;
 
-        // 1. Check Fixed SL (-25%)
-        if (currentPremium <= trade.stopLoss) {
+        // 1. Check Fixed SL (-25%) — only on a real premium
+        if (hasRealPremium && currentPremium <= trade.stopLoss) {
           exitReason = 'SL_HIT';
           exitPrice = trade.stopLoss;
         }
-        // 2. Check Fixed TP (+50%)
-        else if (currentPremium >= trade.targetPrice) {
+        // 2. Check Fixed TP (+50%) — only on a real premium
+        else if (hasRealPremium && currentPremium >= trade.targetPrice) {
           exitReason = 'TP_HIT';
           exitPrice = trade.targetPrice;
         }
@@ -1544,12 +1973,8 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
           exitReason = 'INTRADAY_315PM_SQUAREOFF';
           exitPrice = currentPremium;
         }
-        else {
-          const entryDate = new Date(trade.entryDate);
-          const now = new Date();
-          if (entryDate.toDateString() !== now.toDateString()) {
-            exitReason = 'EXPIRY_CLOSE';
-          }
+        else if (isNewTradingDay) {
+          exitReason = 'EXPIRY_CLOSE';
         }
 
         if (exitReason) {
@@ -1588,6 +2013,19 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
             },
           });
 
+          // Feed the options daily-P&L guardrail (opt_todayPnl) — previously
+          // this key was only ever read by the status endpoint and never
+          // written anywhere, so the daily loss cap / profit lock in
+          // autoOptionsScanAndTrade() had nothing real to check against.
+          const prevOptTodayPnl = parseFloat((await db.appSettings.findUnique({ where: { key: 'opt_todayPnl' } }))?.value || '0');
+          const newOptTodayPnl = Math.round((prevOptTodayPnl + netPnl) * 100) / 100;
+          await db.appSettings.upsert({ where: { key: 'opt_todayPnl' }, update: { value: String(newOptTodayPnl) }, create: { key: 'opt_todayPnl', value: String(newOptTodayPnl) } });
+
+          // Validator — stamp the real outcome back onto this trade's
+          // recorded signal so getFactorAttribution() can compute real
+          // per-factor win rates from actual forward results.
+          await resolveSignalByTradeId(trade.id, netPnl > 0, netPnl);
+
           await db.autoTradeLog.create({
             data: {
               action: 'AUTO_EXIT_' + exitReason,
@@ -1598,6 +2036,44 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
               reason: `${exitReason} @ ₹${exitPrice.toFixed(2)} | Gross: ₹${grossPnl.toFixed(2)} | Costs: ₹${costs.totalCosts.toFixed(2)} | Net: ₹${netPnl.toFixed(2)}`,
             },
           });
+
+          // ── Discord exit outcome notification — previously an options
+          //    position got an entry alert and then permanent silence on
+          //    how it resolved (sendDiscordPaperResult was only wired to a
+          //    manual test endpoint, never called from the live exit path). ──
+          try {
+            const { sendDiscordPaperResult } = await import('@/lib/notifications/discord');
+            const status: 'WIN' | 'LOSS' | 'OPEN' = netPnl > 0 ? 'WIN' : netPnl < 0 ? 'LOSS' : 'OPEN';
+            await sendDiscordPaperResult({
+              signal: {
+                symbol: underlying,
+                strike,
+                optionType: direction as 'CE' | 'PE',
+                expiry,
+                spotPrice: notes.spotPrice || trade.entryPrice,
+                premium: trade.entryPrice,
+                stopLoss: trade.stopLoss,
+                takeProfit: trade.targetPrice,
+                lotSize: trade.qty,
+                lots: 1,
+                totalCapital: trade.entryPrice * trade.qty,
+                confluenceScore: notes.confidence || 0,
+                setupType: (notes.score || 0) >= 40 ? 'A+' : 'B',
+                direction: direction === 'CE' ? 'CALL BUY 🟢' : 'PUT BUY 🔴',
+                engine: 'OPTIONS',
+                dataSource: 'DhanHQ Broker v2 API',
+                timestamp: trade.entryDate.toISOString(),
+              },
+              exitPremium: exitPrice,
+              pnl: Math.round(netPnl * 100) / 100,
+              pnlPct: Math.round(pnlPercent * 100) / 100,
+              exitReason,
+              exitAt: new Date().toISOString(),
+              status,
+            });
+          } catch (discordErr) {
+            console.warn('[Discord] Options exit notification failed (non-blocking):', discordErr);
+          }
 
           exited++;
         }
@@ -1630,18 +2106,35 @@ async function getOptionsStatus() {
     orderBy: { createdAt: 'desc' },
     take: 20,
   });
-  const allOptLogs = [...recentOptsLogs, ...peLogs].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 30);
+  // Guardrail-engine events (circuit breaker / profit lock / sector block) —
+  // these don't carry a _CE/_PE symbol so the two queries above miss them.
+  const guardrailLogs = await db.autoTradeLog.findMany({
+    where: { action: { in: ['OPT_CIRCUIT_BREAKER', 'OPT_PROFIT_LOCK', 'OPT_SECTOR_BLOCKED'] } },
+    orderBy: { createdAt: 'desc' },
+    take: 10,
+  });
+  const allOptLogs = [...recentOptsLogs, ...peLogs, ...guardrailLogs].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 30);
 
   const s = await db.appSettings.findMany();
   const m: Record<string, string> = {};
   for (const x of s) m[x.key] = x.value;
+  const rules = await getRules();
+  const optTodayPnl = parseFloat(m['opt_todayPnl'] || '0');
 
   return {
     enabled: m['opt_enabled'] !== 'false', // always-on: default true unless explicitly 'false'
     openPositions: openOptions.length,
     todayEntries: parseInt(m['opt_todayEntries'] || '0'),
     todayExits: parseInt(m['opt_todayExits'] || '0'),
-    todayPnl: parseFloat(m['opt_todayPnl'] || '0'),
+    todayPnl: optTodayPnl,
+    guardrails: {
+      dailyLossCap: rules.optDailyLossCap,
+      dailyProfitLock: rules.optDailyProfitLock,
+      lossCapHit: optTodayPnl <= -rules.optDailyLossCap,
+      profitLockHit: optTodayPnl >= rules.optDailyProfitLock,
+      maxPerSector: rules.optMaxPerSector,
+      noEntryMinsToClose: rules.optNoEntryMinsToClose,
+    },
     lastScanAt: m['opt_lastScanAt'] || null,
     lastExitAt: m['opt_lastExitAt'] || null,
     openTrades: openOptions,
@@ -1685,6 +2178,7 @@ export async function GET() {
       ? Math.max(0, ((wallet.peakCapital - wallet.totalCapital) / wallet.peakCapital) * 100)
       : 0;
     const optionsStatus = await getOptionsStatus();
+    const { getDiscordHealthStatus } = await import('@/lib/notifications/discord');
     return NextResponse.json({
       success: true, wallet, rules, openTrades, recentLogs, scheduler, sectorAllocation: sectorAlloc,
       marketHours: isMarketHours(), timeToClose: timeToClose(),
@@ -1694,6 +2188,9 @@ export async function GET() {
       adaptiveFactor: scheduler.lastAdaptiveFactor,
       // Options data
       options: optionsStatus,
+      // Real Discord delivery health — replaces the sidebar's previously
+      // hardcoded "ACTIVE" badge with the actual outcome of the last send.
+      discordHealth: getDiscordHealthStatus(),
     });
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });

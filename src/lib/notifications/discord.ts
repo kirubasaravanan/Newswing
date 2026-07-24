@@ -107,12 +107,35 @@ function fmtPnl(n: number): string {
   return `${sign}₹${fmt(Math.abs(n))}`;
 }
 
+// ── Real Discord delivery health tracking ──────────────────────
+// Previously the UI (sidebar.tsx) showed a hardcoded "Discord Feed: ACTIVE"
+// badge that was never wired to any actual send result — it displayed
+// "ACTIVE" even if the webhook was unset, revoked, or being rejected on
+// every call. This tracks the real outcome of the most recent send attempt
+// so the UI can reflect the truth instead.
+let lastDiscordSuccess: boolean | null = null;
+let lastDiscordAttemptAt: string | null = null;
+let lastDiscordError: string | null = null;
+
+export function getDiscordHealthStatus(): { ok: boolean | null; lastAttemptAt: string | null; lastError: string | null } {
+  return { ok: lastDiscordSuccess, lastAttemptAt: lastDiscordAttemptAt, lastError: lastDiscordError };
+}
+
 async function postToDiscord(embed: object, channel: 'system' | 'options' | 'swing' = 'system'): Promise<boolean> {
   const url = channel === 'options' ? DISCORD_OPTIONS_WEBHOOK_URL
     : channel === 'swing' ? DISCORD_SWING_WEBHOOK_URL
-    : DISCORD_WEBHOOK_URL;
+    // 'system' previously had NO fallback at all — if DISCORD_WEBHOOK_URL was
+    // unset but only the per-engine hooks were configured (the "dual broker
+    // channel routing" setup), EOD summary / health-check / system alerts
+    // failed permanently and silently. Fall back to whichever hook exists.
+    : DISCORD_WEBHOOK_URL || DISCORD_SWING_WEBHOOK_URL || DISCORD_OPTIONS_WEBHOOK_URL;
+
+  lastDiscordAttemptAt = new Date().toISOString();
+
   if (!url) {
     console.warn(`[Discord] Webhook URL not set for channel '${channel}' — notification not sent`);
+    lastDiscordSuccess = false;
+    lastDiscordError = `No webhook configured for channel '${channel}'`;
     return false;
   }
   try {
@@ -122,11 +145,19 @@ async function postToDiscord(embed: object, channel: 'system' | 'options' | 'swi
       body: JSON.stringify({ embeds: [embed] }),
     });
     if (!res.ok) {
-      console.error(`[Discord] ❌ Webhook ${res.status}: ${await res.text()}`);
+      const body = await res.text();
+      console.error(`[Discord] ❌ Webhook ${res.status}: ${body}`);
+      lastDiscordSuccess = false;
+      lastDiscordError = `HTTP ${res.status}`;
+    } else {
+      lastDiscordSuccess = true;
+      lastDiscordError = null;
     }
     return res.ok;
   } catch (err) {
     console.error('[Discord] Error:', String(err));
+    lastDiscordSuccess = false;
+    lastDiscordError = String(err).substring(0, 200);
     return false;
   }
 }
@@ -393,6 +424,18 @@ export interface EODSummaryReport {
   capitalDeployed: number;
   winningTradesList: string[];
   losingTradesList: string[];
+  // Added for forward-test visibility (signals received, live concurrency,
+  // profit factor, capital sizing) — see route.ts's dispatchEODSummary.
+  optionsSignalsToday: number;   // real options signals generated today (not just ones that became trades)
+  // Real PEAK concurrency for today, from a sweep of actual entry/exit
+  // timestamps — NOT a point-in-time snapshot (which would be misleading for
+  // options specifically, since they're force-closed by the 3:15pm
+  // square-off well before this report is built).
+  peakConcurrentOptions: number;
+  peakConcurrentEquity: number;
+  profitFactor: number;          // today's closed trades: gross win / gross loss
+  avgCapitalPerTrade: number;    // real avg capital committed per currently-open trade
+  estCapitalForConcurrency: number; // avgCapitalPerTrade x current open count — what it actually takes to run today's concurrency
 }
 
 export async function sendDiscordEODSummary(summary: EODSummaryReport): Promise<boolean> {
@@ -414,10 +457,15 @@ export async function sendDiscordEODSummary(summary: EODSummaryReport): Promise<
     fields: [
       { name: '📊 Total Trades', value: `${summary.totalTrades} Trades`, inline: true },
       { name: '✅ Win Rate', value: `${summary.winRate.toFixed(1)}% (${summary.winTrades}W / ${summary.lossTrades}L)`, inline: true },
+      { name: '📈 Profit Factor', value: summary.profitFactor > 0 ? `${summary.profitFactor.toFixed(2)}x` : 'N/A', inline: true },
+      { name: '📞 Options Signals Today', value: `${summary.optionsSignalsToday}`, inline: true },
+      { name: '🟢 Peak Concurrent Positions Today', value: `${summary.peakConcurrentOptions} options / ${summary.peakConcurrentEquity} equity`, inline: true },
       { name: '💵 Deployed Capital', value: `₹${fmt(summary.capitalDeployed)}`, inline: true },
       { name: '💰 Gross P&L', value: fmtPnl(summary.grossPnl), inline: true },
       { name: '🏷️ Statutory Taxes & Fees', value: `−₹${fmt(summary.statutoryCosts)}`, inline: true },
-      { name: '🏆 Net Pre-Tax P&L', value: `**${fmtPnl(summary.netPnl)}**`, inline: true },
+      { name: '🏆 Net P&L (after all costs)', value: `**${fmtPnl(summary.netPnl)}**`, inline: true },
+      { name: '💼 Avg Capital / Open Trade', value: `₹${fmt(summary.avgCapitalPerTrade)}`, inline: true },
+      { name: '🏦 Capital Needed for Today\'s Concurrency', value: `₹${fmt(summary.estCapitalForConcurrency)}`, inline: true },
       { name: '🟢 Winning Trades', value: `\`\`\`\n${winningText}\n\`\`\``, inline: false },
       { name: '🔴 Losing Trades & SL Exits', value: `\`\`\`\n${losingText}\n\`\`\``, inline: false },
     ],

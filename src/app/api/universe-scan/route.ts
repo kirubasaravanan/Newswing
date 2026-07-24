@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { runScreening, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/trading/screening-engine';
 import { getHistoricalData, getDataProviderStatus, type DataSource } from '@/lib/trading/data-provider';
 import { getFullUniverse, runL1Filter, type L1FilterResult, type NSEStock } from '@/lib/trading/universe-scanner';
+import { getActiveTop7, getActiveVacantSlots } from '@/lib/trading/rs-ranking';
 import { db } from '@/lib/db';
 
 export async function GET() {
@@ -51,7 +52,11 @@ export async function POST(request: NextRequest) {
     const totalScanned = stocks.length;
     const l1Results: L1FilterResult[] = [];
     const l2Signals: any[] = [];
-    let fetchSource: DataSource = 'yahoo';
+    // Track which provider actually served each fetch — previously this was
+    // initialized to 'yahoo' and never updated, so the persisted/reported
+    // dataSource always said "yahoo" even when DhanHQ served most/all of the
+    // real candles, which misled debugging of data-provider issues.
+    const sourceCounts: Partial<Record<DataSource, number>> = {};
     const BATCH = 10;
 
     // Stage 1: L1 Pre-Filter
@@ -59,12 +64,13 @@ export async function POST(request: NextRequest) {
       const batch = stocks.slice(i, i + BATCH);
       const results = await Promise.allSettled(
         batch.map(async (stock) => {
-          const { data } = await getHistoricalData(stock.symbol, days);
-          return { stock, data };
+          const { data, source } = await getHistoricalData(stock.symbol, days);
+          return { stock, data, source };
         })
       );
       for (const r of results) {
         if (r.status !== 'fulfilled') continue;
+        sourceCounts[r.value.source] = (sourceCounts[r.value.source] || 0) + 1;
         const l1 = runL1Filter(r.value.stock.symbol, r.value.stock.name, r.value.stock.sector, r.value.stock.category, r.value.data);
         if (l1) l1Results.push(l1);
       }
@@ -76,25 +82,31 @@ export async function POST(request: NextRequest) {
     if (mode !== 'l1' && l1Passed > 0) {
       const passed = l1Results.filter(r => r.passed);
       const { data: niftyData } = await getHistoricalData('NIFTY50', days + 50);
+      const dynamicRankTable = [...(await getActiveTop7()), ...(await getActiveVacantSlots())];
 
       for (let i = 0; i < passed.length; i += 5) {
         const batch = passed.slice(i, i + 5);
         const results = await Promise.allSettled(
           batch.map(async (stock) => {
-            const { data } = await getHistoricalData(stock.symbol, days + 50);
-            return { stock, data };
+            const { data, source } = await getHistoricalData(stock.symbol, days + 50);
+            return { stock, data, source };
           })
         );
         const isNiftyBullish = niftyData && niftyData.length >= 50 ? niftyData[niftyData.length - 1].close >= niftyData[niftyData.length - 50].close : true;
         for (const r of results) {
           if (r.status !== 'fulfilled') continue;
-          const signal = runScreening(r.value.stock.symbol, r.value.data, config, isNiftyBullish);
+          sourceCounts[r.value.source] = (sourceCounts[r.value.source] || 0) + 1;
+          const signal = runScreening(r.value.stock.symbol, r.value.data, config, isNiftyBullish, false, niftyData, dynamicRankTable);
           if (signal) l2Signals.push(signal);
         }
       }
     }
 
     l2Signals.sort((a, b) => b.score - a.score || b.riskReward - a.riskReward);
+
+    // Report the provider that actually served the most fetches this scan,
+    // not a hardcoded constant.
+    const fetchSource: DataSource = (Object.entries(sourceCounts).sort((a, b) => b[1]! - a[1]!)[0]?.[0] as DataSource) || 'yahoo';
 
     const duration = (Date.now() - startTime) / 1000;
     await db.universeScan.create({
@@ -108,7 +120,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      summary: { totalScanned, l1Passed, l1Failed: totalScanned - l1Passed, l2Signals: l2Signals.length, dataSource: fetchSource, duration: duration.toFixed(1) + 's' },
+      summary: { totalScanned, l1Passed, l1Failed: totalScanned - l1Passed, l2Signals: l2Signals.length, dataSource: fetchSource, sourceBreakdown: sourceCounts, duration: duration.toFixed(1) + 's' },
       l1Results: l1Results.filter(r => r.passed),
       l1Failed: l1Results.filter(r => !r.passed).slice(0, 50),
       l2Signals,

@@ -371,7 +371,7 @@ export function DashboardTab() {
               </h3>
               <div className="flex gap-3 text-xs">
                 <span className={cn('font-mono', (benchmark.portfolioTotalReturn || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                  Portfolio: {benchmark.portfolioTotalReturn >= 0 ? '+' : ''}₹{(benchmark.portfolioTotalReturn || 0).toLocaleString()}
+                  Portfolio: {benchmark.portfolioTotalReturn >= 0 ? '+' : ''}{(benchmark.portfolioTotalReturn || 0).toFixed(2)}%
                 </span>
                 <span className={cn('font-mono', (benchmark.niftyTotalReturn || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                   Nifty: {benchmark.niftyTotalReturn >= 0 ? '+' : ''}{(benchmark.niftyTotalReturn || 0).toFixed(2)}%

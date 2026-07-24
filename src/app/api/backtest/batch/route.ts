@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
       maxDrawdown: number;
       finalCapital: number;
     }> = [];
+    const failed: Array<{ symbol: string; error: string }> = [];
 
     let totalPortfolioPnl = 0;
 
@@ -37,47 +38,40 @@ export async function POST(request: NextRequest) {
         const stockFinalCap = Math.round(allocatedCapital + stockNetPnl);
         totalPortfolioPnl += stockNetPnl;
 
+        // Report the REAL computed stats, even when they're 0 (0 trades is a
+        // valid, meaningful result — not a signal to substitute a plausible-
+        // looking invented number in its place).
         results.push({
           rank: item.rank,
           symbol: item.symbol,
           name: item.name,
           weightPct: Math.round(item.weightPct * 100),
-          totalTrades: res.stats.totalTrades || 18,
-          winRate: res.stats.winRate || 58.5,
-          profitFactor: res.stats.profitFactor || 1.65,
-          maxDrawdown: res.stats.maxDrawdown || 7.8,
+          totalTrades: res.stats.totalTrades,
+          winRate: res.stats.winRate,
+          profitFactor: res.stats.profitFactor,
+          maxDrawdown: res.stats.maxDrawdown,
           finalCapital: stockFinalCap
         });
       } catch (err) {
-        // Fallback for network error
-        const allocatedCapital = config.liveCapital * item.weightPct;
-        const estimatedCap = Math.round(allocatedCapital * 1.45);
-        results.push({
-          rank: item.rank,
-          symbol: item.symbol,
-          name: item.name,
-          weightPct: Math.round(item.weightPct * 100),
-          totalTrades: 16,
-          winRate: 58.3,
-          profitFactor: 1.72,
-          maxDrawdown: 7.2,
-          finalCapital: estimatedCap
-        });
+        // Real failure (data fetch or backtest error) — surface it as an
+        // error, don't fabricate a plausible-looking result set in its place.
+        failed.push({ symbol: item.symbol, error: err instanceof Error ? err.message : String(err) });
       }
     }
 
     const portfolioFinalCapital = Math.round(config.liveCapital + totalPortfolioPnl);
     const portfolioRoiPct = Math.round(((portfolioFinalCapital - config.liveCapital) / config.liveCapital) * 1000) / 10;
-    const avgWinRate = Math.round((results.reduce((a, b) => a + b.winRate, 0) / results.length) * 10) / 10;
-    const avgProfitFactor = Math.round((results.reduce((a, b) => a + b.profitFactor, 0) / results.length) * 100) / 100;
-    const avgMaxDD = Math.round((results.reduce((a, b) => a + b.maxDrawdown, 0) / results.length) * 10) / 10;
+    const avgWinRate = results.length ? Math.round((results.reduce((a, b) => a + b.winRate, 0) / results.length) * 10) / 10 : 0;
+    const avgProfitFactor = results.length ? Math.round((results.reduce((a, b) => a + b.profitFactor, 0) / results.length) * 100) / 100 : 0;
+    const avgMaxDD = results.length ? Math.round((results.reduce((a, b) => a + b.maxDrawdown, 0) / results.length) * 10) / 10 : 0;
 
     return NextResponse.json({
       success: true,
       meta: {
-        totalUniverse: 7,
+        totalUniverse: TOP_7_RANKED_SYMBOLS.length,
         successful: results.length,
-        daysTested: 1825
+        failed: failed.length,
+        daysTested: days
       },
       aggregated: {
         portfolioFinalCapital,
@@ -86,7 +80,8 @@ export async function POST(request: NextRequest) {
         avgProfitFactor,
         avgMaxDrawdown: avgMaxDD
       },
-      ranked: results
+      ranked: results,
+      errors: failed.length > 0 ? failed : undefined,
     });
   } catch (error) {
     console.error('Batch backtest API error:', error);

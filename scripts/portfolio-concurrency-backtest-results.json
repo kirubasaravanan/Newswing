@@ -1,0 +1,3338 @@
+{
+  "scenarios": {
+    "TOP-3, cap=3 (natural)": {
+      "tradesTaken": 2730,
+      "tradesSkippedByCap": 0,
+      "peakConcurrent": 3,
+      "winRate": 39.9,
+      "profitFactor": 1.62,
+      "finalCapital": 15664516,
+      "netProfit": 15364516,
+      "roiPct": 5121.5,
+      "maxDrawdownPct": 27.6,
+      "monthlyPnl": [
+        {
+          "month": "2019-02",
+          "trades": 3,
+          "winRate": 66.7,
+          "netPnl": 3182
+        },
+        {
+          "month": "2019-03",
+          "trades": 30,
+          "winRate": 36.7,
+          "netPnl": 358693
+        },
+        {
+          "month": "2019-04",
+          "trades": 29,
+          "winRate": 31,
+          "netPnl": -102704
+        },
+        {
+          "month": "2019-05",
+          "trades": 34,
+          "winRate": 47.1,
+          "netPnl": 228677
+        },
+        {
+          "month": "2019-06",
+          "trades": 32,
+          "winRate": 37.5,
+          "netPnl": -22060
+        },
+        {
+          "month": "2019-07",
+          "trades": 29,
+          "winRate": 41.4,
+          "netPnl": 111083
+        },
+        {
+          "month": "2019-08",
+          "trades": 46,
+          "winRate": 43.5,
+          "netPnl": 345659
+        },
+        {
+          "month": "2019-09",
+          "trades": 32,
+          "winRate": 46.9,
+          "netPnl": 133977
+        },
+        {
+          "month": "2019-10",
+          "trades": 12,
+          "winRate": 50,
+          "netPnl": 206870
+        },
+        {
+          "month": "2019-11",
+          "trades": 29,
+          "winRate": 44.8,
+          "netPnl": 674606
+        },
+        {
+          "month": "2019-12",
+          "trades": 24,
+          "winRate": 25,
+          "netPnl": -96526
+        },
+        {
+          "month": "2020-01",
+          "trades": 45,
+          "winRate": 44.4,
+          "netPnl": 1646840
+        },
+        {
+          "month": "2020-02",
+          "trades": 32,
+          "winRate": 21.9,
+          "netPnl": -212151
+        },
+        {
+          "month": "2020-03",
+          "trades": 42,
+          "winRate": 35.7,
+          "netPnl": 491844
+        },
+        {
+          "month": "2020-04",
+          "trades": 30,
+          "winRate": 30,
+          "netPnl": -74397
+        },
+        {
+          "month": "2020-05",
+          "trades": 33,
+          "winRate": 33.3,
+          "netPnl": -57036
+        },
+        {
+          "month": "2020-06",
+          "trades": 43,
+          "winRate": 27.9,
+          "netPnl": -75780
+        },
+        {
+          "month": "2020-07",
+          "trades": 34,
+          "winRate": 41.2,
+          "netPnl": 46077
+        },
+        {
+          "month": "2020-08",
+          "trades": 17,
+          "winRate": 47.1,
+          "netPnl": 62563
+        },
+        {
+          "month": "2020-09",
+          "trades": 27,
+          "winRate": 55.6,
+          "netPnl": 523658
+        },
+        {
+          "month": "2020-10",
+          "trades": 36,
+          "winRate": 30.6,
+          "netPnl": 234708
+        },
+        {
+          "month": "2020-11",
+          "trades": 38,
+          "winRate": 47.4,
+          "netPnl": 1321664
+        },
+        {
+          "month": "2020-12",
+          "trades": 39,
+          "winRate": 35.9,
+          "netPnl": 141112
+        },
+        {
+          "month": "2021-01",
+          "trades": 25,
+          "winRate": 28,
+          "netPnl": -65748
+        },
+        {
+          "month": "2021-02",
+          "trades": 22,
+          "winRate": 45.5,
+          "netPnl": 325308
+        },
+        {
+          "month": "2021-03",
+          "trades": 22,
+          "winRate": 31.8,
+          "netPnl": 305858
+        },
+        {
+          "month": "2021-04",
+          "trades": 28,
+          "winRate": 42.9,
+          "netPnl": -51896
+        },
+        {
+          "month": "2021-05",
+          "trades": 19,
+          "winRate": 42.1,
+          "netPnl": -27657
+        },
+        {
+          "month": "2021-06",
+          "trades": 30,
+          "winRate": 23.3,
+          "netPnl": -76362
+        },
+        {
+          "month": "2021-07",
+          "trades": 33,
+          "winRate": 33.3,
+          "netPnl": 56692
+        },
+        {
+          "month": "2021-08",
+          "trades": 23,
+          "winRate": 34.8,
+          "netPnl": 14532
+        },
+        {
+          "month": "2021-09",
+          "trades": 44,
+          "winRate": 43.2,
+          "netPnl": 1323500
+        },
+        {
+          "month": "2021-10",
+          "trades": 35,
+          "winRate": 37.1,
+          "netPnl": 1315129
+        },
+        {
+          "month": "2021-11",
+          "trades": 25,
+          "winRate": 28,
+          "netPnl": -160019
+        },
+        {
+          "month": "2021-12",
+          "trades": 40,
+          "winRate": 35,
+          "netPnl": -128841
+        },
+        {
+          "month": "2022-01",
+          "trades": 39,
+          "winRate": 38.5,
+          "netPnl": 184345
+        },
+        {
+          "month": "2022-02",
+          "trades": 26,
+          "winRate": 53.8,
+          "netPnl": 347252
+        },
+        {
+          "month": "2022-03",
+          "trades": 26,
+          "winRate": 34.6,
+          "netPnl": -132063
+        },
+        {
+          "month": "2022-04",
+          "trades": 27,
+          "winRate": 37,
+          "netPnl": -170927
+        },
+        {
+          "month": "2022-05",
+          "trades": 34,
+          "winRate": 50,
+          "netPnl": 116083
+        },
+        {
+          "month": "2022-06",
+          "trades": 21,
+          "winRate": 38.1,
+          "netPnl": -92774
+        },
+        {
+          "month": "2022-07",
+          "trades": 40,
+          "winRate": 47.5,
+          "netPnl": 264277
+        },
+        {
+          "month": "2022-08",
+          "trades": 43,
+          "winRate": 48.8,
+          "netPnl": 518614
+        },
+        {
+          "month": "2022-09",
+          "trades": 46,
+          "winRate": 37,
+          "netPnl": 70599
+        },
+        {
+          "month": "2022-10",
+          "trades": 32,
+          "winRate": 34.4,
+          "netPnl": 108309
+        },
+        {
+          "month": "2022-11",
+          "trades": 26,
+          "winRate": 30.8,
+          "netPnl": -121865
+        },
+        {
+          "month": "2022-12",
+          "trades": 26,
+          "winRate": 53.8,
+          "netPnl": 159136
+        },
+        {
+          "month": "2023-01",
+          "trades": 28,
+          "winRate": 42.9,
+          "netPnl": 38816
+        },
+        {
+          "month": "2023-02",
+          "trades": 35,
+          "winRate": 40,
+          "netPnl": 977321
+        },
+        {
+          "month": "2023-03",
+          "trades": 19,
+          "winRate": 47.4,
+          "netPnl": -2689
+        },
+        {
+          "month": "2023-04",
+          "trades": 24,
+          "winRate": 37.5,
+          "netPnl": 145105
+        },
+        {
+          "month": "2023-05",
+          "trades": 43,
+          "winRate": 48.8,
+          "netPnl": 367096
+        },
+        {
+          "month": "2023-06",
+          "trades": 39,
+          "winRate": 33.3,
+          "netPnl": -16096
+        },
+        {
+          "month": "2023-07",
+          "trades": 24,
+          "winRate": 25,
+          "netPnl": -60581
+        },
+        {
+          "month": "2023-08",
+          "trades": 24,
+          "winRate": 50,
+          "netPnl": 393403
+        },
+        {
+          "month": "2023-09",
+          "trades": 25,
+          "winRate": 36,
+          "netPnl": -21498
+        },
+        {
+          "month": "2023-10",
+          "trades": 35,
+          "winRate": 40,
+          "netPnl": 114065
+        },
+        {
+          "month": "2023-11",
+          "trades": 24,
+          "winRate": 33.3,
+          "netPnl": 163939
+        },
+        {
+          "month": "2023-12",
+          "trades": 42,
+          "winRate": 45.2,
+          "netPnl": 368001
+        },
+        {
+          "month": "2024-01",
+          "trades": 36,
+          "winRate": 33.3,
+          "netPnl": 127816
+        },
+        {
+          "month": "2024-02",
+          "trades": 26,
+          "winRate": 53.8,
+          "netPnl": 486923
+        },
+        {
+          "month": "2024-03",
+          "trades": 36,
+          "winRate": 41.7,
+          "netPnl": 331006
+        },
+        {
+          "month": "2024-04",
+          "trades": 31,
+          "winRate": 22.6,
+          "netPnl": 75942
+        },
+        {
+          "month": "2024-05",
+          "trades": 21,
+          "winRate": 47.6,
+          "netPnl": -14037
+        },
+        {
+          "month": "2024-06",
+          "trades": 27,
+          "winRate": 44.4,
+          "netPnl": 22229
+        },
+        {
+          "month": "2024-07",
+          "trades": 14,
+          "winRate": 28.6,
+          "netPnl": -34241
+        },
+        {
+          "month": "2024-08",
+          "trades": 28,
+          "winRate": 28.6,
+          "netPnl": -81863
+        },
+        {
+          "month": "2024-09",
+          "trades": 31,
+          "winRate": 48.4,
+          "netPnl": 135069
+        },
+        {
+          "month": "2024-10",
+          "trades": 37,
+          "winRate": 40.5,
+          "netPnl": -61365
+        },
+        {
+          "month": "2024-11",
+          "trades": 31,
+          "winRate": 41.9,
+          "netPnl": 101532
+        },
+        {
+          "month": "2024-12",
+          "trades": 30,
+          "winRate": 30,
+          "netPnl": 78527
+        },
+        {
+          "month": "2025-01",
+          "trades": 36,
+          "winRate": 36.1,
+          "netPnl": -69181
+        },
+        {
+          "month": "2025-02",
+          "trades": 34,
+          "winRate": 41.2,
+          "netPnl": -23792
+        },
+        {
+          "month": "2025-03",
+          "trades": 38,
+          "winRate": 42.1,
+          "netPnl": 121467
+        },
+        {
+          "month": "2025-04",
+          "trades": 37,
+          "winRate": 51.4,
+          "netPnl": 371457
+        },
+        {
+          "month": "2025-05",
+          "trades": 35,
+          "winRate": 37.1,
+          "netPnl": -36860
+        },
+        {
+          "month": "2025-06",
+          "trades": 24,
+          "winRate": 29.2,
+          "netPnl": -138850
+        },
+        {
+          "month": "2025-07",
+          "trades": 43,
+          "winRate": 53.5,
+          "netPnl": 237000
+        },
+        {
+          "month": "2025-08",
+          "trades": 29,
+          "winRate": 48.3,
+          "netPnl": 144150
+        },
+        {
+          "month": "2025-09",
+          "trades": 25,
+          "winRate": 52,
+          "netPnl": 200351
+        },
+        {
+          "month": "2025-10",
+          "trades": 19,
+          "winRate": 47.4,
+          "netPnl": 210653
+        },
+        {
+          "month": "2025-11",
+          "trades": 17,
+          "winRate": 64.7,
+          "netPnl": 52360
+        },
+        {
+          "month": "2025-12",
+          "trades": 23,
+          "winRate": 43.5,
+          "netPnl": -14634
+        },
+        {
+          "month": "2026-01",
+          "trades": 41,
+          "winRate": 39,
+          "netPnl": 180667
+        },
+        {
+          "month": "2026-02",
+          "trades": 29,
+          "winRate": 51.7,
+          "netPnl": 12396
+        },
+        {
+          "month": "2026-03",
+          "trades": 44,
+          "winRate": 52.3,
+          "netPnl": 587052
+        },
+        {
+          "month": "2026-04",
+          "trades": 26,
+          "winRate": 26.9,
+          "netPnl": -126202
+        },
+        {
+          "month": "2026-05",
+          "trades": 29,
+          "winRate": 41.4,
+          "netPnl": 137982
+        },
+        {
+          "month": "2026-06",
+          "trades": 25,
+          "winRate": 36,
+          "netPnl": 41833
+        },
+        {
+          "month": "2026-07",
+          "trades": 18,
+          "winRate": 22.2,
+          "netPnl": -129794
+        }
+      ]
+    },
+    "TOP-5, cap=3 (conservative)": {
+      "tradesTaken": 4163,
+      "tradesSkippedByCap": 434,
+      "peakConcurrent": 3,
+      "winRate": 39.8,
+      "profitFactor": 1.58,
+      "finalCapital": 22329132,
+      "netProfit": 22029132,
+      "roiPct": 7343,
+      "maxDrawdownPct": 21.8,
+      "monthlyPnl": [
+        {
+          "month": "2019-02",
+          "trades": 5,
+          "winRate": 40,
+          "netPnl": -38037
+        },
+        {
+          "month": "2019-03",
+          "trades": 41,
+          "winRate": 46.3,
+          "netPnl": 500258
+        },
+        {
+          "month": "2019-04",
+          "trades": 46,
+          "winRate": 39.1,
+          "netPnl": 132999
+        },
+        {
+          "month": "2019-05",
+          "trades": 51,
+          "winRate": 47.1,
+          "netPnl": 287597
+        },
+        {
+          "month": "2019-06",
+          "trades": 39,
+          "winRate": 35.9,
+          "netPnl": -69161
+        },
+        {
+          "month": "2019-07",
+          "trades": 44,
+          "winRate": 43.2,
+          "netPnl": 275222
+        },
+        {
+          "month": "2019-08",
+          "trades": 55,
+          "winRate": 45.5,
+          "netPnl": 365677
+        },
+        {
+          "month": "2019-09",
+          "trades": 43,
+          "winRate": 44.2,
+          "netPnl": 77933
+        },
+        {
+          "month": "2019-10",
+          "trades": 34,
+          "winRate": 44.1,
+          "netPnl": 202451
+        },
+        {
+          "month": "2019-11",
+          "trades": 45,
+          "winRate": 37.8,
+          "netPnl": 601386
+        },
+        {
+          "month": "2019-12",
+          "trades": 37,
+          "winRate": 37.8,
+          "netPnl": 17626
+        },
+        {
+          "month": "2020-01",
+          "trades": 65,
+          "winRate": 46.2,
+          "netPnl": 2434673
+        },
+        {
+          "month": "2020-02",
+          "trades": 50,
+          "winRate": 22,
+          "netPnl": -367460
+        },
+        {
+          "month": "2020-03",
+          "trades": 49,
+          "winRate": 34.7,
+          "netPnl": 519147
+        },
+        {
+          "month": "2020-04",
+          "trades": 41,
+          "winRate": 26.8,
+          "netPnl": -145121
+        },
+        {
+          "month": "2020-05",
+          "trades": 50,
+          "winRate": 38,
+          "netPnl": -137173
+        },
+        {
+          "month": "2020-06",
+          "trades": 56,
+          "winRate": 35.7,
+          "netPnl": -77341
+        },
+        {
+          "month": "2020-07",
+          "trades": 47,
+          "winRate": 42.6,
+          "netPnl": 171279
+        },
+        {
+          "month": "2020-08",
+          "trades": 39,
+          "winRate": 41,
+          "netPnl": 153973
+        },
+        {
+          "month": "2020-09",
+          "trades": 44,
+          "winRate": 54.5,
+          "netPnl": 711777
+        },
+        {
+          "month": "2020-10",
+          "trades": 59,
+          "winRate": 32.2,
+          "netPnl": 183883
+        },
+        {
+          "month": "2020-11",
+          "trades": 54,
+          "winRate": 50,
+          "netPnl": 1403293
+        },
+        {
+          "month": "2020-12",
+          "trades": 60,
+          "winRate": 36.7,
+          "netPnl": 305392
+        },
+        {
+          "month": "2021-01",
+          "trades": 41,
+          "winRate": 36.6,
+          "netPnl": -13294
+        },
+        {
+          "month": "2021-02",
+          "trades": 44,
+          "winRate": 34.1,
+          "netPnl": 123611
+        },
+        {
+          "month": "2021-03",
+          "trades": 42,
+          "winRate": 38.1,
+          "netPnl": 333323
+        },
+        {
+          "month": "2021-04",
+          "trades": 41,
+          "winRate": 43.9,
+          "netPnl": -35107
+        },
+        {
+          "month": "2021-05",
+          "trades": 32,
+          "winRate": 50,
+          "netPnl": 79886
+        },
+        {
+          "month": "2021-06",
+          "trades": 53,
+          "winRate": 30.2,
+          "netPnl": 18420
+        },
+        {
+          "month": "2021-07",
+          "trades": 54,
+          "winRate": 35.2,
+          "netPnl": 25739
+        },
+        {
+          "month": "2021-08",
+          "trades": 39,
+          "winRate": 38.5,
+          "netPnl": 239037
+        },
+        {
+          "month": "2021-09",
+          "trades": 54,
+          "winRate": 44.4,
+          "netPnl": 1411895
+        },
+        {
+          "month": "2021-10",
+          "trades": 46,
+          "winRate": 37,
+          "netPnl": 1364523
+        },
+        {
+          "month": "2021-11",
+          "trades": 44,
+          "winRate": 25,
+          "netPnl": -260185
+        },
+        {
+          "month": "2021-12",
+          "trades": 56,
+          "winRate": 41.1,
+          "netPnl": 1314
+        },
+        {
+          "month": "2022-01",
+          "trades": 54,
+          "winRate": 37,
+          "netPnl": 146398
+        },
+        {
+          "month": "2022-02",
+          "trades": 43,
+          "winRate": 48.8,
+          "netPnl": 458365
+        },
+        {
+          "month": "2022-03",
+          "trades": 42,
+          "winRate": 38.1,
+          "netPnl": -120518
+        },
+        {
+          "month": "2022-04",
+          "trades": 35,
+          "winRate": 37.1,
+          "netPnl": -70853
+        },
+        {
+          "month": "2022-05",
+          "trades": 55,
+          "winRate": 49.1,
+          "netPnl": 389863
+        },
+        {
+          "month": "2022-06",
+          "trades": 45,
+          "winRate": 44.4,
+          "netPnl": -95382
+        },
+        {
+          "month": "2022-07",
+          "trades": 51,
+          "winRate": 43.1,
+          "netPnl": 218081
+        },
+        {
+          "month": "2022-08",
+          "trades": 56,
+          "winRate": 50,
+          "netPnl": 770033
+        },
+        {
+          "month": "2022-09",
+          "trades": 55,
+          "winRate": 38.2,
+          "netPnl": 40116
+        },
+        {
+          "month": "2022-10",
+          "trades": 50,
+          "winRate": 34,
+          "netPnl": 114872
+        },
+        {
+          "month": "2022-11",
+          "trades": 40,
+          "winRate": 27.5,
+          "netPnl": -203066
+        },
+        {
+          "month": "2022-12",
+          "trades": 46,
+          "winRate": 45.7,
+          "netPnl": 299421
+        },
+        {
+          "month": "2023-01",
+          "trades": 52,
+          "winRate": 40.4,
+          "netPnl": 453704
+        },
+        {
+          "month": "2023-02",
+          "trades": 46,
+          "winRate": 37,
+          "netPnl": 1053307
+        },
+        {
+          "month": "2023-03",
+          "trades": 37,
+          "winRate": 45.9,
+          "netPnl": 43390
+        },
+        {
+          "month": "2023-04",
+          "trades": 28,
+          "winRate": 39.3,
+          "netPnl": 136392
+        },
+        {
+          "month": "2023-05",
+          "trades": 59,
+          "winRate": 44.1,
+          "netPnl": 409801
+        },
+        {
+          "month": "2023-06",
+          "trades": 62,
+          "winRate": 38.7,
+          "netPnl": 119929
+        },
+        {
+          "month": "2023-07",
+          "trades": 41,
+          "winRate": 39,
+          "netPnl": 111871
+        },
+        {
+          "month": "2023-08",
+          "trades": 47,
+          "winRate": 46.8,
+          "netPnl": 890404
+        },
+        {
+          "month": "2023-09",
+          "trades": 35,
+          "winRate": 34.3,
+          "netPnl": 47756
+        },
+        {
+          "month": "2023-10",
+          "trades": 49,
+          "winRate": 36.7,
+          "netPnl": 48675
+        },
+        {
+          "month": "2023-11",
+          "trades": 34,
+          "winRate": 32.4,
+          "netPnl": 98616
+        },
+        {
+          "month": "2023-12",
+          "trades": 50,
+          "winRate": 48,
+          "netPnl": 460802
+        },
+        {
+          "month": "2024-01",
+          "trades": 54,
+          "winRate": 31.5,
+          "netPnl": 135153
+        },
+        {
+          "month": "2024-02",
+          "trades": 40,
+          "winRate": 47.5,
+          "netPnl": 615581
+        },
+        {
+          "month": "2024-03",
+          "trades": 45,
+          "winRate": 44.4,
+          "netPnl": 582909
+        },
+        {
+          "month": "2024-04",
+          "trades": 47,
+          "winRate": 25.5,
+          "netPnl": 300121
+        },
+        {
+          "month": "2024-05",
+          "trades": 43,
+          "winRate": 44.2,
+          "netPnl": 73657
+        },
+        {
+          "month": "2024-06",
+          "trades": 38,
+          "winRate": 39.5,
+          "netPnl": 32538
+        },
+        {
+          "month": "2024-07",
+          "trades": 42,
+          "winRate": 40.5,
+          "netPnl": 87490
+        },
+        {
+          "month": "2024-08",
+          "trades": 50,
+          "winRate": 30,
+          "netPnl": -75539
+        },
+        {
+          "month": "2024-09",
+          "trades": 53,
+          "winRate": 45.3,
+          "netPnl": 669307
+        },
+        {
+          "month": "2024-10",
+          "trades": 58,
+          "winRate": 36.2,
+          "netPnl": -122347
+        },
+        {
+          "month": "2024-11",
+          "trades": 50,
+          "winRate": 38,
+          "netPnl": 226927
+        },
+        {
+          "month": "2024-12",
+          "trades": 51,
+          "winRate": 29.4,
+          "netPnl": 133476
+        },
+        {
+          "month": "2025-01",
+          "trades": 60,
+          "winRate": 35,
+          "netPnl": 108180
+        },
+        {
+          "month": "2025-02",
+          "trades": 48,
+          "winRate": 39.6,
+          "netPnl": -100210
+        },
+        {
+          "month": "2025-03",
+          "trades": 51,
+          "winRate": 43.1,
+          "netPnl": 120818
+        },
+        {
+          "month": "2025-04",
+          "trades": 49,
+          "winRate": 46.9,
+          "netPnl": 339967
+        },
+        {
+          "month": "2025-05",
+          "trades": 47,
+          "winRate": 38.3,
+          "netPnl": 63816
+        },
+        {
+          "month": "2025-06",
+          "trades": 35,
+          "winRate": 25.7,
+          "netPnl": -194204
+        },
+        {
+          "month": "2025-07",
+          "trades": 56,
+          "winRate": 50,
+          "netPnl": 258190
+        },
+        {
+          "month": "2025-08",
+          "trades": 50,
+          "winRate": 44,
+          "netPnl": 195798
+        },
+        {
+          "month": "2025-09",
+          "trades": 42,
+          "winRate": 52.4,
+          "netPnl": 213502
+        },
+        {
+          "month": "2025-10",
+          "trades": 33,
+          "winRate": 33.3,
+          "netPnl": 151610
+        },
+        {
+          "month": "2025-11",
+          "trades": 38,
+          "winRate": 52.6,
+          "netPnl": 373272
+        },
+        {
+          "month": "2025-12",
+          "trades": 44,
+          "winRate": 38.6,
+          "netPnl": 412128
+        },
+        {
+          "month": "2026-01",
+          "trades": 56,
+          "winRate": 42.9,
+          "netPnl": 328394
+        },
+        {
+          "month": "2026-02",
+          "trades": 46,
+          "winRate": 45.7,
+          "netPnl": -85117
+        },
+        {
+          "month": "2026-03",
+          "trades": 53,
+          "winRate": 50.9,
+          "netPnl": 682324
+        },
+        {
+          "month": "2026-04",
+          "trades": 43,
+          "winRate": 27.9,
+          "netPnl": -169948
+        },
+        {
+          "month": "2026-05",
+          "trades": 56,
+          "winRate": 33.9,
+          "netPnl": -65271
+        },
+        {
+          "month": "2026-06",
+          "trades": 39,
+          "winRate": 41,
+          "netPnl": 100848
+        },
+        {
+          "month": "2026-07",
+          "trades": 34,
+          "winRate": 32.4,
+          "netPnl": 14350
+        }
+      ]
+    },
+    "TOP-5, cap=5 (natural)": {
+      "tradesTaken": 4597,
+      "tradesSkippedByCap": 0,
+      "peakConcurrent": 5,
+      "winRate": 39.6,
+      "profitFactor": 1.58,
+      "finalCapital": 24889008,
+      "netProfit": 24589008,
+      "roiPct": 8196.3,
+      "maxDrawdownPct": 26.9,
+      "monthlyPnl": [
+        {
+          "month": "2019-02",
+          "trades": 5,
+          "winRate": 40,
+          "netPnl": -38037
+        },
+        {
+          "month": "2019-03",
+          "trades": 43,
+          "winRate": 44.2,
+          "netPnl": 495863
+        },
+        {
+          "month": "2019-04",
+          "trades": 51,
+          "winRate": 43.1,
+          "netPnl": 166573
+        },
+        {
+          "month": "2019-05",
+          "trades": 55,
+          "winRate": 47.3,
+          "netPnl": 258747
+        },
+        {
+          "month": "2019-06",
+          "trades": 45,
+          "winRate": 33.3,
+          "netPnl": -132115
+        },
+        {
+          "month": "2019-07",
+          "trades": 46,
+          "winRate": 43.5,
+          "netPnl": 329733
+        },
+        {
+          "month": "2019-08",
+          "trades": 62,
+          "winRate": 45.2,
+          "netPnl": 388540
+        },
+        {
+          "month": "2019-09",
+          "trades": 47,
+          "winRate": 42.6,
+          "netPnl": 27144
+        },
+        {
+          "month": "2019-10",
+          "trades": 34,
+          "winRate": 44.1,
+          "netPnl": 202451
+        },
+        {
+          "month": "2019-11",
+          "trades": 49,
+          "winRate": 36.7,
+          "netPnl": 566317
+        },
+        {
+          "month": "2019-12",
+          "trades": 38,
+          "winRate": 36.8,
+          "netPnl": 17398
+        },
+        {
+          "month": "2020-01",
+          "trades": 76,
+          "winRate": 40.8,
+          "netPnl": 2302408
+        },
+        {
+          "month": "2020-02",
+          "trades": 58,
+          "winRate": 25.9,
+          "netPnl": -350228
+        },
+        {
+          "month": "2020-03",
+          "trades": 52,
+          "winRate": 36.5,
+          "netPnl": 534111
+        },
+        {
+          "month": "2020-04",
+          "trades": 42,
+          "winRate": 26.2,
+          "netPnl": -159648
+        },
+        {
+          "month": "2020-05",
+          "trades": 56,
+          "winRate": 35.7,
+          "netPnl": -164327
+        },
+        {
+          "month": "2020-06",
+          "trades": 64,
+          "winRate": 35.9,
+          "netPnl": -60854
+        },
+        {
+          "month": "2020-07",
+          "trades": 50,
+          "winRate": 42,
+          "netPnl": 181815
+        },
+        {
+          "month": "2020-08",
+          "trades": 41,
+          "winRate": 43.9,
+          "netPnl": 284987
+        },
+        {
+          "month": "2020-09",
+          "trades": 49,
+          "winRate": 51,
+          "netPnl": 750127
+        },
+        {
+          "month": "2020-10",
+          "trades": 68,
+          "winRate": 35.3,
+          "netPnl": 874590
+        },
+        {
+          "month": "2020-11",
+          "trades": 63,
+          "winRate": 50.8,
+          "netPnl": 1402145
+        },
+        {
+          "month": "2020-12",
+          "trades": 74,
+          "winRate": 41.9,
+          "netPnl": 615796
+        },
+        {
+          "month": "2021-01",
+          "trades": 44,
+          "winRate": 34.1,
+          "netPnl": -60416
+        },
+        {
+          "month": "2021-02",
+          "trades": 47,
+          "winRate": 38.3,
+          "netPnl": 189950
+        },
+        {
+          "month": "2021-03",
+          "trades": 43,
+          "winRate": 37.2,
+          "netPnl": 299062
+        },
+        {
+          "month": "2021-04",
+          "trades": 44,
+          "winRate": 45.5,
+          "netPnl": -15305
+        },
+        {
+          "month": "2021-05",
+          "trades": 34,
+          "winRate": 47.1,
+          "netPnl": 13636
+        },
+        {
+          "month": "2021-06",
+          "trades": 60,
+          "winRate": 31.7,
+          "netPnl": 9311
+        },
+        {
+          "month": "2021-07",
+          "trades": 62,
+          "winRate": 33.9,
+          "netPnl": -57727
+        },
+        {
+          "month": "2021-08",
+          "trades": 41,
+          "winRate": 36.6,
+          "netPnl": 200648
+        },
+        {
+          "month": "2021-09",
+          "trades": 68,
+          "winRate": 36.8,
+          "netPnl": 1237602
+        },
+        {
+          "month": "2021-10",
+          "trades": 48,
+          "winRate": 37.5,
+          "netPnl": 1608968
+        },
+        {
+          "month": "2021-11",
+          "trades": 47,
+          "winRate": 23.4,
+          "netPnl": -324083
+        },
+        {
+          "month": "2021-12",
+          "trades": 61,
+          "winRate": 42.6,
+          "netPnl": 33653
+        },
+        {
+          "month": "2022-01",
+          "trades": 61,
+          "winRate": 41,
+          "netPnl": 196383
+        },
+        {
+          "month": "2022-02",
+          "trades": 48,
+          "winRate": 47.9,
+          "netPnl": 418383
+        },
+        {
+          "month": "2022-03",
+          "trades": 42,
+          "winRate": 38.1,
+          "netPnl": -120518
+        },
+        {
+          "month": "2022-04",
+          "trades": 40,
+          "winRate": 40,
+          "netPnl": 34878
+        },
+        {
+          "month": "2022-05",
+          "trades": 61,
+          "winRate": 47.5,
+          "netPnl": 386257
+        },
+        {
+          "month": "2022-06",
+          "trades": 45,
+          "winRate": 44.4,
+          "netPnl": -95382
+        },
+        {
+          "month": "2022-07",
+          "trades": 54,
+          "winRate": 46.3,
+          "netPnl": 261359
+        },
+        {
+          "month": "2022-08",
+          "trades": 66,
+          "winRate": 48.5,
+          "netPnl": 951127
+        },
+        {
+          "month": "2022-09",
+          "trades": 63,
+          "winRate": 34.9,
+          "netPnl": 8643
+        },
+        {
+          "month": "2022-10",
+          "trades": 58,
+          "winRate": 36.2,
+          "netPnl": 231029
+        },
+        {
+          "month": "2022-11",
+          "trades": 42,
+          "winRate": 26.2,
+          "netPnl": -257345
+        },
+        {
+          "month": "2022-12",
+          "trades": 49,
+          "winRate": 44.9,
+          "netPnl": 432313
+        },
+        {
+          "month": "2023-01",
+          "trades": 58,
+          "winRate": 39.7,
+          "netPnl": 417031
+        },
+        {
+          "month": "2023-02",
+          "trades": 51,
+          "winRate": 37.3,
+          "netPnl": 1054659
+        },
+        {
+          "month": "2023-03",
+          "trades": 38,
+          "winRate": 44.7,
+          "netPnl": 39573
+        },
+        {
+          "month": "2023-04",
+          "trades": 29,
+          "winRate": 37.9,
+          "netPnl": 128269
+        },
+        {
+          "month": "2023-05",
+          "trades": 67,
+          "winRate": 46.3,
+          "netPnl": 477376
+        },
+        {
+          "month": "2023-06",
+          "trades": 77,
+          "winRate": 35.1,
+          "netPnl": 146512
+        },
+        {
+          "month": "2023-07",
+          "trades": 41,
+          "winRate": 39,
+          "netPnl": 111871
+        },
+        {
+          "month": "2023-08",
+          "trades": 50,
+          "winRate": 46,
+          "netPnl": 848967
+        },
+        {
+          "month": "2023-09",
+          "trades": 38,
+          "winRate": 36.8,
+          "netPnl": 26581
+        },
+        {
+          "month": "2023-10",
+          "trades": 56,
+          "winRate": 33.9,
+          "netPnl": 290559
+        },
+        {
+          "month": "2023-11",
+          "trades": 36,
+          "winRate": 33.3,
+          "netPnl": 147528
+        },
+        {
+          "month": "2023-12",
+          "trades": 59,
+          "winRate": 47.5,
+          "netPnl": 610158
+        },
+        {
+          "month": "2024-01",
+          "trades": 63,
+          "winRate": 28.6,
+          "netPnl": 81100
+        },
+        {
+          "month": "2024-02",
+          "trades": 42,
+          "winRate": 45.2,
+          "netPnl": 576087
+        },
+        {
+          "month": "2024-03",
+          "trades": 51,
+          "winRate": 41.2,
+          "netPnl": 585349
+        },
+        {
+          "month": "2024-04",
+          "trades": 52,
+          "winRate": 28.8,
+          "netPnl": 335708
+        },
+        {
+          "month": "2024-05",
+          "trades": 46,
+          "winRate": 43.5,
+          "netPnl": 60129
+        },
+        {
+          "month": "2024-06",
+          "trades": 39,
+          "winRate": 38.5,
+          "netPnl": -1901
+        },
+        {
+          "month": "2024-07",
+          "trades": 45,
+          "winRate": 40,
+          "netPnl": 53981
+        },
+        {
+          "month": "2024-08",
+          "trades": 51,
+          "winRate": 31.4,
+          "netPnl": -74451
+        },
+        {
+          "month": "2024-09",
+          "trades": 62,
+          "winRate": 41.9,
+          "netPnl": 620423
+        },
+        {
+          "month": "2024-10",
+          "trades": 64,
+          "winRate": 39.1,
+          "netPnl": 32827
+        },
+        {
+          "month": "2024-11",
+          "trades": 60,
+          "winRate": 43.3,
+          "netPnl": 388336
+        },
+        {
+          "month": "2024-12",
+          "trades": 59,
+          "winRate": 27.1,
+          "netPnl": 68834
+        },
+        {
+          "month": "2025-01",
+          "trades": 67,
+          "winRate": 37.3,
+          "netPnl": 115972
+        },
+        {
+          "month": "2025-02",
+          "trades": 54,
+          "winRate": 38.9,
+          "netPnl": -125316
+        },
+        {
+          "month": "2025-03",
+          "trades": 56,
+          "winRate": 41.1,
+          "netPnl": 98729
+        },
+        {
+          "month": "2025-04",
+          "trades": 55,
+          "winRate": 43.6,
+          "netPnl": 337997
+        },
+        {
+          "month": "2025-05",
+          "trades": 54,
+          "winRate": 40.7,
+          "netPnl": 493849
+        },
+        {
+          "month": "2025-06",
+          "trades": 35,
+          "winRate": 25.7,
+          "netPnl": -194204
+        },
+        {
+          "month": "2025-07",
+          "trades": 61,
+          "winRate": 49.2,
+          "netPnl": 242857
+        },
+        {
+          "month": "2025-08",
+          "trades": 53,
+          "winRate": 45.3,
+          "netPnl": 214658
+        },
+        {
+          "month": "2025-09",
+          "trades": 43,
+          "winRate": 53.5,
+          "netPnl": 240878
+        },
+        {
+          "month": "2025-10",
+          "trades": 33,
+          "winRate": 33.3,
+          "netPnl": 151610
+        },
+        {
+          "month": "2025-11",
+          "trades": 41,
+          "winRate": 53.7,
+          "netPnl": 389545
+        },
+        {
+          "month": "2025-12",
+          "trades": 46,
+          "winRate": 39.1,
+          "netPnl": 428358
+        },
+        {
+          "month": "2026-01",
+          "trades": 64,
+          "winRate": 45.3,
+          "netPnl": 613443
+        },
+        {
+          "month": "2026-02",
+          "trades": 53,
+          "winRate": 41.5,
+          "netPnl": -203783
+        },
+        {
+          "month": "2026-03",
+          "trades": 67,
+          "winRate": 47.8,
+          "netPnl": 739723
+        },
+        {
+          "month": "2026-04",
+          "trades": 46,
+          "winRate": 26.1,
+          "netPnl": -256016
+        },
+        {
+          "month": "2026-05",
+          "trades": 62,
+          "winRate": 33.9,
+          "netPnl": 109429
+        },
+        {
+          "month": "2026-06",
+          "trades": 42,
+          "winRate": 40.5,
+          "netPnl": 99686
+        },
+        {
+          "month": "2026-07",
+          "trades": 35,
+          "winRate": 31.4,
+          "netPnl": -9875
+        }
+      ]
+    },
+    "TOP-10, cap=3 (start conservative)": {
+      "tradesTaken": 5328,
+      "tradesSkippedByCap": 3976,
+      "peakConcurrent": 3,
+      "winRate": 39.7,
+      "profitFactor": 1.52,
+      "finalCapital": 25276725,
+      "netProfit": 24976725,
+      "roiPct": 8325.6,
+      "maxDrawdownPct": 32,
+      "monthlyPnl": [
+        {
+          "month": "2019-02",
+          "trades": 9,
+          "winRate": 33.3,
+          "netPnl": -79273
+        },
+        {
+          "month": "2019-03",
+          "trades": 51,
+          "winRate": 47.1,
+          "netPnl": 497346
+        },
+        {
+          "month": "2019-04",
+          "trades": 56,
+          "winRate": 37.5,
+          "netPnl": 104980
+        },
+        {
+          "month": "2019-05",
+          "trades": 65,
+          "winRate": 44.6,
+          "netPnl": 485112
+        },
+        {
+          "month": "2019-06",
+          "trades": 52,
+          "winRate": 38.5,
+          "netPnl": 4791
+        },
+        {
+          "month": "2019-07",
+          "trades": 67,
+          "winRate": 47.8,
+          "netPnl": 667898
+        },
+        {
+          "month": "2019-08",
+          "trades": 60,
+          "winRate": 43.3,
+          "netPnl": 313815
+        },
+        {
+          "month": "2019-09",
+          "trades": 52,
+          "winRate": 42.3,
+          "netPnl": 104876
+        },
+        {
+          "month": "2019-10",
+          "trades": 52,
+          "winRate": 40.4,
+          "netPnl": 51233
+        },
+        {
+          "month": "2019-11",
+          "trades": 58,
+          "winRate": 39.7,
+          "netPnl": 608871
+        },
+        {
+          "month": "2019-12",
+          "trades": 50,
+          "winRate": 38,
+          "netPnl": 64705
+        },
+        {
+          "month": "2020-01",
+          "trades": 69,
+          "winRate": 46.4,
+          "netPnl": 2458337
+        },
+        {
+          "month": "2020-02",
+          "trades": 57,
+          "winRate": 21.1,
+          "netPnl": -347211
+        },
+        {
+          "month": "2020-03",
+          "trades": 63,
+          "winRate": 38.1,
+          "netPnl": 495041
+        },
+        {
+          "month": "2020-04",
+          "trades": 53,
+          "winRate": 28.3,
+          "netPnl": -268711
+        },
+        {
+          "month": "2020-05",
+          "trades": 57,
+          "winRate": 42.1,
+          "netPnl": 38420
+        },
+        {
+          "month": "2020-06",
+          "trades": 66,
+          "winRate": 33.3,
+          "netPnl": -167517
+        },
+        {
+          "month": "2020-07",
+          "trades": 66,
+          "winRate": 51.5,
+          "netPnl": 447762
+        },
+        {
+          "month": "2020-08",
+          "trades": 62,
+          "winRate": 46.8,
+          "netPnl": 295470
+        },
+        {
+          "month": "2020-09",
+          "trades": 64,
+          "winRate": 50,
+          "netPnl": 751773
+        },
+        {
+          "month": "2020-10",
+          "trades": 63,
+          "winRate": 31.7,
+          "netPnl": 192270
+        },
+        {
+          "month": "2020-11",
+          "trades": 60,
+          "winRate": 50,
+          "netPnl": 1641216
+        },
+        {
+          "month": "2020-12",
+          "trades": 66,
+          "winRate": 36.4,
+          "netPnl": 301063
+        },
+        {
+          "month": "2021-01",
+          "trades": 57,
+          "winRate": 35.1,
+          "netPnl": -114428
+        },
+        {
+          "month": "2021-02",
+          "trades": 56,
+          "winRate": 32.1,
+          "netPnl": 26151
+        },
+        {
+          "month": "2021-03",
+          "trades": 63,
+          "winRate": 33.3,
+          "netPnl": 361268
+        },
+        {
+          "month": "2021-04",
+          "trades": 56,
+          "winRate": 42.9,
+          "netPnl": 46617
+        },
+        {
+          "month": "2021-05",
+          "trades": 60,
+          "winRate": 45,
+          "netPnl": 47438
+        },
+        {
+          "month": "2021-06",
+          "trades": 65,
+          "winRate": 30.8,
+          "netPnl": -6609
+        },
+        {
+          "month": "2021-07",
+          "trades": 60,
+          "winRate": 36.7,
+          "netPnl": 41039
+        },
+        {
+          "month": "2021-08",
+          "trades": 60,
+          "winRate": 36.7,
+          "netPnl": 232925
+        },
+        {
+          "month": "2021-09",
+          "trades": 60,
+          "winRate": 48.3,
+          "netPnl": 1476206
+        },
+        {
+          "month": "2021-10",
+          "trades": 57,
+          "winRate": 38.6,
+          "netPnl": 1381282
+        },
+        {
+          "month": "2021-11",
+          "trades": 57,
+          "winRate": 29.8,
+          "netPnl": -250469
+        },
+        {
+          "month": "2021-12",
+          "trades": 64,
+          "winRate": 42.2,
+          "netPnl": 95319
+        },
+        {
+          "month": "2022-01",
+          "trades": 60,
+          "winRate": 33.3,
+          "netPnl": 21163
+        },
+        {
+          "month": "2022-02",
+          "trades": 58,
+          "winRate": 44.8,
+          "netPnl": 368865
+        },
+        {
+          "month": "2022-03",
+          "trades": 62,
+          "winRate": 40.3,
+          "netPnl": 9986
+        },
+        {
+          "month": "2022-04",
+          "trades": 53,
+          "winRate": 34,
+          "netPnl": -186976
+        },
+        {
+          "month": "2022-05",
+          "trades": 63,
+          "winRate": 47.6,
+          "netPnl": 440778
+        },
+        {
+          "month": "2022-06",
+          "trades": 65,
+          "winRate": 40,
+          "netPnl": -17988
+        },
+        {
+          "month": "2022-07",
+          "trades": 62,
+          "winRate": 41.9,
+          "netPnl": 391611
+        },
+        {
+          "month": "2022-08",
+          "trades": 60,
+          "winRate": 51.7,
+          "netPnl": 842653
+        },
+        {
+          "month": "2022-09",
+          "trades": 66,
+          "winRate": 39.4,
+          "netPnl": 143101
+        },
+        {
+          "month": "2022-10",
+          "trades": 57,
+          "winRate": 31.6,
+          "netPnl": 86452
+        },
+        {
+          "month": "2022-11",
+          "trades": 62,
+          "winRate": 29,
+          "netPnl": -406569
+        },
+        {
+          "month": "2022-12",
+          "trades": 65,
+          "winRate": 43.1,
+          "netPnl": 235538
+        },
+        {
+          "month": "2023-01",
+          "trades": 63,
+          "winRate": 36.5,
+          "netPnl": 523796
+        },
+        {
+          "month": "2023-02",
+          "trades": 58,
+          "winRate": 37.9,
+          "netPnl": 1117683
+        },
+        {
+          "month": "2023-03",
+          "trades": 57,
+          "winRate": 50.9,
+          "netPnl": 352978
+        },
+        {
+          "month": "2023-04",
+          "trades": 47,
+          "winRate": 38.3,
+          "netPnl": 253213
+        },
+        {
+          "month": "2023-05",
+          "trades": 66,
+          "winRate": 43.9,
+          "netPnl": 355841
+        },
+        {
+          "month": "2023-06",
+          "trades": 63,
+          "winRate": 39.7,
+          "netPnl": 141901
+        },
+        {
+          "month": "2023-07",
+          "trades": 59,
+          "winRate": 39,
+          "netPnl": 276201
+        },
+        {
+          "month": "2023-08",
+          "trades": 64,
+          "winRate": 42.2,
+          "netPnl": 875218
+        },
+        {
+          "month": "2023-09",
+          "trades": 56,
+          "winRate": 39.3,
+          "netPnl": 65079
+        },
+        {
+          "month": "2023-10",
+          "trades": 59,
+          "winRate": 33.9,
+          "netPnl": -8080
+        },
+        {
+          "month": "2023-11",
+          "trades": 57,
+          "winRate": 35.1,
+          "netPnl": 177698
+        },
+        {
+          "month": "2023-12",
+          "trades": 60,
+          "winRate": 50,
+          "netPnl": 885442
+        },
+        {
+          "month": "2024-01",
+          "trades": 63,
+          "winRate": 33.3,
+          "netPnl": 351662
+        },
+        {
+          "month": "2024-02",
+          "trades": 61,
+          "winRate": 41,
+          "netPnl": 550846
+        },
+        {
+          "month": "2024-03",
+          "trades": 51,
+          "winRate": 41.2,
+          "netPnl": 542633
+        },
+        {
+          "month": "2024-04",
+          "trades": 60,
+          "winRate": 31.7,
+          "netPnl": 359042
+        },
+        {
+          "month": "2024-05",
+          "trades": 61,
+          "winRate": 44.3,
+          "netPnl": 164643
+        },
+        {
+          "month": "2024-06",
+          "trades": 57,
+          "winRate": 36.8,
+          "netPnl": 103360
+        },
+        {
+          "month": "2024-07",
+          "trades": 65,
+          "winRate": 41.5,
+          "netPnl": 179164
+        },
+        {
+          "month": "2024-08",
+          "trades": 62,
+          "winRate": 29,
+          "netPnl": -247482
+        },
+        {
+          "month": "2024-09",
+          "trades": 63,
+          "winRate": 47.6,
+          "netPnl": 1164818
+        },
+        {
+          "month": "2024-10",
+          "trades": 66,
+          "winRate": 37.9,
+          "netPnl": -77405
+        },
+        {
+          "month": "2024-11",
+          "trades": 54,
+          "winRate": 38.9,
+          "netPnl": 294127
+        },
+        {
+          "month": "2024-12",
+          "trades": 62,
+          "winRate": 32.3,
+          "netPnl": 200280
+        },
+        {
+          "month": "2025-01",
+          "trades": 69,
+          "winRate": 33.3,
+          "netPnl": 10420
+        },
+        {
+          "month": "2025-02",
+          "trades": 58,
+          "winRate": 39.7,
+          "netPnl": -126562
+        },
+        {
+          "month": "2025-03",
+          "trades": 57,
+          "winRate": 42.1,
+          "netPnl": 83056
+        },
+        {
+          "month": "2025-04",
+          "trades": 56,
+          "winRate": 41.1,
+          "netPnl": 230797
+        },
+        {
+          "month": "2025-05",
+          "trades": 62,
+          "winRate": 32.3,
+          "netPnl": -104469
+        },
+        {
+          "month": "2025-06",
+          "trades": 54,
+          "winRate": 35.2,
+          "netPnl": -64805
+        },
+        {
+          "month": "2025-07",
+          "trades": 68,
+          "winRate": 47.1,
+          "netPnl": 274318
+        },
+        {
+          "month": "2025-08",
+          "trades": 57,
+          "winRate": 43.9,
+          "netPnl": 231002
+        },
+        {
+          "month": "2025-09",
+          "trades": 60,
+          "winRate": 48.3,
+          "netPnl": 100369
+        },
+        {
+          "month": "2025-10",
+          "trades": 57,
+          "winRate": 29.8,
+          "netPnl": 313968
+        },
+        {
+          "month": "2025-11",
+          "trades": 55,
+          "winRate": 45.5,
+          "netPnl": 240716
+        },
+        {
+          "month": "2025-12",
+          "trades": 65,
+          "winRate": 38.5,
+          "netPnl": 398821
+        },
+        {
+          "month": "2026-01",
+          "trades": 63,
+          "winRate": 46,
+          "netPnl": 428986
+        },
+        {
+          "month": "2026-02",
+          "trades": 57,
+          "winRate": 43.9,
+          "netPnl": -141726
+        },
+        {
+          "month": "2026-03",
+          "trades": 57,
+          "winRate": 49.1,
+          "netPnl": 669458
+        },
+        {
+          "month": "2026-04",
+          "trades": 56,
+          "winRate": 33.9,
+          "netPnl": -8498
+        },
+        {
+          "month": "2026-05",
+          "trades": 63,
+          "winRate": 33.3,
+          "netPnl": -75784
+        },
+        {
+          "month": "2026-06",
+          "trades": 62,
+          "winRate": 41.9,
+          "netPnl": 36748
+        },
+        {
+          "month": "2026-07",
+          "trades": 52,
+          "winRate": 34.6,
+          "netPnl": -50368
+        }
+      ]
+    },
+    "TOP-10, cap=5 (scale up mid)": {
+      "tradesTaken": 8009,
+      "tradesSkippedByCap": 1295,
+      "peakConcurrent": 5,
+      "winRate": 39.7,
+      "profitFactor": 1.55,
+      "finalCapital": 40259716,
+      "netProfit": 39959716,
+      "roiPct": 13319.9,
+      "maxDrawdownPct": 46.5,
+      "monthlyPnl": [
+        {
+          "month": "2019-02",
+          "trades": 11,
+          "winRate": 27.3,
+          "netPnl": -122821
+        },
+        {
+          "month": "2019-03",
+          "trades": 71,
+          "winRate": 46.5,
+          "netPnl": 525611
+        },
+        {
+          "month": "2019-04",
+          "trades": 82,
+          "winRate": 37.8,
+          "netPnl": -44945
+        },
+        {
+          "month": "2019-05",
+          "trades": 100,
+          "winRate": 44,
+          "netPnl": 405444
+        },
+        {
+          "month": "2019-06",
+          "trades": 74,
+          "winRate": 35.1,
+          "netPnl": 779469
+        },
+        {
+          "month": "2019-07",
+          "trades": 93,
+          "winRate": 45.2,
+          "netPnl": 575853
+        },
+        {
+          "month": "2019-08",
+          "trades": 93,
+          "winRate": 45.2,
+          "netPnl": 542766
+        },
+        {
+          "month": "2019-09",
+          "trades": 73,
+          "winRate": 43.8,
+          "netPnl": 171441
+        },
+        {
+          "month": "2019-10",
+          "trades": 62,
+          "winRate": 38.7,
+          "netPnl": 21275
+        },
+        {
+          "month": "2019-11",
+          "trades": 85,
+          "winRate": 38.8,
+          "netPnl": 584313
+        },
+        {
+          "month": "2019-12",
+          "trades": 61,
+          "winRate": 37.7,
+          "netPnl": 33545
+        },
+        {
+          "month": "2020-01",
+          "trades": 112,
+          "winRate": 43.8,
+          "netPnl": 2585101
+        },
+        {
+          "month": "2020-02",
+          "trades": 94,
+          "winRate": 30.9,
+          "netPnl": 256359
+        },
+        {
+          "month": "2020-03",
+          "trades": 103,
+          "winRate": 42.7,
+          "netPnl": 925879
+        },
+        {
+          "month": "2020-04",
+          "trades": 75,
+          "winRate": 36,
+          "netPnl": -269064
+        },
+        {
+          "month": "2020-05",
+          "trades": 92,
+          "winRate": 39.1,
+          "netPnl": -150774
+        },
+        {
+          "month": "2020-06",
+          "trades": 103,
+          "winRate": 32,
+          "netPnl": -168276
+        },
+        {
+          "month": "2020-07",
+          "trades": 93,
+          "winRate": 48.4,
+          "netPnl": 650057
+        },
+        {
+          "month": "2020-08",
+          "trades": 94,
+          "winRate": 44.7,
+          "netPnl": 386015
+        },
+        {
+          "month": "2020-09",
+          "trades": 86,
+          "winRate": 47.7,
+          "netPnl": 909950
+        },
+        {
+          "month": "2020-10",
+          "trades": 99,
+          "winRate": 35.4,
+          "netPnl": 1064965
+        },
+        {
+          "month": "2020-11",
+          "trades": 98,
+          "winRate": 45.9,
+          "netPnl": 1779433
+        },
+        {
+          "month": "2020-12",
+          "trades": 108,
+          "winRate": 42.6,
+          "netPnl": 1360592
+        },
+        {
+          "month": "2021-01",
+          "trades": 88,
+          "winRate": 31.8,
+          "netPnl": -383871
+        },
+        {
+          "month": "2021-02",
+          "trades": 85,
+          "winRate": 42.4,
+          "netPnl": 647042
+        },
+        {
+          "month": "2021-03",
+          "trades": 91,
+          "winRate": 31.9,
+          "netPnl": 264917
+        },
+        {
+          "month": "2021-04",
+          "trades": 86,
+          "winRate": 38.4,
+          "netPnl": -44119
+        },
+        {
+          "month": "2021-05",
+          "trades": 86,
+          "winRate": 39.5,
+          "netPnl": 282707
+        },
+        {
+          "month": "2021-06",
+          "trades": 97,
+          "winRate": 33,
+          "netPnl": -57419
+        },
+        {
+          "month": "2021-07",
+          "trades": 85,
+          "winRate": 35.3,
+          "netPnl": 40722
+        },
+        {
+          "month": "2021-08",
+          "trades": 87,
+          "winRate": 36.8,
+          "netPnl": 908248
+        },
+        {
+          "month": "2021-09",
+          "trades": 96,
+          "winRate": 36.5,
+          "netPnl": 1416806
+        },
+        {
+          "month": "2021-10",
+          "trades": 77,
+          "winRate": 40.3,
+          "netPnl": 1644196
+        },
+        {
+          "month": "2021-11",
+          "trades": 82,
+          "winRate": 32.9,
+          "netPnl": -277658
+        },
+        {
+          "month": "2021-12",
+          "trades": 93,
+          "winRate": 46.2,
+          "netPnl": 7488
+        },
+        {
+          "month": "2022-01",
+          "trades": 98,
+          "winRate": 34.7,
+          "netPnl": -184122
+        },
+        {
+          "month": "2022-02",
+          "trades": 90,
+          "winRate": 47.8,
+          "netPnl": 905610
+        },
+        {
+          "month": "2022-03",
+          "trades": 90,
+          "winRate": 35.6,
+          "netPnl": -167008
+        },
+        {
+          "month": "2022-04",
+          "trades": 77,
+          "winRate": 36.4,
+          "netPnl": 20742
+        },
+        {
+          "month": "2022-05",
+          "trades": 99,
+          "winRate": 45.5,
+          "netPnl": 861701
+        },
+        {
+          "month": "2022-06",
+          "trades": 102,
+          "winRate": 40.2,
+          "netPnl": 268064
+        },
+        {
+          "month": "2022-07",
+          "trades": 96,
+          "winRate": 42.7,
+          "netPnl": 448912
+        },
+        {
+          "month": "2022-08",
+          "trades": 100,
+          "winRate": 43,
+          "netPnl": 862339
+        },
+        {
+          "month": "2022-09",
+          "trades": 100,
+          "winRate": 38,
+          "netPnl": 828200
+        },
+        {
+          "month": "2022-10",
+          "trades": 90,
+          "winRate": 37.8,
+          "netPnl": 259289
+        },
+        {
+          "month": "2022-11",
+          "trades": 97,
+          "winRate": 35.1,
+          "netPnl": -85736
+        },
+        {
+          "month": "2022-12",
+          "trades": 93,
+          "winRate": 40.9,
+          "netPnl": 734059
+        },
+        {
+          "month": "2023-01",
+          "trades": 96,
+          "winRate": 36.5,
+          "netPnl": 1489957
+        },
+        {
+          "month": "2023-02",
+          "trades": 88,
+          "winRate": 38.6,
+          "netPnl": 1089584
+        },
+        {
+          "month": "2023-03",
+          "trades": 81,
+          "winRate": 43.2,
+          "netPnl": 234524
+        },
+        {
+          "month": "2023-04",
+          "trades": 65,
+          "winRate": 33.8,
+          "netPnl": 159633
+        },
+        {
+          "month": "2023-05",
+          "trades": 106,
+          "winRate": 50.9,
+          "netPnl": 806441
+        },
+        {
+          "month": "2023-06",
+          "trades": 102,
+          "winRate": 35.3,
+          "netPnl": 190302
+        },
+        {
+          "month": "2023-07",
+          "trades": 82,
+          "winRate": 40.2,
+          "netPnl": 764710
+        },
+        {
+          "month": "2023-08",
+          "trades": 92,
+          "winRate": 44.6,
+          "netPnl": 1410069
+        },
+        {
+          "month": "2023-09",
+          "trades": 80,
+          "winRate": 40,
+          "netPnl": 97437
+        },
+        {
+          "month": "2023-10",
+          "trades": 86,
+          "winRate": 37.2,
+          "netPnl": 290764
+        },
+        {
+          "month": "2023-11",
+          "trades": 84,
+          "winRate": 39.3,
+          "netPnl": 195870
+        },
+        {
+          "month": "2023-12",
+          "trades": 98,
+          "winRate": 52,
+          "netPnl": 1534368
+        },
+        {
+          "month": "2024-01",
+          "trades": 102,
+          "winRate": 30.4,
+          "netPnl": 439353
+        },
+        {
+          "month": "2024-02",
+          "trades": 88,
+          "winRate": 40.9,
+          "netPnl": 737998
+        },
+        {
+          "month": "2024-03",
+          "trades": 75,
+          "winRate": 38.7,
+          "netPnl": 521147
+        },
+        {
+          "month": "2024-04",
+          "trades": 95,
+          "winRate": 36.8,
+          "netPnl": 577369
+        },
+        {
+          "month": "2024-05",
+          "trades": 93,
+          "winRate": 40.9,
+          "netPnl": -28200
+        },
+        {
+          "month": "2024-06",
+          "trades": 81,
+          "winRate": 37,
+          "netPnl": 30101
+        },
+        {
+          "month": "2024-07",
+          "trades": 92,
+          "winRate": 40.2,
+          "netPnl": 285848
+        },
+        {
+          "month": "2024-08",
+          "trades": 95,
+          "winRate": 36.8,
+          "netPnl": -205116
+        },
+        {
+          "month": "2024-09",
+          "trades": 100,
+          "winRate": 44,
+          "netPnl": 1244182
+        },
+        {
+          "month": "2024-10",
+          "trades": 104,
+          "winRate": 37.5,
+          "netPnl": -90705
+        },
+        {
+          "month": "2024-11",
+          "trades": 84,
+          "winRate": 42.9,
+          "netPnl": 396869
+        },
+        {
+          "month": "2024-12",
+          "trades": 87,
+          "winRate": 33.3,
+          "netPnl": 612898
+        },
+        {
+          "month": "2025-01",
+          "trades": 111,
+          "winRate": 40.5,
+          "netPnl": 383175
+        },
+        {
+          "month": "2025-02",
+          "trades": 92,
+          "winRate": 41.3,
+          "netPnl": -191077
+        },
+        {
+          "month": "2025-03",
+          "trades": 92,
+          "winRate": 39.1,
+          "netPnl": 49431
+        },
+        {
+          "month": "2025-04",
+          "trades": 84,
+          "winRate": 39.3,
+          "netPnl": 462449
+        },
+        {
+          "month": "2025-05",
+          "trades": 96,
+          "winRate": 36.5,
+          "netPnl": 342091
+        },
+        {
+          "month": "2025-06",
+          "trades": 68,
+          "winRate": 36.8,
+          "netPnl": -31100
+        },
+        {
+          "month": "2025-07",
+          "trades": 101,
+          "winRate": 45.5,
+          "netPnl": 600950
+        },
+        {
+          "month": "2025-08",
+          "trades": 89,
+          "winRate": 47.2,
+          "netPnl": 251400
+        },
+        {
+          "month": "2025-09",
+          "trades": 77,
+          "winRate": 44.2,
+          "netPnl": 81241
+        },
+        {
+          "month": "2025-10",
+          "trades": 82,
+          "winRate": 31.7,
+          "netPnl": 511441
+        },
+        {
+          "month": "2025-11",
+          "trades": 84,
+          "winRate": 45.2,
+          "netPnl": 427155
+        },
+        {
+          "month": "2025-12",
+          "trades": 100,
+          "winRate": 35,
+          "netPnl": 326814
+        },
+        {
+          "month": "2026-01",
+          "trades": 102,
+          "winRate": 44.1,
+          "netPnl": 1132942
+        },
+        {
+          "month": "2026-02",
+          "trades": 87,
+          "winRate": 40.2,
+          "netPnl": -310017
+        },
+        {
+          "month": "2026-03",
+          "trades": 95,
+          "winRate": 44.2,
+          "netPnl": 735023
+        },
+        {
+          "month": "2026-04",
+          "trades": 82,
+          "winRate": 31.7,
+          "netPnl": -13085
+        },
+        {
+          "month": "2026-05",
+          "trades": 98,
+          "winRate": 30.6,
+          "netPnl": -48022
+        },
+        {
+          "month": "2026-06",
+          "trades": 89,
+          "winRate": 42.7,
+          "netPnl": 326984
+        },
+        {
+          "month": "2026-07",
+          "trades": 77,
+          "winRate": 37.7,
+          "netPnl": 133221
+        }
+      ]
+    },
+    "TOP-10, cap=10 (fully scaled)": {
+      "tradesTaken": 9304,
+      "tradesSkippedByCap": 0,
+      "peakConcurrent": 10,
+      "winRate": 39.9,
+      "profitFactor": 1.54,
+      "finalCapital": 46628709,
+      "netProfit": 46328709,
+      "roiPct": 15442.9,
+      "maxDrawdownPct": 46.5,
+      "monthlyPnl": [
+        {
+          "month": "2019-02",
+          "trades": 11,
+          "winRate": 27.3,
+          "netPnl": -122821
+        },
+        {
+          "month": "2019-03",
+          "trades": 76,
+          "winRate": 44.7,
+          "netPnl": 634357
+        },
+        {
+          "month": "2019-04",
+          "trades": 92,
+          "winRate": 38,
+          "netPnl": -13981
+        },
+        {
+          "month": "2019-05",
+          "trades": 113,
+          "winRate": 44.2,
+          "netPnl": 505734
+        },
+        {
+          "month": "2019-06",
+          "trades": 85,
+          "winRate": 35.3,
+          "netPnl": 719174
+        },
+        {
+          "month": "2019-07",
+          "trades": 97,
+          "winRate": 44.3,
+          "netPnl": 510746
+        },
+        {
+          "month": "2019-08",
+          "trades": 110,
+          "winRate": 42.7,
+          "netPnl": 483315
+        },
+        {
+          "month": "2019-09",
+          "trades": 77,
+          "winRate": 42.9,
+          "netPnl": 194184
+        },
+        {
+          "month": "2019-10",
+          "trades": 63,
+          "winRate": 38.1,
+          "netPnl": 19472
+        },
+        {
+          "month": "2019-11",
+          "trades": 91,
+          "winRate": 38.5,
+          "netPnl": 557607
+        },
+        {
+          "month": "2019-12",
+          "trades": 63,
+          "winRate": 36.5,
+          "netPnl": -21016
+        },
+        {
+          "month": "2020-01",
+          "trades": 135,
+          "winRate": 45.9,
+          "netPnl": 3270448
+        },
+        {
+          "month": "2020-02",
+          "trades": 126,
+          "winRate": 31,
+          "netPnl": -27023
+        },
+        {
+          "month": "2020-03",
+          "trades": 128,
+          "winRate": 38.3,
+          "netPnl": 1182401
+        },
+        {
+          "month": "2020-04",
+          "trades": 84,
+          "winRate": 33.3,
+          "netPnl": -395804
+        },
+        {
+          "month": "2020-05",
+          "trades": 103,
+          "winRate": 38.8,
+          "netPnl": -153264
+        },
+        {
+          "month": "2020-06",
+          "trades": 132,
+          "winRate": 33.3,
+          "netPnl": -205598
+        },
+        {
+          "month": "2020-07",
+          "trades": 96,
+          "winRate": 47.9,
+          "netPnl": 611288
+        },
+        {
+          "month": "2020-08",
+          "trades": 104,
+          "winRate": 47.1,
+          "netPnl": 458926
+        },
+        {
+          "month": "2020-09",
+          "trades": 89,
+          "winRate": 48.3,
+          "netPnl": 1017272
+        },
+        {
+          "month": "2020-10",
+          "trades": 122,
+          "winRate": 36.1,
+          "netPnl": 1065761
+        },
+        {
+          "month": "2020-11",
+          "trades": 124,
+          "winRate": 44.4,
+          "netPnl": 1806287
+        },
+        {
+          "month": "2020-12",
+          "trades": 136,
+          "winRate": 42.6,
+          "netPnl": 1573320
+        },
+        {
+          "month": "2021-01",
+          "trades": 101,
+          "winRate": 30.7,
+          "netPnl": -362966
+        },
+        {
+          "month": "2021-02",
+          "trades": 97,
+          "winRate": 42.3,
+          "netPnl": 729235
+        },
+        {
+          "month": "2021-03",
+          "trades": 96,
+          "winRate": 33.3,
+          "netPnl": 286934
+        },
+        {
+          "month": "2021-04",
+          "trades": 96,
+          "winRate": 38.5,
+          "netPnl": -280
+        },
+        {
+          "month": "2021-05",
+          "trades": 100,
+          "winRate": 42,
+          "netPnl": 395644
+        },
+        {
+          "month": "2021-06",
+          "trades": 109,
+          "winRate": 33.9,
+          "netPnl": 22522
+        },
+        {
+          "month": "2021-07",
+          "trades": 93,
+          "winRate": 36.6,
+          "netPnl": 264345
+        },
+        {
+          "month": "2021-08",
+          "trades": 95,
+          "winRate": 35.8,
+          "netPnl": 850606
+        },
+        {
+          "month": "2021-09",
+          "trades": 117,
+          "winRate": 41,
+          "netPnl": 1532864
+        },
+        {
+          "month": "2021-10",
+          "trades": 88,
+          "winRate": 40.9,
+          "netPnl": 1806828
+        },
+        {
+          "month": "2021-11",
+          "trades": 90,
+          "winRate": 34.4,
+          "netPnl": -319877
+        },
+        {
+          "month": "2021-12",
+          "trades": 106,
+          "winRate": 45.3,
+          "netPnl": -121873
+        },
+        {
+          "month": "2022-01",
+          "trades": 122,
+          "winRate": 36.1,
+          "netPnl": -136912
+        },
+        {
+          "month": "2022-02",
+          "trades": 113,
+          "winRate": 48.7,
+          "netPnl": 1296033
+        },
+        {
+          "month": "2022-03",
+          "trades": 98,
+          "winRate": 35.7,
+          "netPnl": -208334
+        },
+        {
+          "month": "2022-04",
+          "trades": 103,
+          "winRate": 39.8,
+          "netPnl": 155556
+        },
+        {
+          "month": "2022-05",
+          "trades": 127,
+          "winRate": 45.7,
+          "netPnl": 1150249
+        },
+        {
+          "month": "2022-06",
+          "trades": 120,
+          "winRate": 44.2,
+          "netPnl": 811760
+        },
+        {
+          "month": "2022-07",
+          "trades": 111,
+          "winRate": 43.2,
+          "netPnl": 528745
+        },
+        {
+          "month": "2022-08",
+          "trades": 133,
+          "winRate": 39.8,
+          "netPnl": 813406
+        },
+        {
+          "month": "2022-09",
+          "trades": 115,
+          "winRate": 38.3,
+          "netPnl": 774645
+        },
+        {
+          "month": "2022-10",
+          "trades": 103,
+          "winRate": 36.9,
+          "netPnl": 339277
+        },
+        {
+          "month": "2022-11",
+          "trades": 117,
+          "winRate": 35.9,
+          "netPnl": -93395
+        },
+        {
+          "month": "2022-12",
+          "trades": 103,
+          "winRate": 38.8,
+          "netPnl": 630683
+        },
+        {
+          "month": "2023-01",
+          "trades": 110,
+          "winRate": 36.4,
+          "netPnl": 1532071
+        },
+        {
+          "month": "2023-02",
+          "trades": 95,
+          "winRate": 38.9,
+          "netPnl": 1078146
+        },
+        {
+          "month": "2023-03",
+          "trades": 90,
+          "winRate": 43.3,
+          "netPnl": 186929
+        },
+        {
+          "month": "2023-04",
+          "trades": 68,
+          "winRate": 33.8,
+          "netPnl": 133009
+        },
+        {
+          "month": "2023-05",
+          "trades": 125,
+          "winRate": 49.6,
+          "netPnl": 823452
+        },
+        {
+          "month": "2023-06",
+          "trades": 131,
+          "winRate": 36.6,
+          "netPnl": 207389
+        },
+        {
+          "month": "2023-07",
+          "trades": 84,
+          "winRate": 40.5,
+          "netPnl": 787777
+        },
+        {
+          "month": "2023-08",
+          "trades": 106,
+          "winRate": 46.2,
+          "netPnl": 1598935
+        },
+        {
+          "month": "2023-09",
+          "trades": 88,
+          "winRate": 40.9,
+          "netPnl": 478813
+        },
+        {
+          "month": "2023-10",
+          "trades": 101,
+          "winRate": 38.6,
+          "netPnl": 406766
+        },
+        {
+          "month": "2023-11",
+          "trades": 91,
+          "winRate": 38.5,
+          "netPnl": 177570
+        },
+        {
+          "month": "2023-12",
+          "trades": 128,
+          "winRate": 49.2,
+          "netPnl": 1551135
+        },
+        {
+          "month": "2024-01",
+          "trades": 132,
+          "winRate": 32.6,
+          "netPnl": 746085
+        },
+        {
+          "month": "2024-02",
+          "trades": 98,
+          "winRate": 39.8,
+          "netPnl": 679615
+        },
+        {
+          "month": "2024-03",
+          "trades": 84,
+          "winRate": 38.1,
+          "netPnl": 399927
+        },
+        {
+          "month": "2024-04",
+          "trades": 113,
+          "winRate": 37.2,
+          "netPnl": 654290
+        },
+        {
+          "month": "2024-05",
+          "trades": 107,
+          "winRate": 38.3,
+          "netPnl": -2267
+        },
+        {
+          "month": "2024-06",
+          "trades": 85,
+          "winRate": 38.8,
+          "netPnl": 114670
+        },
+        {
+          "month": "2024-07",
+          "trades": 98,
+          "winRate": 39.8,
+          "netPnl": 285333
+        },
+        {
+          "month": "2024-08",
+          "trades": 114,
+          "winRate": 39.5,
+          "netPnl": -170436
+        },
+        {
+          "month": "2024-09",
+          "trades": 115,
+          "winRate": 42.6,
+          "netPnl": 1228362
+        },
+        {
+          "month": "2024-10",
+          "trades": 126,
+          "winRate": 38.1,
+          "netPnl": -6092
+        },
+        {
+          "month": "2024-11",
+          "trades": 105,
+          "winRate": 44.8,
+          "netPnl": 745170
+        },
+        {
+          "month": "2024-12",
+          "trades": 100,
+          "winRate": 35,
+          "netPnl": 603513
+        },
+        {
+          "month": "2025-01",
+          "trades": 139,
+          "winRate": 39.6,
+          "netPnl": 283814
+        },
+        {
+          "month": "2025-02",
+          "trades": 110,
+          "winRate": 41.8,
+          "netPnl": -167253
+        },
+        {
+          "month": "2025-03",
+          "trades": 117,
+          "winRate": 41.9,
+          "netPnl": 854947
+        },
+        {
+          "month": "2025-04",
+          "trades": 101,
+          "winRate": 39.6,
+          "netPnl": 530381
+        },
+        {
+          "month": "2025-05",
+          "trades": 121,
+          "winRate": 33.9,
+          "netPnl": 187919
+        },
+        {
+          "month": "2025-06",
+          "trades": 71,
+          "winRate": 35.2,
+          "netPnl": -78911
+        },
+        {
+          "month": "2025-07",
+          "trades": 115,
+          "winRate": 45.2,
+          "netPnl": 670828
+        },
+        {
+          "month": "2025-08",
+          "trades": 92,
+          "winRate": 45.7,
+          "netPnl": 195452
+        },
+        {
+          "month": "2025-09",
+          "trades": 82,
+          "winRate": 45.1,
+          "netPnl": 123832
+        },
+        {
+          "month": "2025-10",
+          "trades": 91,
+          "winRate": 34.1,
+          "netPnl": 629337
+        },
+        {
+          "month": "2025-11",
+          "trades": 95,
+          "winRate": 46.3,
+          "netPnl": 504312
+        },
+        {
+          "month": "2025-12",
+          "trades": 110,
+          "winRate": 37.3,
+          "netPnl": 433507
+        },
+        {
+          "month": "2026-01",
+          "trades": 126,
+          "winRate": 42.9,
+          "netPnl": 1444007
+        },
+        {
+          "month": "2026-02",
+          "trades": 104,
+          "winRate": 41.3,
+          "netPnl": -361665
+        },
+        {
+          "month": "2026-03",
+          "trades": 137,
+          "winRate": 45.3,
+          "netPnl": 1482657
+        },
+        {
+          "month": "2026-04",
+          "trades": 96,
+          "winRate": 29.2,
+          "netPnl": -174449
+        },
+        {
+          "month": "2026-05",
+          "trades": 111,
+          "winRate": 31.5,
+          "netPnl": 40989
+        },
+        {
+          "month": "2026-06",
+          "trades": 97,
+          "winRate": 44.3,
+          "netPnl": 381908
+        },
+        {
+          "month": "2026-07",
+          "trades": 85,
+          "winRate": 40,
+          "netPnl": 290455
+        }
+      ]
+    }
+  },
+  "params": {
+    "days": 1825,
+    "startCapital": 300000,
+    "basket": [
+      "PIDILITIND",
+      "ITC",
+      "SOLARINDS",
+      "CROMPTON",
+      "BERGEPAINT",
+      "IRCTC",
+      "SUNPHARMA",
+      "VEDL",
+      "AXISBANK",
+      "UPL"
+    ]
+  }
+}

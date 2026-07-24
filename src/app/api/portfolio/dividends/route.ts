@@ -39,13 +39,17 @@ export async function POST(request: NextRequest) {
     if (!symbol || !exDate || !dividendPerShare) {
       return NextResponse.json({ success: false, error: 'symbol, exDate, dividendPerShare required' }, { status: 400 });
     }
+    const parsedDividendPerShare = parseFloat(dividendPerShare);
+    if (!Number.isFinite(parsedDividendPerShare) || parsedDividendPerShare <= 0) {
+      return NextResponse.json({ success: false, error: 'dividendPerShare must be a positive number' }, { status: 400 });
+    }
     const record = await db.dividendRecord.create({
       data: {
         symbol: symbol.toUpperCase(),
         stockName: stockName || symbol,
         exDate: new Date(exDate),
-        dividendPerShare: parseFloat(dividendPerShare),
-        totalAmount: parseFloat(totalAmount) || (parseFloat(dividendPerShare) * (parseInt(qty) || 1)),
+        dividendPerShare: parsedDividendPerShare,
+        totalAmount: parseFloat(totalAmount) || (parsedDividendPerShare * (parseInt(qty) || 1)),
         qty: qty ? parseInt(qty) : null,
         recordDate: recordDate ? new Date(recordDate) : null,
         paymentDate: paymentDate ? new Date(paymentDate) : null,

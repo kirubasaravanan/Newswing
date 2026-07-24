@@ -27,7 +27,9 @@ const closeStrategySchema = z.object({
   id: z.string().min(1, 'Strategy ID required'),
   legCloses: z.array(z.object({
     tradeId: z.string(),
-    exitPremium: z.number().positive().optional(),
+    // .min(0) not .positive() — an option expiring worthless has a
+    // legitimate exit premium of 0, which .positive() would reject outright.
+    exitPremium: z.number().min(0).optional(),
   })).optional(),
 });
 
@@ -95,7 +97,9 @@ export async function PUT(request: NextRequest) {
       const exitPremiumMap = new Map<string, number>();
       if (parsed.data.legCloses) {
         for (const lc of parsed.data.legCloses) {
-          if (lc.exitPremium) exitPremiumMap.set(lc.tradeId, lc.exitPremium);
+          // != null (not truthy) — a submitted 0 (worthless expiry) must not
+          // be dropped in favor of the currentPremium/entryPremium fallback below.
+          if (lc.exitPremium != null) exitPremiumMap.set(lc.tradeId, lc.exitPremium);
         }
       }
 
@@ -109,8 +113,9 @@ export async function PUT(request: NextRequest) {
           continue;
         }
 
-        // Calculate P&L for this leg
-        const exitPrem = exitPremiumMap.get(trade.id) || trade.currentPremium || trade.entryPremium;
+        // Calculate P&L for this leg — ?? not || so an explicit 0 (worthless
+        // expiry) survives instead of falling through to currentPremium/entryPremium.
+        const exitPrem = exitPremiumMap.get(trade.id) ?? trade.currentPremium ?? trade.entryPremium;
         const direction = trade.action === 'BUY' ? 1 : -1;
         const pnl = (exitPrem - trade.entryPremium) * trade.qty * trade.lotSize * direction;
         const roundedPnl = Math.round(pnl * 100) / 100;

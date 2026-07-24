@@ -3,8 +3,32 @@
  * Automatically scans Nifty 500 Relative Strength every 7 days & fills vacant slots opportunistically.
  */
 
-import { SMA, EMA, RSI, ATR } from 'technicalindicators';
-import { calculateEquityCosts } from './transaction-costs';
+import { SMA, EMA, RSI, ATR, ADX } from 'technicalindicators';
+import { calculateEquityCosts, calculateOptionsCosts } from './transaction-costs';
+import { blackScholes, isIndexSymbol, getOptionLotSize } from '@/lib/options/black-scholes';
+import {
+  findSwingPoints, analyzeMarketStructure, getPriceActionLevels, nearestSupport, nearestResistance,
+  detectLiquiditySweep, detectFVG,
+} from './market-structure';
+
+// Duplicated from options-scanner.ts rather than imported: options-scanner.ts
+// transitively imports dhan-option-provider.ts, which uses Node's `fs`/`path`
+// (server-only) — importing it here would break client-side bundling, since
+// this file is also imported by the client-side backtest-tab.tsx.
+function getStrikeStep(symbol: string, spot: number): number {
+  if (symbol === 'NIFTY' || symbol === 'NIFTY50') return 50;
+  if (symbol === 'BANKNIFTY') return 100;
+  if (symbol === 'FINNIFTY') return 50;
+  if (symbol === 'NIFTYIT') return 50;
+  if (symbol === 'MIDCPNIFTY') return 25;
+
+  if (spot > 3000) return 50;
+  if (spot > 1000) return 20;
+  if (spot > 500) return 10;
+  if (spot > 200) return 5;
+  if (spot > 100) return 2.5;
+  return 1;
+}
 
 export interface OHLCV {
   date: string;
@@ -175,6 +199,12 @@ export interface BacktestResult {
     date: string;
     equity: number;
   }>;
+  monthlyPnl: Array<{
+    month: string;   // YYYY-MM
+    trades: number;
+    winRate: number;
+    netPnl: number;
+  }>;
 }
 
 export function runScreening(
@@ -182,7 +212,12 @@ export function runScreening(
   candles: OHLCV[],
   config: ScreeningConfig = DEFAULT_CONFIG,
   isNiftyBullish: boolean = true,
-  includeUnmet: boolean = false
+  includeUnmet: boolean = false,
+  niftyCandles?: OHLCV[],
+  // Real weekly-computed rank/weight table (see rs-ranking.ts). Falls back to
+  // the static TOP_7_RANKED_SYMBOLS list only when the caller has no dynamic
+  // ranking available yet (e.g. before the first weekly computation runs).
+  rankTable?: StockRankWeight[]
 ): ScreeningResult | null {
   if (!candles || candles.length < 20) return null;
 
@@ -200,12 +235,23 @@ export function runScreening(
   const ema50Values = EMA.calculate({ period: 50, values: closes });
   const sma200Values = SMA.calculate({ period: 200, values: closes });
   const atrValues = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
+  const rsiValues = RSI.calculate({ period: 14, values: closes });
+  const adxValues = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
 
-  const ema10 = ema10Values[ema10Values.length - 1] || curr.close;
-  const ema20 = ema20Values[ema20Values.length - 1] || curr.close;
-  const ema50 = ema50Values[ema50Values.length - 1] || curr.close;
-  const sma200 = sma200Values[sma200Values.length - 1] || curr.close;
+  // EMA50/SMA200 need 50/200 real candles respectively — for a stock with
+  // less history than that (e.g. newly listed), the technicalindicators
+  // library returns an empty array. This previously fell back to curr.close
+  // as a fabricated "moving average" value shown to the UI as if real.
+  // Skip cleanly instead of reporting a fake indicator.
+  if (ema50Values.length === 0 || sma200Values.length === 0) return null;
+
+  const ema10 = ema10Values[ema10Values.length - 1] ?? curr.close;
+  const ema20 = ema20Values[ema20Values.length - 1] ?? curr.close;
+  const ema50 = ema50Values[ema50Values.length - 1];
+  const sma200 = sma200Values[sma200Values.length - 1];
   const atr = Math.round((atrValues[atrValues.length - 1] || curr.close * 0.02) * 100) / 100;
+  const rsi = rsiValues[rsiValues.length - 1] ?? 50;
+  const adx = adxValues[adxValues.length - 1]?.adx ?? 0;
 
   const trendAbove = ema20 > ema50 && curr.close > sma200;
   const pullbackOk = prev.low <= ema20 * 1.015;
@@ -214,11 +260,32 @@ export function runScreening(
   const avgVol = (volumes.slice(Math.max(0, idx - 20), idx).reduce((a, b) => a + b, 0) / 20) || 1;
   const volumeOk = curr.volume >= avgVol * (config.volumeSurgeMultiplier || 1.2);
 
+  // Real gap check: did today's candle open flat-to-up vs. yesterday's close
+  // (confirms bullish follow-through into the breakout day) rather than the
+  // previous hardcoded `gapOk: true` that always awarded this point.
+  const gapOk = curr.open >= prev.close;
+
+  // Real relative-strength check: the stock's own trailing 20-session return
+  // vs. Nifty 50's return over the same window — replaces the previous
+  // hardcoded `rsOk: true` that always awarded this point regardless of
+  // whether the stock was actually outperforming the benchmark. Without
+  // Nifty candles available, this is left unproven (false) rather than
+  // fabricated as true.
+  let rsOk = false;
+  if (niftyCandles && niftyCandles.length > 20 && candles.length > 20) {
+    const stockRet20 = (curr.close - candles[idx - 20].close) / candles[idx - 20].close;
+    const nIdx = niftyCandles.length - 1;
+    const niftyRet20 = (niftyCandles[nIdx].close - niftyCandles[nIdx - 20].close) / niftyCandles[nIdx - 20].close;
+    rsOk = stockRet20 > niftyRet20;
+  }
+
   const missingConditions: string[] = [];
   if (!trendAbove) missingConditions.push('Price below SMA200 or EMA20 < EMA50');
   if (!pullbackOk) missingConditions.push('Low yet to touch EMA20 pullback zone');
   if (!triggerOk) missingConditions.push('Close yet to break previous bar high');
   if (!volumeOk) missingConditions.push('Volume surge below 1.2x average');
+  if (!rsOk) missingConditions.push('Not outperforming Nifty 50 on 20-session relative strength');
+  if (!gapOk) missingConditions.push('Opened below previous close (no bullish gap confirmation)');
 
   const isMet = trendAbove && pullbackOk && triggerOk && volumeOk;
 
@@ -226,7 +293,8 @@ export function runScreening(
     return null;
   }
 
-  const rankObj: StockRankWeight = [...TOP_7_RANKED_SYMBOLS, ...VACANT_SLOT_CANDIDATES].find(s => s.symbol === symbol.toUpperCase()) || { symbol: symbol.toUpperCase(), name: symbol.toUpperCase(), rank: 7, weightPct: 0.06, rankReason: 'Top Watchlist Leader', perf1W: '+3.2%', perf1M: '+11.5%', high52W: '-', low52W: '-' };
+  const activeRankTable = rankTable && rankTable.length > 0 ? rankTable : [...TOP_7_RANKED_SYMBOLS, ...VACANT_SLOT_CANDIDATES];
+  const rankObj: StockRankWeight = activeRankTable.find(s => s.symbol === symbol.toUpperCase()) || { symbol: symbol.toUpperCase(), name: symbol.toUpperCase(), rank: 99, weightPct: 0.06, rankReason: 'Not in the current weekly Top-7/vacant-slot ranking', perf1W: '-', perf1M: '-', high52W: '-', low52W: '-' };
   const allocatedCapital = config.liveCapital * rankObj.weightPct;
 
   const entryPrice = Math.round(curr.close * 100) / 100;
@@ -235,7 +303,7 @@ export function runScreening(
   const targetPrice = Math.round((entryPrice + (riskPerShare * 2.0)) * 100) / 100;
   const qty = Math.max(1, Math.floor(allocatedCapital / entryPrice));
 
-  const score = (trendAbove ? 1 : 0) + (pullbackOk ? 1 : 0) + (triggerOk ? 1 : 0) + (volumeOk ? 1 : 0) + 1 + 1;
+  const score = (trendAbove ? 1 : 0) + (pullbackOk ? 1 : 0) + (triggerOk ? 1 : 0) + (volumeOk ? 1 : 0) + (rsOk ? 1 : 0) + (gapOk ? 1 : 0);
 
   const high52WVal = candles.length > 0 ? `₹${Math.round(Math.max(...highs)).toLocaleString()}` : (rankObj.high52W || '-');
   const low52WVal = candles.length > 0 ? `₹${Math.round(Math.min(...lows)).toLocaleString()}` : (rankObj.low52W || '-');
@@ -255,7 +323,7 @@ export function runScreening(
     targetPrice,
     riskReward: 2.0,
     atr,
-    rsi: 55,
+    rsi: Math.round(rsi * 10) / 10,
     rank: rankObj.rank,
     weightPct: rankObj.weightPct,
     rankReason: rankObj.rankReason || 'Top Sector Leader with strong Relative Strength vs Nifty 500',
@@ -269,12 +337,12 @@ export function runScreening(
       scorePullback: pullbackOk ? 1 : 0,
       scoreTrigger: triggerOk ? 1 : 0,
       scoreVolume: volumeOk ? 1 : 0,
-      scoreRS: 1,
-      scoreGap: 1,
+      scoreRS: rsOk ? 1 : 0,
+      scoreGap: gapOk ? 1 : 0,
       totalScore: score
     },
     checks: {
-      trendAbove, pullbackOk, triggerOk, volumeOk, rsOk: true, gapOk: true,
+      trendAbove, pullbackOk, triggerOk, volumeOk, rsOk, gapOk,
       regimeSafe: isNiftyBullish, liquid: true, trending: trendAbove, validVol: volumeOk, notExtended: true
     },
     sizing: {
@@ -287,7 +355,7 @@ export function runScreening(
       sma200: Math.round(sma200 * 100) / 100,
       ema20: Math.round(ema20 * 100) / 100,
       ema10: Math.round(ema10 * 100) / 100,
-      adx: 28
+      adx: Math.round(adx * 10) / 10
     }
   };
 }
@@ -303,16 +371,17 @@ export function runBacktest(
     : (configArg || DEFAULT_CONFIG);
 
   const sym = symbol.toUpperCase();
-  const isOptionsMode = sym.includes('NIFTY') || sym.includes('BANK') || sym.includes('FIN') || config.engineMode === 'OPTIONS';
+  // Exact index-symbol match (isIndexSymbol from black-scholes.ts) — previously
+  // this used substring checks (`sym.includes('BANK')`, `sym.includes('FIN')`)
+  // which misrouted real equity symbols like BAJFINANCE, BAJAJFINSV,
+  // MUTHOOTFIN, CHOLAFIN, BANKBARODA into the options simulation branch below.
+  const isOptionsMode = isIndexSymbol(sym) || config.engineMode === 'OPTIONS';
 
   let capital = config.liveCapital || 300000;
   const initialCapital = capital;
 
   const trades: BacktestResult['trades'] = [];
   const equityCurve: BacktestResult['equityCurve'] = [];
-
-  const entryTimes = ['09:20:00', '09:45:00', '10:15:00', '11:30:00', '12:45:00', '13:50:00'];
-  const exitTimes = ['10:12:30', '11:15:00', '12:40:15', '14:20:00', '15:15:00'];
 
   let activeCandles = candles && candles.length > 5 ? candles : [];
 
@@ -325,94 +394,190 @@ export function runBacktest(
         bestTrade: 0, worstTrade: 0, sharpeRatio: 0
       },
       trades: [],
-      equityCurve: []
+      equityCurve: [],
+      monthlyPnl: []
     };
   }
-
-  const nowTimeMs = Date.now();
 
   let peakCapital = capital;
   let maxDrawdown = 0;
 
   if (isOptionsMode) {
-    // ── Real Intraday Options Engine Simulation ──
-    let lotSize = 25;
-    if (sym.includes('BANK')) lotSize = 15;
-    else if (sym.includes('FIN')) lotSize = 25;
-    else if (sym.includes('INFY')) lotSize = 400;
-    else if (sym.includes('RELIANCE')) lotSize = 250;
-    else if (sym.includes('TATASTEEL')) lotSize = 5500;
-    else if (sym.includes('TATAMOTORS')) lotSize = 1400;
-    else if (sym.includes('BAJFINANCE')) lotSize = 125;
-
+    // ── Black-Scholes premium simulation on REAL historical underlying data ──
+    // There is no historical option-chain/premium data source available for
+    // backtesting, so — consistent with standard institutional practice when
+    // historical option premiums aren't available — this prices each
+    // simulated contract with the same Black-Scholes engine used for live
+    // option pricing (black-scholes.ts), driven entirely by real inputs:
+    // the real historical spot price, a real trailing-20-session REALIZED
+    // volatility computed from the actual return series (never an invented
+    // IV), a real risk-free rate, and a real calendar-based expiry. This
+    // replaces the previous approach of inventing a premium via an arbitrary
+    // ratio-of-spot formula and an 18x P&L multiplier with hardcoded caps.
+    const lotSize = getOptionLotSize(sym);
     const closes = activeCandles.map(c => c.close);
-    const rsiValues = RSI.calculate({ period: 14, values: closes });
+    const r = 0.0675; // RBI repo rate — same rate used elsewhere in this codebase
+    const FIXED_TRADE_ALLOCATION = 35000; // fixed ₹ per trade — see sizing note below
 
-    for (let i = 20; i < activeCandles.length; i++) {
+    // Precomputed ONCE on the full real series (safe: EMA/RSI are purely
+    // backward-looking, so reading index [i] here is identical to computing
+    // them fresh on closes.slice(0, i+1) — just far cheaper than recomputing
+    // per bar).
+    const ema9Arr = EMA.calculate({ period: 9, values: closes });
+    const ema20Arr = EMA.calculate({ period: 20, values: closes });
+    const rsiArr = RSI.calculate({ period: 14, values: closes });
+    const MIN_CONFLUENCE = 45; // real multi-factor bar; deliberately excludes OI/VIX/Max-Pain, which aren't backtestable (no historical dataset)
+
+    // NOTE on look-ahead bias: the entry SIGNAL for day i must only use
+    // information known by the close of day i (bar.open/high/low/close for
+    // day i itself, plus everything before it) — never day i+1. The trade
+    // is then entered AT day i's close and the outcome is only realized on
+    // day i+1's close, which is genuinely unknown at decision time. An
+    // earlier version of this code picked CE/PE using day i's own
+    // close-vs-open move and then "exited" using that SAME day's close —
+    // i.e. it chose the trade direction after already knowing the outcome,
+    // which produced a ~98% win rate and 0% drawdown (impossible in
+    // reality). This loop stops one bar early so day i+1 always exists.
+    for (let i = 20; i < activeCandles.length - 1; i++) {
       const bar = activeCandles[i];
-      const prevBar = activeCandles[i - 1];
-      const rsi = rsiValues[i - 14] || 50;
+      const nextBar = activeCandles[i + 1];
 
-      const dayReturnPct = (bar.close - bar.open) / bar.open;
-      const isUpTrend = bar.close > prevBar.close && rsi > 48;
-      const isDownTrend = bar.close < prevBar.close && rsi < 52;
+      // Real multi-factor confluence signal — the same PRICE-ACTION factors
+      // used in the live options scanner (options-scanner.ts), computed
+      // strictly from day i and earlier (never day i+1). This replaces the
+      // previous single-factor "yesterday's return sign" momentum signal,
+      // which had essentially no real edge (see the 5-year NIFTY/BANKNIFTY
+      // run: ~28-34% win rate, PF < 1). OI/VIX/Max-Pain factors from the
+      // live scanner are deliberately NOT included here — there's no
+      // historical OI or VIX time-series available to backtest them against.
+      const ema20AtI = ema20Arr[i - 19];
+      const ema20PrevAtI = ema20Arr[i - 20];
+      const ema9AtI = ema9Arr[i - 8];
+      const rsiAtI = rsiArr[i - 13];
 
-      if (!isUpTrend && !isDownTrend && Math.abs(dayReturnPct) < 0.003) {
-        continue;
+      // Structure/S-R/sweep/FVG computed on a trailing 60-bar window ending
+      // at day i — matches the live scanner's own 60-day lookback, and
+      // (critically) never includes day i+1 or later.
+      const structureWindow = activeCandles.slice(Math.max(0, i - 59), i + 1);
+      const swings = findSwingPoints(structureWindow, 3);
+      const levels = getPriceActionLevels(structureWindow);
+      const structureResult = analyzeMarketStructure(structureWindow, bar.close);
+      const sweep = detectLiquiditySweep(structureWindow, swings);
+      const fvg = detectFVG(structureWindow);
+
+      let ceConfluence = 0;
+      let peConfluence = 0;
+
+      if (ema20AtI != null && ema20PrevAtI != null) {
+        if (bar.close > ema20AtI && ema20AtI > ema20PrevAtI) ceConfluence += 20;
+        else if (bar.close < ema20AtI && ema20AtI < ema20PrevAtI) peConfluence += 20;
       }
+      if (ema9AtI != null && ema20AtI != null) {
+        if (ema9AtI > ema20AtI) ceConfluence += 15;
+        else if (ema9AtI < ema20AtI) peConfluence += 15;
+      }
+      if (rsiAtI != null) {
+        if (rsiAtI < 30) ceConfluence += 25;
+        else if (rsiAtI > 70) peConfluence += 25;
+        else if (rsiAtI > 55) ceConfluence += 10;
+        else if (rsiAtI < 45) peConfluence += 10;
+      }
+      if (structureResult.lastCHoCH === 'BULLISH') ceConfluence += 20;
+      else if (structureResult.lastCHoCH === 'BEARISH') peConfluence += 20;
+      else if (structureResult.lastBOS === 'BULLISH') ceConfluence += 12;
+      else if (structureResult.lastBOS === 'BEARISH') peConfluence += 12;
 
-      const isCe = isUpTrend || dayReturnPct >= 0;
-      // Official NSE F&O Strike Intervals: NIFTY/FINNIFTY = 50 pts, BANKNIFTY = 100 pts, Stocks = 20/50 pts
-      const strikeStep = sym.includes('BANK') ? 100 : (sym.includes('NIFTY') || sym.includes('FIN') || sym.includes('LT') || sym.includes('BAJFINANCE')) ? 50 : 20;
+      const priceResistance = nearestResistance(bar.close, swings, levels);
+      const priceSupport = nearestSupport(bar.close, swings, levels);
+      if (priceResistance != null) {
+        const d = ((priceResistance - bar.close) / bar.close) * 100;
+        if (d >= 0 && d < 0.5) ceConfluence -= 8; else if (d >= 0.5) ceConfluence += 6;
+      }
+      if (priceSupport != null) {
+        const d = ((bar.close - priceSupport) / bar.close) * 100;
+        if (d >= 0 && d < 0.5) peConfluence -= 8; else if (d >= 0.5) peConfluence += 6;
+      }
+      if (sweep.sweptLow) ceConfluence += 15;
+      if (sweep.sweptHigh) peConfluence += 15;
+      if (fvg.bullishFVG && bar.close > fvg.bullishFVG.bottom && bar.close < fvg.bullishFVG.top * 1.01) ceConfluence += 8;
+      if (fvg.bearishFVG && bar.close < fvg.bearishFVG.top && bar.close > fvg.bearishFVG.bottom * 0.99) peConfluence += 8;
+
+      const takeCe = ceConfluence >= MIN_CONFLUENCE && ceConfluence > peConfluence;
+      const takePe = peConfluence >= MIN_CONFLUENCE && peConfluence > ceConfluence;
+      if (!takeCe && !takePe) continue; // no real confluence-backed signal today
+      const isCe = takeCe;
+
+      // Real trailing realized volatility (annualized) from the actual
+      // historical return series up to and including day i — the IV proxy
+      // institutions use when a real historical option-IV series isn't
+      // available. Never looks at day i+1.
+      const lookback = closes.slice(Math.max(0, i - 20), i + 1);
+      const logReturns: number[] = [];
+      for (let j = 1; j < lookback.length; j++) logReturns.push(Math.log(lookback[j] / lookback[j - 1]));
+      const meanRet = logReturns.reduce((a, b) => a + b, 0) / Math.max(1, logReturns.length);
+      const variance = logReturns.reduce((a, b) => a + (b - meanRet) ** 2, 0) / Math.max(1, logReturns.length - 1);
+      const realizedVol = Math.sqrt((variance || 0) * 252);
+      const iv = Math.max(0.08, Math.min(1.2, realizedVol || 0.18));
+
+      const strikeStep = getStrikeStep(sym, bar.close);
       const strike = Math.round(bar.close / strikeStep) * strikeStep;
       const contractSymbol = `${sym} ${strike} ${isCe ? 'CE' : 'PE'}`;
 
-      // Real Exchange Near-Week ATM Option Premium Ratio: ~0.55% of underlying spot price (e.g. ₹120-₹140 for Nifty)
-      const optRatio = sym.includes('BANK') ? 0.0065 : 0.0055;
-      const baseOptPrice = Math.max(3.5, Math.round(bar.close * optRatio * 10) / 10);
-      const stockChange = isCe ? (bar.close - bar.open) : (bar.open - bar.close);
-      const optPnlPct = Math.min(65, Math.max(-25, Math.round((stockChange / bar.open) * 100 * 18)));
+      // Real-calendar nearest weekly (Thursday) expiry on/after the ENTRY
+      // date (day i's close) — the same baseline approximation the live
+      // options engine itself uses before a real broker chain corrects it.
+      const barDate = new Date(bar.date + 'T15:30:00+05:30');
+      const dow = barDate.getDay();
+      let daysToThu = (4 - dow + 7) % 7;
+      if (daysToThu === 0) daysToThu = 7;
+      const expiryMs = barDate.getTime() + daysToThu * 86400000;
+      const T = Math.max((expiryMs - barDate.getTime()) / (365 * 86400000), 1 / 365);
 
-      const isWin = optPnlPct > 0;
-      const exitReason = isWin ? (optPnlPct >= 45 ? 'Take Profit (+50%)' : 'Intraday Trend Exit') : 'Stop Loss (-25%)';
+      // Entry priced off day i's REAL close (known at decision time). Exit
+      // priced off day i+1's REAL close (unknown at decision time — this is
+      // the actual bet), with time decay reflecting the real calendar gap
+      // between the two sessions (accounts for weekend gaps correctly).
+      const nextBarDate = new Date(nextBar.date + 'T15:30:00+05:30');
+      const daysHeld = Math.max(1, Math.round((nextBarDate.getTime() - barDate.getTime()) / 86400000));
+      const exitT = Math.max(T - daysHeld / 365, 1 / 365);
 
-      const entryT = entryTimes[i % entryTimes.length];
-      const exitT = exitTimes[i % exitTimes.length];
+      const entryBS = blackScholes(bar.close, strike, T, r, iv, isCe ? 'CE' : 'PE');
+      const exitBS = blackScholes(nextBar.close, strike, exitT, r, iv, isCe ? 'CE' : 'PE');
 
-      const entryTimestampStr = `${bar.date} ${entryT}`;
-      const exitTimestampStr = `${bar.date} ${exitT}`;
+      const entryPremium = Math.max(0.5, Math.round(entryBS.premium * 10) / 10);
+      const exitPremium = Math.max(0.05, Math.round(exitBS.premium * 10) / 10);
 
-      // Skip future timestamps relative to current time
-      const exitMs = new Date(exitTimestampStr.replace(' ', 'T') + '+05:30').getTime();
-      if (!isNaN(exitMs) && exitMs > nowTimeMs) {
-        continue;
-      }
-
-      const targetAlloc = Math.min(capital * 0.15, 35000);
-      const costPerLot = lotSize * baseOptPrice;
+      // Stop simulating once capital is exhausted — a real account running a
+      // long-only options strategy can never go below zero (max loss per
+      // trade is the premium paid), and once capital can't cover even one
+      // lot there's no real capital left to trade with. A hardcoded ₹20,000
+      // floor here previously let position sizing keep computing off that
+      // floor indefinitely, letting the reported final capital run deeply
+      // negative (as if trading on borrowed money) instead of the strategy
+      // simply halting like a real, capital-constrained account would.
+      if (capital <= 0) break;
+      // Fixed position sizing — a constant ₹ allocation per trade regardless
+      // of how much capital has grown or shrunk (previously 15% of CURRENT
+      // capital, uncapped upside, which is what produced the unrealistic
+      // 1000%+ "best performer" compounding: a real PMS doesn't let position
+      // size scale freely with account growth). Still capped at whatever
+      // capital actually remains, so it degrades gracefully near exhaustion
+      // rather than sizing beyond what's available.
+      const targetAlloc = Math.min(FIXED_TRADE_ALLOCATION, capital);
+      const costPerLot = lotSize * entryPremium;
+      if (costPerLot > capital) break; // can't afford even 1 lot — account exhausted
       const lots = Math.max(1, Math.floor(targetAlloc / costPerLot));
       const qty = lots * lotSize;
-      const singleLegCap = Math.round(qty * baseOptPrice);
-      const grossPnl = Math.round(singleLegCap * (optPnlPct / 100));
 
-      // ── Real NSE F&O Transaction Costs ──────────────────────────────────────
-      // 1. Brokerage: ₹20 flat per order × 2 (entry+exit), or 0.03% whichever lower (zero-brokerage like Dhan)
-      const brokerage = 20 * 2; // ₹40 round-trip
-      // 2. STT: 0.0125% on Sell side option premium only (exercise = 0.125%, but we always square off)
-      const exitPremium = Math.max(0.5, baseOptPrice * (1 + optPnlPct / 100));
-      const stt = Math.round(qty * exitPremium * 0.000125 * 100) / 100;
-      // 3. Exchange + SEBI charges: ~0.0495% of turnover (both legs)
-      const turnover = qty * baseOptPrice + qty * exitPremium;
-      const exchangeCharges = Math.round(turnover * 0.000495 * 100) / 100;
-      // 4. GST: 18% on (brokerage + exchange charges)
-      const gst = Math.round((brokerage + exchangeCharges) * 0.18 * 100) / 100;
-      // 5. Stamp duty: 0.003% on buy side only
-      const stampDuty = Math.round(qty * baseOptPrice * 0.00003 * 100) / 100;
+      const grossPnl = (exitPremium - entryPremium) * qty;
+      const costs = calculateOptionsCosts(entryPremium, exitPremium, 1, qty, 'BUY', sym);
+      const netPnl = Math.round(grossPnl - costs.totalCosts);
+      const pnlPct = entryPremium > 0 ? Math.round(((exitPremium - entryPremium) / entryPremium) * 1000) / 10 : 0;
 
-      const totalCosts = brokerage + stt + exchangeCharges + gst + stampDuty;
-      const netPnl = Math.round(grossPnl - totalCosts);
+      const isWin = netPnl > 0;
+      const exitReason = isWin ? 'Real BS Premium Gain' : 'Real BS Premium Loss';
 
-      capital = Math.max(20000, capital + netPnl);
+      capital = Math.max(0, capital + netPnl);
 
       peakCapital = Math.max(peakCapital, capital);
       const dd = ((peakCapital - capital) / peakCapital) * 100;
@@ -420,22 +585,22 @@ export function runBacktest(
 
       trades.push({
         symbol: contractSymbol,
-        entryDate: entryTimestampStr,
-        exitDate: exitTimestampStr,
-        entryPrice: baseOptPrice,
-        exitPrice: Math.max(0.5, Math.round(baseOptPrice * (1 + optPnlPct / 100) * 10) / 10),
+        entryDate: bar.date,
+        exitDate: nextBar.date,
+        entryPrice: entryPremium,
+        exitPrice: exitPremium,
         qty,
         lots,
-        totalValue: singleLegCap,
+        totalValue: Math.round(qty * entryPremium),
         pnl: netPnl,
-        pnlPercent: optPnlPct,
+        pnlPercent: pnlPct,
         score: isWin ? 6 : 4,
         setupType: isWin ? 'A+' : 'B',
         exitReason
       });
 
       if (i % 5 === 0 || i === activeCandles.length - 1) {
-        equityCurve.push({ date: bar.date, equity: Math.round(capital) });
+        equityCurve.push({ date: nextBar.date, equity: Math.round(capital) });
       }
     }
   } else {
@@ -481,8 +646,17 @@ export function runBacktest(
         const avgVol = activeCandles.slice(i - 20, i).reduce((a, b) => a + b.volume, 0) / 20;
 
         if (e20 > e50 && prevBar.low <= e20 * 1.015 && bar.close > prevBar.high && bar.volume >= avgVol * 1.1) {
-          const rankObj = [...TOP_7_RANKED_SYMBOLS, ...VACANT_SLOT_CANDIDATES].find(s => s.symbol === symbol.toUpperCase()) || { weightPct: 0.14 };
-          const slotCap = capital * rankObj.weightPct;
+          // Fixed ₹ allocation per stock, matching the real cap the LIVE
+          // equity engine actually enforces (rules.maxPerStock in
+          // auto-trade/route.ts, ₹75,000 default) — not a % of the
+          // backtest's own growing capital. The previous `capital *
+          // weightPct` (up to 25% for the static "rank 1" stock) let
+          // position size compound freely with account growth, the same
+          // runaway-compounding artifact already fixed for the options
+          // engine (15%-of-capital -> fixed ₹35k). Capped at whatever
+          // capital actually remains so it degrades gracefully near exhaustion.
+          const FIXED_TRADE_ALLOCATION = 75000;
+          const slotCap = Math.min(FIXED_TRADE_ALLOCATION, capital);
           const qty = Math.floor(slotCap / bar.close);
           if (qty > 0) {
             pos = { entryPrice: bar.close, sl: prevBar.low * 0.99, qty, entryDate: bar.date };
@@ -515,7 +689,11 @@ export function runBacktest(
   const totalWinPnl = winTradesList.reduce((a, b) => a + b.pnl, 0);
   const totalLossPnl = Math.abs(lossTradesList.reduce((a, b) => a + b.pnl, 0));
 
-  const profitFactor = totalLossPnl === 0 ? (totalWinPnl > 0 ? 2.15 : 1.0) : Math.round((totalWinPnl / totalLossPnl) * 100) / 100;
+  // Profit factor is mathematically undefined (unbounded) with zero losing
+  // trades — 999 is a conventional display sentinel for "no losses", not a
+  // computed ratio (the previous 2.15 looked like a real computed value but
+  // was an arbitrary invented number).
+  const profitFactor = totalLossPnl === 0 ? (totalWinPnl > 0 ? 999 : 1.0) : Math.round((totalWinPnl / totalLossPnl) * 100) / 100;
 
   const avgWin = winTrades ? Math.round(totalWinPnl / winTrades) : 0;
   const avgLoss = lossTrades ? Math.round(totalLossPnl / lossTrades) : 0;
@@ -523,11 +701,45 @@ export function runBacktest(
   const bestTrade = trades.length ? Math.max(...trades.map(t => t.pnl)) : 0;
   const worstTrade = trades.length ? Math.min(...trades.map(t => t.pnl)) : 0;
 
-  // Final Capital is 100% synced with sum of trade PnLs
+  // Real Sharpe-like ratio computed from the actual trade %-return series
+  // (mean / stdev, scaled by sqrt(N)) — replaces the previous
+  // `profitFactor * 0.95`, which was a fabricated proxy dressed up as a
+  // risk-adjusted metric with no return-series statistics behind it at all.
+  const pnlPctSeries = trades.map(t => t.pnlPercent);
+  const meanPct = pnlPctSeries.length ? pnlPctSeries.reduce((a, b) => a + b, 0) / pnlPctSeries.length : 0;
+  const stdPct = pnlPctSeries.length > 1
+    ? Math.sqrt(pnlPctSeries.reduce((a, b) => a + (b - meanPct) ** 2, 0) / (pnlPctSeries.length - 1))
+    : 0;
+  const sharpeRatio = stdPct > 0 ? Math.round((meanPct / stdPct) * Math.sqrt(pnlPctSeries.length) * 100) / 100 : 0;
+
+  // Final Capital is 100% synced with sum of trade PnLs — real computed
+  // result for BOTH modes. Previously the equity-mode branch discarded this
+  // real value and returned a hardcoded literal (₹784,250) for every
+  // non-options backtest regardless of the symbol, date range, or trades
+  // actually simulated.
   const totalNetTradePnl = trades.reduce((a, b) => a + b.pnl, 0);
   const finalCapital = Math.round(initialCapital + totalNetTradePnl);
 
-  const sharpeRatio = profitFactor > 0 ? Math.round(profitFactor * 0.95 * 100) / 100 : 0.5;
+  // Real monthly P&L breakdown — grouped by each trade's real exit month, so
+  // you can see which months this strategy/symbol was actually profitable
+  // in, not just the overall 5-year number.
+  const monthlyMap = new Map<string, { trades: number; wins: number; netPnl: number }>();
+  for (const t of trades) {
+    const month = (t.exitDate || t.entryDate).slice(0, 7); // YYYY-MM
+    const bucket = monthlyMap.get(month) || { trades: 0, wins: 0, netPnl: 0 };
+    bucket.trades++;
+    if (t.pnl > 0) bucket.wins++;
+    bucket.netPnl += t.pnl;
+    monthlyMap.set(month, bucket);
+  }
+  const monthlyPnl = Array.from(monthlyMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([month, b]) => ({
+      month,
+      trades: b.trades,
+      winRate: b.trades > 0 ? Math.round((b.wins / b.trades) * 1000) / 10 : 0,
+      netPnl: Math.round(b.netPnl),
+    }));
 
   return {
     stats: {
@@ -537,7 +749,7 @@ export function runBacktest(
       winRate,
       profitFactor,
       maxDrawdown: Math.round(maxDrawdown * 10) / 10,
-      finalCapital: isOptionsMode ? Math.round(capital) : 784250, // Updated for Weekly Slot Fill +161.4% ROI
+      finalCapital,
       avgWin,
       avgLoss,
       bestTrade,
@@ -545,6 +757,7 @@ export function runBacktest(
       sharpeRatio,
     },
     trades,
-    equityCurve
+    equityCurve,
+    monthlyPnl,
   };
 }

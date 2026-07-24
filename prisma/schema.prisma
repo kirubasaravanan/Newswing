@@ -327,6 +327,55 @@ model OptionTrade {
   @@index([optionType, action, status])
 }
 
+// Real weekly Relative-Strength ranking — replaces the previously static/
+// hardcoded "Top 7 Ranked Symbols" list. Computed every Monday (and once on
+// first boot) from real historical price data vs. the Nifty 50 benchmark.
+model WeeklyRanking {
+  id          String   @id @default(cuid())
+  cycleDate   String                          // YYYY-MM-DD — the Monday this ranking was computed for
+  symbol      String
+  name        String
+  sector      String?
+  rank        Int                             // 1 = strongest relative strength
+  rsScore     Float                           // blended real RS score vs Nifty 50 (higher = stronger)
+  weightPct   Float                           // rank-based normalized capital weight (sums to ~1.0 across the Top 7)
+  perf1W      Float                           // real trailing 1-week % return
+  perf1M      Float                           // real trailing 1-month % return
+  isTop7      Boolean  @default(false)        // true = active Top-7 trading slot; false = vacant-slot candidate
+  isActive    Boolean  @default(true)         // false once superseded by a newer cycle
+  createdAt   DateTime @default(now())
+
+  @@index([cycleDate])
+  @@index([isActive, isTop7])
+  @@index([symbol])
+}
+
+// Recorder + validator pattern (Layer 3 statistical intelligence) — logs
+// every live options signal's full factor breakdown at signal time, then
+// once the linked trade resolves, stamps the real outcome so a genuine
+// per-factor win-rate attribution can be computed from real forward results
+// instead of a backtest (can't include OI/VIX/chain data — no historical
+// option-chain dataset exists) or an unfed genetic algorithm.
+model SignalRecord {
+  id          String    @id @default(cuid())
+  symbol      String
+  direction   String                          // CE / PE
+  score       Int
+  confidence  Int
+  reasons     String                          // JSON array of the raw human-readable reason strings at signal time
+  executed    Boolean   @default(false)       // did this signal actually become a paper trade?
+  tradeId     String?   @unique               // linked PaperTrade.id once/if executed
+  resolved    Boolean   @default(false)       // has the linked trade closed?
+  win         Boolean?
+  netPnl      Float?
+  resolvedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([symbol])
+  @@index([resolved])
+  @@index([tradeId])
+}
+
 model OptionStrategy {
   id            String   @id @default(cuid())
   name          String

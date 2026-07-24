@@ -36,11 +36,15 @@ export async function POST(request: NextRequest) {
     if (!symbol || !amount || !nextDate) {
       return NextResponse.json({ success: false, error: 'symbol, amount, nextDate required' }, { status: 400 });
     }
+    const parsedAmount = parseFloat(amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      return NextResponse.json({ success: false, error: 'amount must be a positive number' }, { status: 400 });
+    }
     const plan = await db.sIPPlan.create({
       data: {
         symbol: symbol.toUpperCase(),
         stockName: stockName || symbol,
-        amount: parseFloat(amount),
+        amount: parsedAmount,
         frequency: frequency || 'MONTHLY',
         nextDate: new Date(nextDate),
         portfolioId: portfolioId || null,

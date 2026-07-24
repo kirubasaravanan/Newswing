@@ -1,0 +1,47 @@
+[
+  {
+    "symbol": "LAURUSLABS",
+    "totalTrades": 9,
+    "winTrades": 4,
+    "lossTrades": 5,
+    "winRate": 44.4,
+    "profitFactor": 1.4,
+    "maxDrawdown": 18.1,
+    "finalCapital": 331225,
+    "avgWin": 27560,
+    "avgLoss": 15803,
+    "bestTrade": 74763,
+    "worstTrade": -29313,
+    "sharpeRatio": 0.39
+  },
+  {
+    "symbol": "EXIDEIND",
+    "totalTrades": 7,
+    "winTrades": 3,
+    "lossTrades": 4,
+    "winRate": 42.9,
+    "profitFactor": 0.62,
+    "maxDrawdown": 15,
+    "finalCapital": 281379,
+    "avgWin": 10290,
+    "avgLoss": 12373,
+    "bestTrade": 14039,
+    "worstTrade": -21294,
+    "sharpeRatio": -0.46
+  },
+  {
+    "symbol": "MANAPPURAM",
+    "totalTrades": 8,
+    "winTrades": 3,
+    "lossTrades": 5,
+    "winRate": 37.5,
+    "profitFactor": 0.53,
+    "maxDrawdown": 15.6,
+    "finalCapital": 265263,
+    "avgWin": 13280,
+    "avgLoss": 14916,
+    "bestTrade": 19919,
+    "worstTrade": -31436,
+    "sharpeRatio": -0.63
+  }
+]

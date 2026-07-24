@@ -33,7 +33,7 @@ function BenchmarkChart() {
         <div className="rounded-lg bg-secondary/50 p-3">
           <div className="text-[10px] text-muted-foreground uppercase">Portfolio Return</div>
           <div className={cn('text-lg font-bold font-mono', data.portfolioTotalReturn >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-            {data.portfolioTotalReturn >= 0 ? '+' : ''}₹{data.portfolioTotalReturn.toLocaleString()}
+            {data.portfolioTotalReturn >= 0 ? '+' : ''}{data.portfolioTotalReturn.toFixed(2)}%
           </div>
         </div>
         <div className="rounded-lg bg-secondary/50 p-3">
@@ -59,7 +59,7 @@ function BenchmarkChart() {
             <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 11 }} />
             <ReferenceLine y={0} stroke="rgba(255,255,255,0.2)" />
             <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Line type="monotone" dataKey="portfolio" stroke="#6366f1" strokeWidth={2} name="Portfolio (₹)" dot={false} />
+            <Line type="monotone" dataKey="portfolio" stroke="#6366f1" strokeWidth={2} name="Portfolio (%)" dot={false} />
             <Line type="monotone" dataKey="nifty" stroke="#10b981" strokeWidth={1.5} name="Nifty 50 (%)" dot={false} strokeDasharray="4 2" />
           </LineChart>
         </ResponsiveContainer>

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { getCurrentPrice } from '@/lib/trading/data-provider';
+import { getContractCurrentPrice } from '@/lib/trading/data-provider';
 
 // GET /api/portfolio/equity-curve?days=90
 export async function GET(request: Request) {
@@ -72,11 +72,20 @@ export async function POST(request: Request) {
 
 async function takeSnapshot() {
   const today = new Date().toISOString().split('T')[0];
-  let totalCapital = 200000, realizedPnl = 0, deployed = 0;
+
+  // A failed wallet fetch means we can't produce a trustworthy NAV for today —
+  // skip the snapshot entirely rather than writing a row built from the
+  // hardcoded ₹200,000 default, which would permanently corrupt the equity
+  // curve history from this date forward (this upserts to disk, it isn't a
+  // transient response).
+  let wallet;
   try {
-    const w = await db.capitalWallet.findFirst();
-    if (w) { totalCapital = w.totalCapital; realizedPnl = w.realizedPnl; deployed = w.deployed; }
-  } catch { /* use defaults */ }
+    wallet = await db.capitalWallet.findFirst();
+  } catch {
+    return null;
+  }
+  if (!wallet) return null;
+  const { totalCapital, realizedPnl, deployed } = wallet;
 
   let unrealizedPnl = 0;
   let openPositions = 0;
@@ -85,12 +94,16 @@ async function takeSnapshot() {
     openPositions = open.length;
     const syms = [...new Set(open.map(t => t.symbol))];
     for (const sym of syms) {
-      try {
-        const { price } = await getCurrentPrice(sym);
-        for (const t of open.filter(t => t.symbol === sym)) {
-          unrealizedPnl += (price - t.entryPrice) * t.qty;
-        }
-      } catch { /* skip */ }
+      // getContractCurrentPrice covers both equity and composite option
+      // symbols — getCurrentPrice alone always throws for options contracts.
+      const price = await getContractCurrentPrice(sym, 0);
+      if (price <= 0) continue;
+      for (const t of open.filter(t => t.symbol === sym)) {
+        // Direction-aware — previously always used the LONG formula, so an
+        // open SHORT position's unrealized P&L sign was flipped in the NAV.
+        const diff = t.direction === 'SHORT' ? (t.entryPrice - price) : (price - t.entryPrice);
+        unrealizedPnl += diff * t.qty;
+      }
     }
   } catch { /* skip */ }
 

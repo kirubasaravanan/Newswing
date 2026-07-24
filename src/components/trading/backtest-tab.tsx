@@ -167,7 +167,7 @@ function SingleBacktest({ config }: { config: any }) {
       });
       const data = await res.json();
       if (data.success) {
-        setResult({ stats: data.stats, trades: data.trades, equityCurve: data.equityCurve });
+        setResult({ stats: data.stats, trades: data.trades, equityCurve: data.equityCurve, monthlyPnl: data.monthlyPnl || [] });
         toast.success(`Backtest complete [${backtestEngine} Mode — ${timeframe}]`, {
           description: `${data.stats.totalTrades} trades | Win Rate: ${data.stats.winRate}% | PF: ${data.stats.profitFactor}x`,
         });

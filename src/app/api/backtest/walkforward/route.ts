@@ -74,8 +74,13 @@ export async function POST(request: NextRequest) {
         const result = runBacktest(symbol, windowCandles, niftyWindow, config);
         const initialCapital = config.liveCapital || 100000;
         const finalCapital = result.stats.finalCapital || initialCapital;
-        const tradingDays = Math.max(result.stats.totalTrades * 3, 20);
-        const cagr = ((finalCapital / initialCapital) ** (252 / tradingDays) - 1) * 100;
+        // Use the window's REAL elapsed trading days (the candle count IS the
+        // real number of trading bars in this window) instead of a trade-count
+        // proxy — `totalTrades * 3` could understate a 120-day window as ~20
+        // days for a low-trade-count strategy, inflating annualized CAGR by
+        // 10x+ (e.g. exponent 252/20=12.6 instead of the real 252/120=2.1).
+        const tradingDays = windowCandles.length;
+        const cagr = tradingDays > 0 ? ((finalCapital / initialCapital) ** (252 / tradingDays) - 1) * 100 : 0;
 
         windows.push({
           windowIndex: windows.length + 1,

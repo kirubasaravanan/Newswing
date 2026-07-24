@@ -389,33 +389,41 @@ export function getSymbolType(symbol: string): 'index' | 'stock' {
 
 // ── Lot Size Mapping ─────────────────────────────────────────
 
+// Verified against Dhan's official lot-size reference (applies to the
+// Jul/Aug/Sep 2026 contract cycle) and the NSE index-derivative circular
+// FAOP70616.pdf. This table previously disagreed with the one in
+// src/app/api/auto-trade/route.ts (getOptionLotSize) for several symbols —
+// both now use the same verified values. A handful of stock entries
+// (RELIANCE, TCS, SBIN, TATAMOTORS, TATASTEEL, SUNPHARMA, WIPRO) could not
+// be independently re-confirmed in this pass — verify against your DhanHQ
+// scrip master or the latest NSE circular before relying on them for sizing.
 const LOT_SIZES: Record<string, number> = {
-  NIFTY: 25,
-  BANKNIFTY: 15,
-  FINNIFTY: 25,
+  NIFTY: 65,
+  BANKNIFTY: 30,
+  FINNIFTY: 60,
   NIFTYIT: 25,
-  MIDCPNIFTY: 50,
-  RELIANCE: 250,
-  TCS: 175,
-  INFY: 300,
-  HDFCBANK: 550,
+  MIDCPNIFTY: 120,
+  RELIANCE: 250,     // unverified in this pass
+  TCS: 175,          // unverified in this pass
+  INFY: 400,
+  HDFCBANK: 650,
   ICICIBANK: 700,
-  SBIN: 1500,
-  AXISBANK: 900,
-  KOTAKBANK: 800,
-  BAJFINANCE: 250,
-  ITC: 3200,
+  SBIN: 750,         // unverified in this pass — route.ts previously used 750, black-scholes.ts used 1500
+  AXISBANK: 625,
+  KOTAKBANK: 2000,
+  BAJFINANCE: 750,
+  ITC: 1725,
   HINDUNILVR: 300,
-  LT: 150,
+  LT: 175,
   BHARTIARTL: 475,
-  MARUTI: 100,
-  TATAMOTORS: 550,
-  SUNPHARMA: 1250,
-  WIPRO: 1500,
-  ASIANPAINT: 200,
-  HCLTECH: 1700,
-  ADANIENT: 2500,
-  TATASTEEL: 475,
+  MARUTI: 50,
+  TATAMOTORS: 550,   // unverified in this pass
+  SUNPHARMA: 1250,   // unverified in this pass
+  WIPRO: 1500,       // unverified in this pass
+  ASIANPAINT: 250,
+  HCLTECH: 400,
+  ADANIENT: 309,
+  TATASTEEL: 475,    // unverified in this pass
 };
 
 export function getOptionLotSize(symbol: string): number {

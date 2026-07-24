@@ -24,7 +24,9 @@ const createOptionTradeSchema = z.object({
 
 const closeTradeSchema = z.object({
   id: z.string().min(1, 'Trade ID is required'),
-  exitPremium: z.coerce.number().positive().optional(),
+  // .min(0) not .positive() — an option expiring worthless has a legitimate
+  // exit premium of 0, which .positive() would reject outright.
+  exitPremium: z.coerce.number().min(0).optional(),
   exitReason: z.enum(['MANUAL', 'SL_HIT', 'TP_HIT', 'EXPIRED', 'THETA_DECAY']).optional(),
 });
 

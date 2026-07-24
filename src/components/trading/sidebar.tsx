@@ -28,6 +28,7 @@ export function Sidebar() {
   const [universeCount, setUniverseCount] = useState(0);
   const [schedulerArmed, setSchedulerArmed] = useState(false);
   const [optionCount, setOptionCount] = useState(0);
+  const [discordOk, setDiscordOk] = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -60,7 +61,10 @@ export function Sidebar() {
           const atRes = await fetch('/api/auto-trade').catch(() => null);
           if (atRes?.ok && !cancelled) {
             const atData = await atRes.json();
-            if (atData.success) setSchedulerArmed(atData.scheduler?.enabled || false);
+            if (atData.success) {
+              setSchedulerArmed(atData.scheduler?.enabled || false);
+              setDiscordOk(atData.discordHealth?.ok ?? null);
+            }
           }
         } catch { /* skip */ }
       } catch { /* ignore */ }
@@ -154,9 +158,16 @@ export function Sidebar() {
             <span className="hidden lg:inline">{yahooOk === true ? 'Broker Feed: DhanHQ Live' : 'Connecting Data...'}</span>
           </div>
 
-          <div className="flex items-center gap-2 rounded-lg bg-indigo-500/10 border border-indigo-500/20 px-2.5 py-1.5 text-[11px] font-medium text-indigo-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 animate-pulse" />
-            <span className="hidden lg:inline">Discord Feed: 🟢 ACTIVE</span>
+          <div className={cn(
+            'flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium',
+            discordOk === true ? 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400'
+              : discordOk === false ? 'bg-red-500/10 border-red-500/20 text-red-400'
+              : 'bg-secondary border-transparent text-muted-foreground'
+          )}>
+            <span className={cn('h-1.5 w-1.5 rounded-full', discordOk === true ? 'bg-indigo-400 animate-pulse' : discordOk === false ? 'bg-red-400' : 'bg-muted-foreground')} />
+            <span className="hidden lg:inline">
+              {discordOk === true ? 'Discord Feed: 🟢 ACTIVE' : discordOk === false ? 'Discord Feed: 🔴 FAILING' : 'Discord Feed: — Not sent yet'}
+            </span>
           </div>
 
           <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1.5 text-[11px] font-medium text-emerald-400">

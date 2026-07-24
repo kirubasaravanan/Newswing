@@ -110,7 +110,10 @@ export async function PUT(request: NextRequest) {
         grossPnl = trade.direction === 'SHORT' ? (ep - xp) * qty : (xp - ep) * qty;
         totalCosts = costs.totalCosts;
         netPnl = grossPnl - totalCosts;
-        pnlPercent = ((xp - ep) / ep) * 100;
+        // Direction-aware % return — previously always used the LONG formula,
+        // so a profitable SHORT showed a negative % (and vice versa), which
+        // corrupted every downstream Sharpe/Sortino/VaR calc in risk-metrics.
+        pnlPercent = trade.direction === 'SHORT' ? ((ep - xp) / ep) * 100 : ((xp - ep) / ep) * 100;
       }
 
       const updated = await tx.paperTrade.update({
@@ -138,9 +141,14 @@ export async function PUT(request: NextRequest) {
         if (wallet) {
           const newRealizedPnl = Math.round((wallet.realizedPnl + netPnl) * 100) / 100;
           const newCostsPaid = Math.round(((wallet.totalCostsPaid || 0) + (totalCosts || 0)) * 100) / 100;
+          // totalCapital must move in lockstep with realizedPnl (previously only
+          // realizedPnl updated here, silently drifting NAV/CAGR from the true
+          // capital base — the correct pattern is already used elsewhere, e.g.
+          // options.service.ts's closeOptionTrade).
+          const newTotalCapital = Math.round((wallet.initialCapital + newRealizedPnl) * 100) / 100;
           await tx.capitalWallet.update({
             where: { id: wallet.id },
-            data: { realizedPnl: newRealizedPnl, totalCostsPaid: newCostsPaid },
+            data: { realizedPnl: newRealizedPnl, totalCostsPaid: newCostsPaid, totalCapital: newTotalCapital },
           });
         }
       }
@@ -164,11 +172,36 @@ export async function DELETE(request: NextRequest) {
     const id = searchParams.get('id');
     if (!id) return NextResponse.json({ success: false, error: 'ID required' }, { status: 400 });
 
-    // Delete journal entry first
-    await db.tradeJournalEntry.deleteMany({ where: { tradeId: id } });
-    await db.paperTrade.delete({ where: { id } });
+    await db.$transaction(async (tx) => {
+      const trade = await tx.paperTrade.findUnique({ where: { id } });
+      if (!trade) throw new Error('Trade not found');
+
+      // If this trade was already closed, its P&L was credited to the wallet —
+      // reverse that credit so deleting a closed trade doesn't leave stale P&L
+      // permanently baked into the wallet with no corresponding trade record.
+      const creditedPnl = trade.netPnl ?? trade.pnl ?? null;
+      if (trade.status === 'CLOSED' && creditedPnl != null) {
+        const wallet = await tx.capitalWallet.findFirst();
+        if (wallet) {
+          const newRealizedPnl = Math.round((wallet.realizedPnl - creditedPnl) * 100) / 100;
+          const newTotalCapital = Math.round((wallet.initialCapital + newRealizedPnl) * 100) / 100;
+          const newCostsPaid = Math.max(0, Math.round(((wallet.totalCostsPaid || 0) - (trade.totalCosts || 0)) * 100) / 100);
+          await tx.capitalWallet.update({
+            where: { id: wallet.id },
+            data: { realizedPnl: newRealizedPnl, totalCapital: newTotalCapital, totalCostsPaid: newCostsPaid },
+          });
+        }
+      }
+
+      await tx.tradeJournalEntry.deleteMany({ where: { tradeId: id } });
+      await tx.paperTrade.delete({ where: { id } });
+    });
+
     return NextResponse.json({ success: true });
-  } catch (error) {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'Trade not found') {
+      return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
+    }
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }

@@ -150,6 +150,57 @@ export async function getDhanHistoricalDaily(
 }
 
 /**
+ * Fetch Intraday Minute Candles from DhanHQ API v2 (POST /v2/charts/intraday).
+ *
+ * Used for real intraday VWAP — DhanHQ docs claim up to 5 years of minute
+ * data (in 90-day chunks per request), but this was NOT independently
+ * verified against a live token during development (the token was rate-
+ * limit-blocked before this could be tested). Treat historical depth as
+ * unconfirmed until checked against a working token; the immediate use case
+ * (today's session for a live VWAP) only needs the last ~1 day regardless.
+ */
+export interface DhanIntradayCandle {
+  timestamp: number; // epoch seconds
+  open: number; high: number; low: number; close: number; volume: number;
+}
+
+export async function getDhanIntradayMinuteCandles(
+  symbol: string,
+  fromDate: string, // "YYYY-MM-DD HH:MM:SS"
+  toDate: string,    // "YYYY-MM-DD HH:MM:SS"
+  interval: '1' | '5' | '15' | '25' | '60' = '5',
+  targetEngine: 'INTRADAY_OPTIONS' | 'EQUITY_SWING' = 'INTRADAY_OPTIONS'
+): Promise<DhanIntradayCandle[]> {
+  const sec = DHAN_SECURITY_MAP[symbol.toUpperCase()];
+  const securityId = sec ? sec.securityId : '13';
+  const exchangeSegment = sec ? sec.exchangeSegment : 'NSE_EQ';
+  const instrument = sec ? sec.instrument : 'EQUITY';
+
+  const res = await dhanFetch<any>('/charts/intraday', 'POST', {
+    securityId,
+    exchangeSegment,
+    instrument,
+    interval,
+    fromDate,
+    toDate,
+  }, targetEngine);
+
+  const timestamps: number[] = res?.timestamp || res?.start_Time || [];
+  if (!timestamps.length) return [];
+
+  const candles: DhanIntradayCandle[] = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    if (res.open?.[i] == null) continue;
+    candles.push({
+      timestamp: timestamps[i],
+      open: res.open[i], high: res.high[i], low: res.low[i], close: res.close[i],
+      volume: res.volume?.[i] || 0,
+    });
+  }
+  return candles;
+}
+
+/**
  * Fetch Live Market Feed Quotes from DhanHQ API v2
  */
 export async function getDhanMarketQuotes(

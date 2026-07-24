@@ -9,9 +9,47 @@
  * - 3:30 PM IST: Market Close
  */
 
+// 2026 NSE trading holidays (confirmed via Zerodha's official holiday
+// calendar). NSE holidays that fall on a weekend (e.g. Diwali/Laxmi Pujan,
+// Nov 8 2026, a Sunday — the weekday holiday is the following Balipratipada
+// on Nov 10) are omitted since the weekend check already covers them.
+// This list needs a one-line update each year once NSE publishes the next
+// year's calendar — there is no API for this, it must be maintained by hand.
+export const NSE_HOLIDAYS_2026: readonly string[] = [
+  '2026-01-15', // Municipal Corporation Elections (Maharashtra)
+  '2026-01-26', // Republic Day
+  '2026-03-03', // Holi
+  '2026-03-26', // Shri Ram Navami
+  '2026-03-31', // Shri Mahavir Jayanti
+  '2026-04-03', // Good Friday
+  '2026-04-14', // Dr. Baba Saheb Ambedkar Jayanti
+  '2026-05-01', // Maharashtra Day
+  '2026-05-28', // Bakri Eid
+  '2026-06-26', // Moharram
+  '2026-09-14', // Ganesh Chaturthi
+  '2026-10-02', // Mahatma Gandhi Jayanti
+  '2026-10-20', // Dussehra
+  '2026-11-10', // Diwali-Balipratipada
+  '2026-11-24', // Prakash Gurpurb Sri Guru Nanak Dev
+  '2026-12-25', // Christmas
+];
+
+/** IST calendar-date string (YYYY-MM-DD) for a given moment. */
+function istDateStr(date: Date): string {
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
+  const utcMs = date.getTime() + (date.getTimezoneOffset() * 60 * 1000);
+  return new Date(utcMs + istOffsetMs).toISOString().split('T')[0];
+}
+
+/** True if the given date (IST calendar day) is a published NSE trading holiday. */
+export function isNseTradingHoliday(date: Date = new Date()): boolean {
+  return NSE_HOLIDAYS_2026.includes(istDateStr(date));
+}
+
 export interface MarketStatus {
   isOpen: boolean;
   isWeekend: boolean;
+  isHoliday: boolean;
   isPreOpen: boolean;
   isMasterFileUpdated: boolean;
   isAutoSquareOffActive: boolean;
@@ -39,12 +77,14 @@ export function getIndianMarketStatus(date: Date = new Date()): MarketStatus {
   const marketCloseMins = 15 * 60 + 30; // 3:30 PM IST (930 mins)
 
   const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-  const isPreOpen = !isWeekend && timeInMins >= preOpenMins && timeInMins < marketOpenMins;
-  const isMasterFileUpdated = !isWeekend && timeInMins >= masterFileMins;
-  const isWithinHours = !isWeekend && timeInMins >= preOpenMins && timeInMins < marketCloseMins;
-  const isAutoSquareOffActive = !isWeekend && timeInMins >= autoSquareOffMins && timeInMins < marketCloseMins;
+  const isHoliday = !isWeekend && isNseTradingHoliday(date);
+  const isNonTradingDay = isWeekend || isHoliday;
+  const isPreOpen = !isNonTradingDay && timeInMins >= preOpenMins && timeInMins < marketOpenMins;
+  const isMasterFileUpdated = !isNonTradingDay && timeInMins >= masterFileMins;
+  const isWithinHours = !isNonTradingDay && timeInMins >= preOpenMins && timeInMins < marketCloseMins;
+  const isAutoSquareOffActive = !isNonTradingDay && timeInMins >= autoSquareOffMins && timeInMins < marketCloseMins;
 
-  const isOpen = !isWeekend && isWithinHours;
+  const isOpen = !isNonTradingDay && isWithinHours;
 
   let statusText = '';
   let nextOpenText = '';
@@ -54,6 +94,9 @@ export function getIndianMarketStatus(date: Date = new Date()): MarketStatus {
   if (isWeekend) {
     statusText = 'Market Closed (Weekend)';
     nextOpenText = 'Reopens Monday at 9:00 AM IST (Master Sync @ 8:00 AM)';
+  } else if (isHoliday) {
+    statusText = 'Market Closed (NSE Trading Holiday)';
+    nextOpenText = 'Reopens next trading day at 9:00 AM IST';
   } else if (timeInMins < masterFileMins) {
     statusText = 'Early Morning (Pre-BOD)';
     const minsToMaster = masterFileMins - timeInMins;
@@ -82,6 +125,7 @@ export function getIndianMarketStatus(date: Date = new Date()): MarketStatus {
   return {
     isOpen,
     isWeekend,
+    isHoliday,
     isPreOpen,
     isMasterFileUpdated,
     isAutoSquareOffActive,

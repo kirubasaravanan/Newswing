@@ -14,7 +14,8 @@
  *
  * Options (F&O):
  *   - Brokerage: ₹20/order flat
- *   - STT: 0.0625% on sell-side premium (for option buyers)
+ *   - STT: 0.1% on sell-side premium (for option buyers) — hiked from 0.0625%
+ *         effective 1 Oct 2024 (Budget 2024 F&O STT increase)
  *         0.125% on sell-side premium (for option sellers — intrinsic value on exercise)
  *   - Exchange charges: 0.05% (NSE F&O)
  *   - GST: 18% on (brokerage + exchange charges)
@@ -60,7 +61,7 @@ export const DEFAULT_COST_CONFIG: TransactionCostConfig = {
   maxBrokeragePct: 0.25,
 
   sttDeliveryPct: 0.1,
-  sttOptionsBuyerPct: 0.0625,
+  sttOptionsBuyerPct: 0.1, // hiked from 0.0625% effective 1 Oct 2024
   sttOptionsSellerPct: 0.125,
   exchangeChargeEquityPct: 0.00345,
   exchangeChargeOptionsPct: 0.05,
