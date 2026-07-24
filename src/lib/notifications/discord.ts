@@ -10,6 +10,10 @@
  */
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
+// Optional separate webhooks for options vs swing — if set, signals go to
+// different Discord channels. Falls back to DISCORD_WEBHOOK_URL if not set.
+const DISCORD_OPTIONS_WEBHOOK_URL = process.env.DISCORD_OPTIONS_WEBHOOK_URL || DISCORD_WEBHOOK_URL;
+const DISCORD_SWING_WEBHOOK_URL = process.env.DISCORD_SWING_WEBHOOK_URL || DISCORD_WEBHOOK_URL;
 
 // ── Options Signal Types (kept for backward compat) ────────────
 
@@ -103,13 +107,16 @@ function fmtPnl(n: number): string {
   return `${sign}₹${fmt(Math.abs(n))}`;
 }
 
-async function postToDiscord(embed: object): Promise<boolean> {
-  if (!DISCORD_WEBHOOK_URL) {
-    console.warn('[Discord] DISCORD_WEBHOOK_URL not set — notification not sent');
+async function postToDiscord(embed: object, channel: 'system' | 'options' | 'swing' = 'system'): Promise<boolean> {
+  const url = channel === 'options' ? DISCORD_OPTIONS_WEBHOOK_URL
+    : channel === 'swing' ? DISCORD_SWING_WEBHOOK_URL
+    : DISCORD_WEBHOOK_URL;
+  if (!url) {
+    console.warn(`[Discord] Webhook URL not set for channel '${channel}' — notification not sent`);
     return false;
   }
   try {
-    const res = await fetch(DISCORD_WEBHOOK_URL, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ embeds: [embed] }),
@@ -156,7 +163,7 @@ export async function sendDiscordEquitySignal(signal: EquityTradeSignal): Promis
     timestamp: new Date().toISOString(),
   };
 
-  const ok = await postToDiscord(embed);
+  const ok = await postToDiscord(embed, 'swing');
   if (ok) console.log(`[Discord] ✅ Equity entry signal sent: ${signal.symbol} @ ₹${signal.entryPrice}`);
   return ok;
 }
@@ -200,7 +207,7 @@ export async function sendDiscordEquityExit(result: EquityTradeExit): Promise<bo
     timestamp: new Date().toISOString(),
   };
 
-  const ok = await postToDiscord(embed);
+  const ok = await postToDiscord(embed, 'swing');
   if (ok) console.log(`[Discord] ✅ Equity exit sent: ${signal.symbol} netPnl=₹${netPnl.toFixed(2)}`);
   return ok;
 }
@@ -225,7 +232,7 @@ export async function sendDiscordEquityPartialBook(result: EquityPartialBook): P
     footer: { text: 'PARTIAL BOOK | NewSwing PMS v2' },
     timestamp: new Date().toISOString(),
   };
-  return postToDiscord(embed);
+  return postToDiscord(embed, 'swing');
 }
 
 // ── Options Signals (unchanged) ────────────────────────────────
@@ -250,7 +257,7 @@ export async function sendDiscordSignal(signal: TradeSignal): Promise<boolean> {
     footer: { text: '📋 PAPER TRADE SIGNAL — No real order placed | NewSwing PMS v2' },
     timestamp: new Date().toISOString(),
   };
-  const ok = await postToDiscord(embed);
+  const ok = await postToDiscord(embed, 'options');
   if (ok) console.log(`[Discord] ✅ Options signal sent: ${signal.symbol} ${signal.strike} ${signal.optionType}`);
   return ok;
 }
@@ -273,7 +280,7 @@ export async function sendDiscordPaperResult(result: PaperTradeResult): Promise<
     footer: { text: '📋 PAPER TRADE | NewSwing PMS v2' },
     timestamp: new Date().toISOString(),
   };
-  return postToDiscord(embed);
+  return postToDiscord(embed, 'options');
 }
 
 export async function sendDiscordSystemAlert(msg: string, level: 'INFO' | 'WARN' | 'ERROR' = 'INFO'): Promise<boolean> {
@@ -422,6 +429,17 @@ export async function sendDiscordEODSummary(summary: EODSummaryReport): Promise<
 }
 
 // ── Lightweight Hourly Market Hours Heartbeat Alert ─────────────────────
+export interface SwingStockStatus {
+  symbol: string;
+  name: string;
+  rank: number;
+  weightPct: number;
+  currentPrice: number;
+  aligned: boolean;
+  missing: string[];
+  openPosition?: { entryPrice: number; qty: number; pnl: number; pnlPct: number };
+}
+
 export interface HeartbeatPayload {
   timeIST: string;
   niftyRegime: string;
@@ -429,6 +447,7 @@ export interface HeartbeatPayload {
   unrealizedPnl: number;
   realizedPnl: number;
   nextSquareOffTime: string;
+  swingStocks?: SwingStockStatus[];
 }
 
 export async function sendDiscordHeartbeat(payload: HeartbeatPayload): Promise<boolean> {
@@ -436,15 +455,49 @@ export async function sendDiscordHeartbeat(payload: HeartbeatPayload): Promise<b
   const pnlFormatted = `${pnlSign}₹${Math.round(payload.unrealizedPnl).toLocaleString('en-IN')}`;
   const isPos = payload.unrealizedPnl >= 0;
 
-  const embed = {
+  // Build swing stocks field — shows the 7 ranked stocks with alignment status
+  const swingFields: any[] = [];
+  if (payload.swingStocks && payload.swingStocks.length > 0) {
+    const alignedStocks = payload.swingStocks.filter(s => s.aligned);
+    const waitingStocks = payload.swingStocks.filter(s => !s.aligned);
+
+    // Aligned stocks (ready to buy trigger)
+    if (alignedStocks.length > 0) {
+      const lines = alignedStocks.map(s => {
+        const base = `#${s.rank} ${s.symbol} @ ₹${s.currentPrice} (${Math.round(s.weightPct * 100)}%)`;
+        if (s.openPosition) {
+          const pnlStr = s.openPosition.pnl >= 0 ? `+₹${Math.round(s.openPosition.pnl).toLocaleString('en-IN')}` : `₹${Math.round(s.openPosition.pnl).toLocaleString('en-IN')}`;
+          return `✅ ${base} | HELD @ ₹${s.openPosition.entryPrice} → ${pnlStr} (${s.openPosition.pnlPct > 0 ? '+' : ''}${s.openPosition.pnlPct}%)`;
+        }
+        return `✅ ${base} | 🎯 ALIGNED — buy trigger active`;
+      });
+      swingFields.push({ name: `🎯 Aligned & Ready (${alignedStocks.length}/7)`, value: lines.join('\n'), inline: false });
+    }
+
+    // Waiting stocks (not yet aligned — show what's missing)
+    if (waitingStocks.length > 0) {
+      const lines = waitingStocks.map(s => {
+        const base = `#${s.rank} ${s.symbol} @ ₹${s.currentPrice}`;
+        if (s.openPosition) {
+          const pnlStr = s.openPosition.pnl >= 0 ? `+₹${Math.round(s.openPosition.pnl).toLocaleString('en-IN')}` : `₹${Math.round(s.openPosition.pnl).toLocaleString('en-IN')}`;
+          return `📊 ${base} | HELD @ ₹${s.openPosition.entryPrice} → ${pnlStr} (${s.openPosition.pnlPct > 0 ? '+' : ''}${s.openPosition.pnlPct}%)`;
+        }
+        return `⏳ ${base} | Waiting: ${s.missing.join(', ').substring(0, 60)}`;
+      });
+      swingFields.push({ name: `⏳ Yet to Align (${waitingStocks.length}/7)`, value: lines.join('\n'), inline: false });
+    }
+  }
+
+  const embed: any = {
     title: `💓 PMS Hourly Heartbeat [${payload.timeIST}]`,
     description: `• **Market**: OPEN (${payload.niftyRegime})\n• **Open Positions**: ${payload.openPositions}\n• **Unrealized PnL**: **${pnlFormatted}**\n• **3:10 PM Square-Off**: Armed (${payload.nextSquareOffTime})`,
     color: isPos ? 0x00d4aa : 0xff4444,
+    fields: swingFields,
     footer: { text: 'NewSwing PMS Autonomous Engine | Hourly Status' },
     timestamp: new Date().toISOString(),
   };
 
-  return postToDiscord(embed);
+  return postToDiscord(embed, 'swing');
 }
 
 // ── Weekly Monday 8:30 AM Rebalance Cycle Alert ─────────────────────────
@@ -467,5 +520,5 @@ export async function sendDiscordWeeklyRebalanceNotice(payload: WeeklyRebalanceP
     timestamp: new Date().toISOString(),
   };
 
-  return postToDiscord(embed);
+  return postToDiscord(embed, 'swing');
 }

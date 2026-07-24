@@ -226,7 +226,7 @@ async function getSchedulerState(): Promise<SchedulerState> {
     const m: Record<string, string> = {};
     for (const x of s) m[x.key] = x.value;
     return {
-      enabled: m['sched_enabled'] === 'true',
+      enabled: m['sched_enabled'] !== 'false', // always-on: default true unless explicitly 'false'
       scanIntervalMin: parseInt(m['sched_scanIntervalMin'] || '') || DEFAULT_SCHEDULER.scanIntervalMin,
       exitIntervalMin: parseInt(m['sched_exitIntervalMin'] || '') || DEFAULT_SCHEDULER.exitIntervalMin,
       lastScanAt: m['sched_lastScanAt'] || null,
@@ -289,6 +289,22 @@ async function maybeAutoEnableSchedulers() {
     }
 
     console.log('[AutoTrade] Schedulers auto-enabled (always-on mode)');
+
+    // One-time capital upgrade: bump untouched ₹2L wallets to ₹10L for paper-trading
+    // all eligible options signals (user request: "increase the capital amount to 10 lakhs").
+    // Only fires if the wallet is still at the old default (200000) with zero P&L.
+    const w = await db.capitalWallet.findFirst();
+    if (w && w.initialCapital === 200000 && w.realizedPnl === 0) {
+      await db.capitalWallet.update({
+        where: { id: w.id },
+        data: {
+          totalCapital: 1000000,
+          initialCapital: 1000000,
+          available: 1000000 - w.deployed,
+        },
+      });
+      console.log('[AutoTrade] Capital upgraded from ₹2L → ₹10L (paper-trading all eligible options)');
+    }
   } catch (err) {
     console.warn('[AutoTrade] Auto-enable failed (will retry next tick):', err);
     _autoEnableDone = false; // Retry on next tick
@@ -311,7 +327,7 @@ async function resetDailyCounters() {
 
 async function getWallet() {
   let w = await db.capitalWallet.findFirst();
-  if (!w) w = await db.capitalWallet.create({ data: { totalCapital: 200000, initialCapital: 200000, available: 200000 } });
+  if (!w) w = await db.capitalWallet.create({ data: { totalCapital: 1000000, initialCapital: 1000000, available: 1000000 } });
   return w;
 }
 
@@ -987,6 +1003,62 @@ function checkDhanHQTokenExpiry(): { configured: boolean; expired: boolean; expi
   }
 }
 
+// ── Swing Stocks Status (for hourly heartbeat) ─────────
+// Checks the Top 7 ranked swing stocks: are they aligned (all 4 conditions
+// met for a buy trigger)? What's the current price vs the entry trigger?
+// If there's an open position, show entry price + unrealized P&L.
+async function getSwingStocksStatus(): Promise<Array<{
+  symbol: string; name: string; rank: number; weightPct: number;
+  currentPrice: number; aligned: boolean; missing: string[];
+  openPosition?: { entryPrice: number; qty: number; pnl: number; pnlPct: number };
+}>> {
+  try {
+    const { TOP_7_RANKED_SYMBOLS, runScreening, DEFAULT_CONFIG } = await import('@/lib/trading/screening-engine');
+    const results: Array<{
+      symbol: string; name: string; rank: number; weightPct: number;
+      currentPrice: number; aligned: boolean; missing: string[];
+      openPosition?: { entryPrice: number; qty: number; pnl: number; pnlPct: number };
+    }> = [];
+
+    for (const stock of TOP_7_RANKED_SYMBOLS) {
+      try {
+        const { data } = await getHistoricalData(stock.symbol, 300);
+        const { price } = await getCurrentPrice(stock.symbol);
+        // includeUnmet=true so we get the signal even if not all conditions met
+        const signal = runScreening(stock.symbol, data, DEFAULT_CONFIG, true, true);
+
+        const aligned = signal
+          ? signal.checks.trendAbove && signal.checks.pullbackOk && signal.checks.triggerOk && signal.checks.volumeOk
+          : false;
+        const missing = signal?.missingConditions || ['No data'];
+
+        const openTrade = await db.paperTrade.findFirst({
+          where: { symbol: stock.symbol, status: 'OPEN', autoTraded: true },
+        });
+
+        results.push({
+          symbol: stock.symbol,
+          name: stock.name,
+          rank: stock.rank,
+          weightPct: stock.weightPct,
+          currentPrice: Math.round(price * 100) / 100,
+          aligned,
+          missing: missing.slice(0, 3), // top 3 missing conditions
+          openPosition: openTrade ? {
+            entryPrice: openTrade.entryPrice,
+            qty: openTrade.qty,
+            pnl: Math.round((price - openTrade.entryPrice) * openTrade.qty * 100) / 100,
+            pnlPct: Math.round(((price - openTrade.entryPrice) / openTrade.entryPrice) * 10000) / 100,
+          } : undefined,
+        });
+      } catch { /* skip individual stock errors */ }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 // ── Hourly Heartbeat Dispatcher ─────────────────────────
 async function dispatchHourlyHeartbeat(now: Date) {
   const lastHbStr = (await db.appSettings.findUnique({ where: { key: 'sched_lastHeartbeatAt' } }))?.value;
@@ -999,6 +1071,9 @@ async function dispatchHourlyHeartbeat(now: Date) {
     const w = await recalcWallet();
     const openCount = await db.paperTrade.count({ where: { status: 'OPEN', autoTraded: true } });
 
+    // Fetch the 7 swing stocks' alignment status for the heartbeat
+    const swingStocks = await getSwingStocksStatus();
+
     await sendDiscordHeartbeat({
       timeIST: istTimeStr(now),
       niftyRegime: st.niftyRegime || 'UNKNOWN',
@@ -1006,6 +1081,7 @@ async function dispatchHourlyHeartbeat(now: Date) {
       unrealizedPnl: w.unrealizedPnl || 0,
       realizedPnl: w.realizedPnl || 0,
       nextSquareOffTime: '3:10 PM IST',
+      swingStocks,
     });
     await setSchedulerKV('sched_lastHeartbeatAt', now.toISOString());
   } catch (err) {
@@ -1241,19 +1317,19 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
     const todayEntriesStr = (await db.appSettings.findUnique({ where: { key: 'opt_todayEntries' } }))?.value || '0';
     let todayEntries = parseInt(todayEntriesStr, 10);
 
-    // Max 30 options entries per day
-    if (todayEntries >= 30) {
-      return { signalsGenerated: 0, entriesCreated: 0, errors: ['Daily options entry limit (30) reached'] };
+    // Max 50 options entries per day (increased from 30 for paper-trading ALL eligible)
+    const OPT_DAILY_LIMIT = 50;
+    if (todayEntries >= OPT_DAILY_LIMIT) {
+      return { signalsGenerated: 0, entriesCreated: 0, errors: [`Daily options entry limit (${OPT_DAILY_LIMIT}) reached`] };
     }
 
     // Run the options scanner across full F&O universe
-    const scanResult = await scanOptionsUniverse(35, minScore); // Get up to 35 signals
+    const scanResult = await scanOptionsUniverse(50, minScore); // Get up to 50 signals
 
-    const PAPER_TRADE_OPTIONS_UNIVERSE = [
-      'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'RELIANCE', 'LT', 'SBIN',
-      'TATAMOTORS', 'BAJFINANCE', 'HAL', 'BHARTIARTL', 'INFY', 'TCS', 'HDFCBANK'
-    ];
-
+    // User request: temporarily remove the 14-symbol whitelist — paper-trade
+    // ALL eligible signals so the open-position check suppresses duplicates
+    // and stops Discord flooding. Will revert to top-14 whitelist once testing
+    // is complete and capital is back to ₹3L.
     const highConfidence = scanResult.signals.filter(s => s.confidence >= minConfidence);
 
     for (let i = 0; i < highConfidence.length; i++) {
@@ -1335,21 +1411,21 @@ async function autoOptionsScanAndTrade(minConfidence: number = 55, minScore: num
       }
 
       // ── Log the signal for cooldown tracking ───────────────────────────
-      // Every signal (paper-traded or not) is logged so the 30-min cooldown
-      // check above can suppress duplicates.
-      const isEligibleForPaperTrade = PAPER_TRADE_OPTIONS_UNIVERSE.includes(sig.symbol.toUpperCase());
+      // Every signal is logged so the 30-min cooldown check above can suppress
+      // duplicates. ALL eligible signals are now paper-traded (no whitelist).
+      const dailyLimitReached = todayEntries >= OPT_DAILY_LIMIT;
       await db.autoTradeLog.create({
         data: {
-          action: isEligibleForPaperTrade ? 'AUTO_ENTRY' : 'OPTIONS_SIGNAL',
+          action: 'AUTO_ENTRY',
           symbol: tradeSymbol,
           signal: JSON.stringify(sig),
-          executed: isEligibleForPaperTrade,
-          reason: `Options ${sig.direction} signal @ ₹${premium} (conf:${sig.confidence}, score:${sig.score})${isEligibleForPaperTrade ? '' : ' — signal only (outside paper-trade universe)'}`,
+          executed: !dailyLimitReached,
+          reason: `Options ${sig.direction} signal @ ₹${premium} (conf:${sig.confidence}, score:${sig.score})${dailyLimitReached ? ' — daily limit reached, signal only' : ''}`,
         },
       });
 
-      // ── Paper Trade Creation: Restricted to Top 10 F&O Universe Only ──
-      if (!isEligibleForPaperTrade || todayEntries >= 30) continue;
+      // ── Paper Trade Creation: ALL eligible signals (whitelist removed) ──
+      if (dailyLimitReached) continue;
 
       await db.paperTrade.create({
         data: {
@@ -1553,7 +1629,7 @@ async function getOptionsStatus() {
   for (const x of s) m[x.key] = x.value;
 
   return {
-    enabled: m['opt_enabled'] === 'true',
+    enabled: m['opt_enabled'] !== 'false', // always-on: default true unless explicitly 'false'
     openPositions: openOptions.length,
     todayEntries: parseInt(m['opt_todayEntries'] || '0'),
     todayExits: parseInt(m['opt_todayExits'] || '0'),
@@ -1765,8 +1841,8 @@ async function buildSystemHealthReport() {
     optReason = dhanStatus.message + ' — options chain UNAVAILABLE (no fallback)';
   } else if (!optStatus.enabled) {
     optReason = '⏸️ Options Auto-Trader is currently disabled in app settings';
-  } else if (optStatus.todayEntries >= 30) {
-    optReason = '🛑 Daily options entry limit (30) reached';
+  } else if (optStatus.todayEntries >= 50) {
+    optReason = '🛑 Daily options entry limit (50) reached';
   }
 
   const report: HealthCheckReport = {
