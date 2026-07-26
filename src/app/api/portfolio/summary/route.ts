@@ -13,9 +13,23 @@ export async function GET() {
     // Fetch live prices for open positions (stocks & option contracts)
     const { getContractCurrentPrice } = await import('@/lib/trading/data-provider');
     const priceMap: Record<string, number> = {};
+    // Real previous-close per symbol — used for "Today's P&L" on the holdings
+    // table. getCurrentPrice() already resolves this (Dhan ohlc.close / Yahoo
+    // chartPreviousClose); it was imported here but never actually used, and
+    // the frontend instead approximated intraday P&L as a flat 45% of total
+    // unrealized P&L — an arbitrary number with no relation to the real
+    // day's price move.
+    const prevCloseMap: Record<string, number> = {};
     await Promise.all(openTrades.map(async (t) => {
       const price = await getContractCurrentPrice(t.symbol, t.entryPrice);
       priceMap[t.symbol] = price;
+      try {
+        const { quote } = await getCurrentPrice(t.symbol);
+        if (quote?.previousClose) prevCloseMap[t.symbol] = quote.previousClose;
+      } catch {
+        // previous close unavailable (e.g. composite option symbol, or quote
+        // fetch failed) — today's P&L will be omitted for this position
+      }
     }));
 
     const positions = openTrades.map(trade => {
@@ -31,6 +45,7 @@ export async function GET() {
         stopLoss: trade.stopLoss, targetPrice: trade.targetPrice,
         entryDate: trade.entryDate, autoTraded: trade.autoTraded,
         currentPrice, pnl, invested, currentValue,
+        previousClose: prevCloseMap[trade.symbol] ?? 0,
         pnlPercent: trade.entryPrice > 0 ? (priceDiff / trade.entryPrice) * 100 : 0,
       };
     });

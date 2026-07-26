@@ -27,7 +27,7 @@ interface Position {
   entryPrice: number; qty: number; stopLoss: number; targetPrice: number;
   entryDate: string; autoTraded: boolean;
   currentPrice: number; pnl: number; pnlPercent: number;
-  invested: number; currentValue: number;
+  invested: number; currentValue: number; previousClose: number;
 }
 
 interface ClosedTrade {
@@ -225,8 +225,14 @@ export function HoldingsTab() {
                 </thead>
                 <tbody>
                   {positions.map(pos => {
-                    const todayPnl = Math.round(pos.pnl * 0.45); // Intraday session component approximation
-                    const todayPct = (pos.pnlPercent * 0.45);
+                    // Real intraday move (current price vs. real previous close),
+                    // not the total-since-entry unrealized P&L. previousClose==0
+                    // means no real quote was available — show it honestly
+                    // rather than fabricate a number.
+                    const hasIntraday = pos.previousClose > 0;
+                    const dirMult = pos.direction === 'LONG' ? 1 : -1;
+                    const todayPnl = hasIntraday ? Math.round((pos.currentPrice - pos.previousClose) * dirMult * pos.qty) : null;
+                    const todayPct = hasIntraday ? ((pos.currentPrice - pos.previousClose) * dirMult / pos.previousClose) * 100 : null;
                     return (
                     <tr key={pos.id} className="border-b border-border/30 hover:bg-secondary/30 transition">
                       <td className="px-4 py-2.5">
@@ -241,8 +247,8 @@ export function HoldingsTab() {
                       <td className="text-right px-3 py-2.5 font-mono">
                         {pos.currentPrice > 0 ? `₹${pos.currentPrice.toLocaleString()}` : '...'}
                       </td>
-                      <td className={cn('text-right px-3 py-2.5 font-mono font-medium', todayPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {todayPnl >= 0 ? '+' : ''}₹{todayPnl.toLocaleString()} ({todayPct >= 0 ? '+' : ''}{todayPct.toFixed(1)}%)
+                      <td className={cn('text-right px-3 py-2.5 font-mono font-medium', todayPnl === null ? 'text-muted-foreground' : todayPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {todayPnl === null ? '—' : `${todayPnl >= 0 ? '+' : ''}₹${todayPnl.toLocaleString()} (${todayPct! >= 0 ? '+' : ''}${todayPct!.toFixed(1)}%)`}
                       </td>
                       <td className={cn('text-right px-3 py-2.5 font-mono font-bold', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                         {pos.pnl >= 0 ? '+' : ''}₹{Math.round(pos.pnl).toLocaleString()}

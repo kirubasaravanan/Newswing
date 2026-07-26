@@ -24,7 +24,7 @@ import { runScreening, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/tradin
 import { getHistoricalData, getCurrentPrice, getContractCurrentPrice } from '@/lib/trading/data-provider';
 import { getFullUniverse, runL1Filter, type NSEStock } from '@/lib/trading/universe-scanner';
 import { isNseTradingHoliday } from '@/lib/trading/market-hours';
-import { scanOptionsUniverse, type OptionsSignal, SNIPER_MIN_SCORE, SNIPER_MIN_CONFIDENCE } from '@/lib/trading/options-scanner';
+import { scanOptionsUniverse, type OptionsSignal, SNIPER_MIN_SCORE, SNIPER_MIN_CONFIDENCE, INDEX_SYMBOLS } from '@/lib/trading/options-scanner';
 import { convertToPremiumTargets } from '@/lib/trading/market-structure';
 import { recordSignal, resolveSignalByTradeId } from '@/lib/trading/signal-recorder';
 import { fetchDhanOptionChain } from '@/lib/options/dhan-option-provider';
@@ -73,6 +73,7 @@ interface PositionRules {
   optDailyProfitLock: number;      // Halt new options entries once today's realized options profit hits this ₹ ("quit while ahead")
   optMaxPerSector: number;         // Max concurrent open options positions sharing the same sector
   optNoEntryMinsToClose: number;   // Don't open NEW options positions within this many minutes of the 3:15pm square-off
+  optMaxIndexPositions: number;    // Max concurrent open options positions across ALL indices combined (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY move together on the same market-wide beta)
 }
 
 const DEFAULT_RULES: PositionRules = {
@@ -102,6 +103,7 @@ const DEFAULT_RULES: PositionRules = {
   optDailyProfitLock: 40000,       // roughly one strong day's worth of wins — lock in gains, stop for the day
   optMaxPerSector: 2,              // avoid 3+ correlated single-sector bets blowing up together
   optNoEntryMinsToClose: 45,       // no fresh entries after ~2:45pm — no room to develop before 3:15pm square-off
+  optMaxIndexPositions: 2,         // mirrors optMaxPerSector's logic — the 4 indices are one correlated basket, not 4 independent bets
 };
 
 interface SchedulerState {
@@ -199,6 +201,18 @@ function isMarketHours(): boolean {
   return mins >= 555 && mins <= 930;
 }
 
+// Weekend/holiday check WITHOUT the intraday time restriction — used to gate
+// dispatchers (health check, EOD summary) that are deliberately allowed to
+// fire outside the strict 9:15-3:30 window on a real trading day, but must
+// still never fire on a non-trading day. isMarketHours() above can't be
+// reused directly for this since it also enforces the time-of-day window.
+function isNonTradingDay(now: Date = new Date()): boolean {
+  const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000) + (now.getTimezoneOffset() * 60 * 1000));
+  const day = ist.getDay();
+  if (day === 0 || day === 6) return true;
+  return isNseTradingHoliday(now);
+}
+
 function timeToClose(): number {
   const now = new Date();
   const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000) + (now.getTimezoneOffset() * 60 * 1000));
@@ -239,6 +253,7 @@ async function getRules(): Promise<PositionRules> {
       optDailyProfitLock: parseFloat(m['rules_optDailyProfitLock'] || '') || DEFAULT_RULES.optDailyProfitLock,
       optMaxPerSector: parseInt(m['rules_optMaxPerSector'] || '') || DEFAULT_RULES.optMaxPerSector,
       optNoEntryMinsToClose: parseInt(m['rules_optNoEntryMinsToClose'] || '') || DEFAULT_RULES.optNoEntryMinsToClose,
+      optMaxIndexPositions: parseInt(m['rules_optMaxIndexPositions'] || '') || DEFAULT_RULES.optMaxIndexPositions,
     };
   } catch { return DEFAULT_RULES; }
 }
@@ -378,7 +393,14 @@ async function recalcWallet() {
   const w = await getWallet();
   const open = await db.paperTrade.findMany({ where: { status: 'OPEN' } });
   const deployed = open.reduce((s, t) => s + t.entryPrice * t.qty, 0);
-  const total = w.totalCapital + w.realizedPnl;
+  // [FIX] totalCapital is ALREADY initialCapital + realizedPnl everywhere else
+  // in this codebase (see trades/route.ts's newTotalCapital, risk-metrics's
+  // back-calc of initialCapital = totalCapital - realizedPnl). Adding
+  // realizedPnl again here double-counted it, and since the result was
+  // persisted back into totalCapital below, every subsequent recalcWallet()
+  // call compounded the error further — an unbounded, ever-inflating capital
+  // figure that also fed the drawdown peak (via updatePeakCapital(nav)).
+  const total = w.initialCapital + w.realizedPnl;
   let unrealizedPnl = 0;
   const syms = [...new Set(open.map(t => t.symbol))];
   for (const sym of syms) {
@@ -435,7 +457,10 @@ async function getPortfolioDrawdown(): Promise<{ drawdownPct: number; peakCapita
 
   const currentCapital = w.totalCapital + unrealizedPnl;
   // Use persisted peakCapital for accurate HWM (v3: no longer recalculated from scratch)
-  const peakCapital = Math.max(w.peakCapital || 0, w.initialCapital, w.totalCapital + w.realizedPnl, currentCapital);
+  // [FIX] w.totalCapital already includes realizedPnl (see recalcWallet()) —
+  // adding it again here inflated the peak candidate, making drawdownPct
+  // read artificially high and risking a false-positive circuit-breaker trip.
+  const peakCapital = Math.max(w.peakCapital || 0, w.initialCapital, w.totalCapital, currentCapital);
   const drawdownPct = peakCapital > 0 ? ((peakCapital - currentCapital) / peakCapital) * 100 : 0;
   return { drawdownPct, peakCapital, currentCapital };
 }
@@ -1205,7 +1230,13 @@ function checkDhanHQTokenExpiry(): { configured: boolean; expired: boolean; expi
 // Checks the Top 7 ranked swing stocks: are they aligned (all 4 conditions
 // met for a buy trigger)? What's the current price vs the entry trigger?
 // If there's an open position, show entry price + unrealized P&L.
-async function getSwingStocksStatus(): Promise<Array<{
+// Narrow version — this week's live RS-ranked Top 7 only. Used ONLY for the
+// hourly Discord heartbeat, which needs to stay short; the dashboard uses
+// getSwingUniverseStatus() below instead, which covers the real (wider)
+// eligible pool. Kept as its own function rather than a .slice(0,7) of the
+// wider one because the wider one is ranked by backtest PF, not live RS rank
+// — the heartbeat specifically wants this week's RS leaders.
+async function getSwingTop7Status(): Promise<Array<{
   symbol: string; name: string; rank: number; weightPct: number;
   currentPrice: number; aligned: boolean; missing: string[];
   openPosition?: { entryPrice: number; qty: number; pnl: number; pnlPct: number };
@@ -1281,7 +1312,7 @@ async function dispatchHourlyHeartbeat(now: Date) {
     const openCount = await db.paperTrade.count({ where: { status: 'OPEN', autoTraded: true } });
 
     // Fetch the 7 swing stocks' alignment status for the heartbeat
-    const swingStocks = await getSwingStocksStatus();
+    const swingStocks = await getSwingTop7Status();
 
     await sendDiscordHeartbeat({
       timeIST: istTimeStr(now),
@@ -1345,6 +1376,12 @@ async function computeMaxConcurrency(dayStart: Date, dayEnd: Date, now: Date, ta
 
 // ── EOD Summary Dispatcher (fires once per day after 3:30 PM IST market close) ──
 async function dispatchEODSummary(now: Date) {
+  // Never on a weekend/holiday — this had no day check at all before, only
+  // a time check, so a fresh start on a Saturday/Sunday afternoon (with
+  // sched_lastEODDate still holding Friday's date) would fire a bogus EOD
+  // summary for a day nothing actually traded.
+  if (isNonTradingDay(now)) return;
+
   const ist = getISTDate(now);
   const istMins = ist.getHours() * 60 + ist.getMinutes();
 
@@ -1519,21 +1556,26 @@ async function runSchedulerTickInner() {
   await dispatchWeeklyRebalanceNotice(now);
 
   // ── Automatic 15-Minute Discord Health Check Dispatcher ──
-  // Runs regardless of market hours: a DhanHQ token can lapse at any hour,
-  // and options have no data fallback, so the warning must not wait for
-  // market open to fire (previously gated below the market-hours early return).
+  // Runs regardless of the intraday market-hours WINDOW: a DhanHQ token can
+  // lapse at any hour, so the warning must not wait for market open to fire
+  // on a real trading day. But it must still never fire on a weekend/holiday
+  // — nothing to check (no token refresh, no trading) and this was firing
+  // immediately on every app start regardless of day, since a fresh start
+  // has no recent "last sent" timestamp to compare against.
   let healthCheckSent = false;
-  const lastHealthStr = (await db.appSettings.findUnique({ where: { key: 'sched_lastHealthCheckAt' } }))?.value;
-  const lastHealthTime = lastHealthStr ? new Date(lastHealthStr).getTime() : 0;
-  if (now.getTime() - lastHealthTime >= 15 * 60000) {
-    try {
-      const { sendDiscordHealthCheck } = await import('@/lib/notifications/discord');
-      const report = await buildSystemHealthReport();
-      await sendDiscordHealthCheck(report);
-      await setSchedulerKV('sched_lastHealthCheckAt', now.toISOString());
-      healthCheckSent = true;
-    } catch (err) {
-      console.warn('[AutoTrade] 15-min Discord health check dispatch error:', err);
+  if (!isNonTradingDay(now)) {
+    const lastHealthStr = (await db.appSettings.findUnique({ where: { key: 'sched_lastHealthCheckAt' } }))?.value;
+    const lastHealthTime = lastHealthStr ? new Date(lastHealthStr).getTime() : 0;
+    if (now.getTime() - lastHealthTime >= 15 * 60000) {
+      try {
+        const { sendDiscordHealthCheck } = await import('@/lib/notifications/discord');
+        const report = await buildSystemHealthReport();
+        await sendDiscordHealthCheck(report);
+        await setSchedulerKV('sched_lastHealthCheckAt', now.toISOString());
+        healthCheckSent = true;
+      } catch (err) {
+        console.warn('[AutoTrade] 15-min Discord health check dispatch error:', err);
+      }
     }
   }
 
@@ -1687,14 +1729,41 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
     // single-sector bets that would all move together on one sector shock.
     const openOptionsForSector = await db.paperTrade.findMany({
       where: { status: 'OPEN', tags: { contains: 'options' } },
-      select: { notes: true },
+      select: { symbol: true, notes: true },
     });
     const sectorOpenCount: Record<string, number> = {};
+    // Index correlation tally — NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY are all
+    // driven by the same broad-market beta, so treat them as ONE correlated
+    // basket (mirrors the sector cap above, and Forex's CORRELATION_GROUPS/
+    // MAX_CORR_TRADES pattern for FX pairs) rather than 4 independent bets.
+    let openIndexCount = 0;
     for (const t of openOptionsForSector) {
       try {
         const sec = t.notes ? (JSON.parse(t.notes).sector as string | undefined) : undefined;
         if (sec) sectorOpenCount[sec] = (sectorOpenCount[sec] || 0) + 1;
       } catch { /* ignore unparsable notes */ }
+      const underlying = t.symbol.split('_')[0];
+      if (INDEX_SYMBOLS.includes(underlying)) openIndexCount++;
+    }
+
+    // Adaptive de-risking — mirrors the equity swing engine's getAdaptiveFactor
+    // (consecutive real losses shrink size before the hard daily-loss circuit
+    // breaker above ever trips). Options previously had no equivalent — a
+    // losing streak traded the same size right up until optDailyLossCap hit.
+    // Tracked as its own opt_* counter, separate from swing's sched_* one,
+    // since these are different books with independent P&L.
+    const optConsecutiveLosses = parseInt((await db.appSettings.findUnique({ where: { key: 'opt_consecutiveLosses' } }))?.value || '0', 10);
+    const optAdaptiveFactor = getAdaptiveFactor(optConsecutiveLosses, rules);
+    const { OPTIONS_TOP10_SYMBOLS, OPTIONS_TOP5_PRIORITY, OPT_TOP10_CONCURRENCY_CAP } = await import('@/lib/trading/options-proven-symbols');
+    // Stock-options concurrency tally (TOP-10 basket, cap=3 — see
+    // options-proven-symbols.ts for the real backtest this was picked from).
+    // Separate from the index-correlation count above: this caps how many
+    // TOP-10 stock-options names can be open at once, indices aren't part of
+    // this basket at all.
+    let openTop10Count = 0;
+    for (const t of openOptionsForSector) {
+      const underlying = t.symbol.split('_')[0];
+      if (OPTIONS_TOP10_SYMBOLS.has(underlying)) openTop10Count++;
     }
 
     // Run the options scanner across full F&O universe
@@ -1704,12 +1773,34 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
     // ALL eligible signals so the open-position check suppresses duplicates
     // and stops Discord flooding. Will revert to top-14 whitelist once testing
     // is complete and capital is back to ₹3L.
-    const highConfidence = scanResult.signals.filter(s => s.confidence >= minConfidence);
+    //
+    // Proven-PF gate — being highly scored/confident today is a different
+    // signal from "this specific stock's price action actually suits the
+    // options rule-set" (the 171-symbol backtest found many high-scoring
+    // names go to near-zero capital over 5 real years — see PENDING.md #1
+    // and options-proven-symbols.ts). Narrowed from the full 20-symbol
+    // proven list to just the TOP-10 (by PF) per the 2026-07-25 concurrency
+    // backtest decision — see options-proven-symbols.ts for the 6-scenario
+    // comparison this came from. Index signals aren't gated — there is no
+    // historical-options backtest for indices to gate them against.
+    const highConfidence = scanResult.signals
+      .filter(s => s.confidence >= minConfidence)
+      .filter(s => INDEX_SYMBOLS.includes(s.symbol) || OPTIONS_TOP10_SYMBOLS.has(s.symbol.toUpperCase()));
 
     for (let i = 0; i < highConfidence.length; i++) {
       const sig = highConfidence[i];
       const tradeSymbol = `${sig.symbol}_${sig.direction}_${sig.strike}_${sig.expiry}`;
-      const lotSize = getOptionLotSize(sig.symbol);
+      let lotSize = getOptionLotSize(sig.symbol);
+      if (optAdaptiveFactor < 1.0) {
+        const adjustedLots = Math.max(1, Math.floor(lotSize * optAdaptiveFactor));
+        await db.autoTradeLog.create({
+          data: {
+            action: 'OPT_ADAPTIVE_SIZING', symbol: tradeSymbol, signal: '', executed: false,
+            reason: `Adaptive sizing: ${lotSize} -> ${adjustedLots} lots (${(optAdaptiveFactor * 100).toFixed(0)}% factor, ${optConsecutiveLosses} consecutive losses)`,
+          },
+        });
+        lotSize = adjustedLots;
+      }
 
       // ── DUPLICATE SUPPRESSION (BEFORE sending any signal) ──────────────
       // Rule: once a strike is triggered, don't re-trigger until that trade
@@ -1745,6 +1836,34 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
             signal: '',
             executed: false,
             reason: `Skipped — ${sectorOpenCount[sig.sector]} positions already open in ${sig.sector} (max ${rules.optMaxPerSector})`,
+          },
+        });
+        continue;
+      }
+
+      // 3.5. Index-concentration block — NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY
+      // are all driven by the same broad-market beta; don't let them stack
+      // up as if they were 4 independent, diversified bets.
+      if (INDEX_SYMBOLS.includes(sig.symbol) && openIndexCount >= rules.optMaxIndexPositions) {
+        await db.autoTradeLog.create({
+          data: {
+            action: 'OPT_INDEX_BLOCKED', symbol: tradeSymbol, signal: '', executed: false,
+            reason: `Skipped — ${openIndexCount} index positions already open (max ${rules.optMaxIndexPositions}, indices trade as one correlated basket)`,
+          },
+        });
+        continue;
+      }
+
+      // 3.6. TOP-10 concurrency cap — the 2026-07-25 concurrency backtest
+      // decision (see options-proven-symbols.ts): trade the full TOP-10 for
+      // signal coverage, but cap concurrent open TOP-10 stock-options
+      // positions at OPT_TOP10_CONCURRENCY_CAP (3) — the lower-drawdown end
+      // of the tested TOP-10 scenarios, not the 46.5%-DD cap=5/cap=10 ones.
+      if (OPTIONS_TOP10_SYMBOLS.has(sig.symbol) && openTop10Count >= OPT_TOP10_CONCURRENCY_CAP) {
+        await db.autoTradeLog.create({
+          data: {
+            action: 'OPT_TOP10_CAP_BLOCKED', symbol: tradeSymbol, signal: '', executed: false,
+            reason: `Skipped — ${openTop10Count} TOP-10 options positions already open (cap ${OPT_TOP10_CONCURRENCY_CAP}, per 2026-07-25 concurrency backtest)`,
           },
         });
         continue;
@@ -1807,6 +1926,10 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
           engine: 'OPTIONS',
           dataSource: 'DhanHQ Broker v2 API',
           timestamp: new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }),
+          // Visibility only — doesn't affect trading/sizing. Flags the
+          // highest-conviction 5-of-the-10 names so signal quality can be
+          // eyeballed at a glance without narrowing real trade flow to 5.
+          priorityTag: OPTIONS_TOP5_PRIORITY.has(sig.symbol) ? '⭐ TOP-5 PRIORITY' : undefined,
         });
       } catch (discordErr) {
         console.warn('[Discord Options Signal] Alert dispatch failed:', discordErr);
@@ -1874,6 +1997,8 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       await recordSignal(sig, true, createdTrade.id);
 
       if (sig.sector) sectorOpenCount[sig.sector] = (sectorOpenCount[sig.sector] || 0) + 1;
+      if (INDEX_SYMBOLS.includes(sig.symbol)) openIndexCount++;
+      if (OPTIONS_TOP10_SYMBOLS.has(sig.symbol)) openTop10Count++;
       todayEntries++;
       entriesCreated++;
       await db.appSettings.upsert({ where: { key: 'opt_todayEntries' }, update: { value: String(todayEntries) }, create: { key: 'opt_todayEntries', value: String(todayEntries) } });
@@ -2021,6 +2146,16 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
           const newOptTodayPnl = Math.round((prevOptTodayPnl + netPnl) * 100) / 100;
           await db.appSettings.upsert({ where: { key: 'opt_todayPnl' }, update: { value: String(newOptTodayPnl) }, create: { key: 'opt_todayPnl', value: String(newOptTodayPnl) } });
 
+          // Adaptive de-risking — mirrors the equity swing engine's
+          // consecutive-loss streak tracking (see autoScanAndTrade), now
+          // applied to the options book with its own independent counter.
+          if (netPnl < 0) {
+            const prevStreak = parseInt((await db.appSettings.findUnique({ where: { key: 'opt_consecutiveLosses' } }))?.value || '0', 10);
+            await setSchedulerKV('opt_consecutiveLosses', String(prevStreak + 1));
+          } else {
+            await setSchedulerKV('opt_consecutiveLosses', '0');
+          }
+
           // Validator — stamp the real outcome back onto this trade's
           // recorded signal so getFactorAttribution() can compute real
           // per-factor win rates from actual forward results.
@@ -2133,7 +2268,10 @@ async function getOptionsStatus() {
       lossCapHit: optTodayPnl <= -rules.optDailyLossCap,
       profitLockHit: optTodayPnl >= rules.optDailyProfitLock,
       maxPerSector: rules.optMaxPerSector,
+      maxIndexPositions: rules.optMaxIndexPositions,
       noEntryMinsToClose: rules.optNoEntryMinsToClose,
+      consecutiveLosses: parseInt(m['opt_consecutiveLosses'] || '0', 10),
+      adaptiveFactor: getAdaptiveFactor(parseInt(m['opt_consecutiveLosses'] || '0', 10), rules),
     },
     lastScanAt: m['opt_lastScanAt'] || null,
     lastExitAt: m['opt_lastExitAt'] || null,

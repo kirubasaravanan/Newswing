@@ -2,7 +2,8 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useTradeStore } from '@/store/trade-store';
-import { TOP_7_RANKED_SYMBOLS, DEFAULT_WATCHLIST, type ScreeningResult } from '@/lib/trading/screening-engine';
+import { DEFAULT_WATCHLIST, type ScreeningResult } from '@/lib/trading/screening-engine';
+import { SwingWatchlistCard } from './swing-watchlist-card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
@@ -265,30 +266,7 @@ export function ScreenerTab({ onAddPaperTrade }: ScreenerTabProps) {
 
   return (
     <div className="space-y-4">
-      {/* ── TOP 7 DYNAMIC RANK-WEIGHTED WATCHLIST BANNER ───── */}
-      <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 shadow-sm space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <TrendingUp className="h-4 w-4 text-emerald-400" />
-            <span className="text-xs font-bold text-foreground uppercase tracking-wider">
-              🏆 Top 7 Dynamic Rank-Weighted Watchlist (Weekly 7-Day Rebalance + Vacant Slot Filler)
-            </span>
-          </div>
-          <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 font-mono text-[10px]">
-            +161.4% ROI Engine Active (₹7,84,250 Take-Home)
-          </Badge>
-        </div>
-
-        <div className="grid grid-cols-7 gap-1.5">
-          {TOP_7_RANKED_SYMBOLS.map((item) => (
-            <div key={item.symbol} className="rounded-lg bg-secondary/40 border border-border/50 p-2 text-center">
-              <div className="text-[9px] text-amber-400 font-bold">#{item.rank}</div>
-              <div className="text-[11px] font-mono font-bold truncate">{item.symbol}</div>
-              <div className="text-[10px] text-emerald-400 font-mono font-bold">{Math.round(item.weightPct * 100)}%</div>
-            </div>
-          ))}
-        </div>
-      </div>
+      <SwingWatchlistCard />
 
       {/* Top Bar Controls */}
       <div className="flex items-center justify-between flex-wrap gap-2">

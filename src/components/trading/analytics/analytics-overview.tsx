@@ -58,6 +58,13 @@ function AnalyticsOverview() {
         maxDD = Math.max(maxDD, (peak - running) / peak * 100);
       }
 
+      // Real per-trade statutory costs (see trades/route.ts PATCH handler,
+      // which computes and persists these at close time) — used by the fee
+      // calculator card below instead of a flat, made-up ₹45/₹15-per-trade guess.
+      const sttBrokerageCosts = closed.reduce((s: number, t: any) => s + (t.brokerageCost || 0) + (t.sttCost || 0), 0);
+      const gstSebiCosts = closed.reduce((s: number, t: any) => s + (t.otherCharges || 0), 0);
+      const totalCosts = closed.reduce((s: number, t: any) => s + (t.totalCosts || 0), 0);
+
       setAnalyticsData({
         trades: closed, totalPnL,
         winRate: closed.length > 0 ? (wins.length / closed.length) * 100 : 0,
@@ -65,6 +72,7 @@ function AnalyticsOverview() {
         avgLoss: closed.length - wins.length > 0 ? grossLoss / (closed.length - wins.length) : 0,
         profitFactor: grossLoss > 0 ? grossProfit / grossLoss : 0,
         maxDD, byMonth, pnlDistribution,
+        sttBrokerageCosts, gstSebiCosts, totalCosts,
       });
     } catch { /* ignore */ }
     finally { setLoading(false); }
@@ -128,23 +136,23 @@ function AnalyticsOverview() {
               </div>
 
               <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
-                <span className="text-[10px] text-muted-foreground font-sans uppercase">Est. STT + Brokerage</span>
+                <span className="text-[10px] text-muted-foreground font-sans uppercase">STT + Brokerage</span>
                 <div className="text-sm font-bold text-amber-400 mt-0.5">
-                  -₹{Math.round(analyticsData.trades.length * 45).toLocaleString('en-IN')}
+                  -₹{Math.round(analyticsData.sttBrokerageCosts).toLocaleString('en-IN')}
                 </div>
               </div>
 
               <div className="rounded-lg bg-secondary/40 p-2.5 border border-border/50">
-                <span className="text-[10px] text-muted-foreground font-sans uppercase">GST (18%) + SEBI Fees</span>
+                <span className="text-[10px] text-muted-foreground font-sans uppercase">GST + SEBI + Exchange Fees</span>
                 <div className="text-sm font-bold text-amber-400 mt-0.5">
-                  -₹{Math.round(analyticsData.trades.length * 15).toLocaleString('en-IN')}
+                  -₹{Math.round(analyticsData.gstSebiCosts).toLocaleString('en-IN')}
                 </div>
               </div>
 
               <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/30">
                 <span className="text-[10px] text-emerald-400 font-sans font-bold uppercase">Net Take-Home Cash</span>
                 <div className="text-sm font-bold text-emerald-400 mt-0.5">
-                  +₹{Math.max(0, Math.round(analyticsData.totalPnL - (analyticsData.trades.length * 60))).toLocaleString('en-IN')}
+                  {(analyticsData.totalPnL - analyticsData.totalCosts) >= 0 ? '+' : ''}₹{Math.round(analyticsData.totalPnL - analyticsData.totalCosts).toLocaleString('en-IN')}
                 </div>
               </div>
             </div>

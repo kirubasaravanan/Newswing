@@ -48,12 +48,24 @@ export interface TransactionCostConfig {
   stampDutyBuyEquityPct: number;     // Stamp duty on equity buy
   stampDutyBuyOptionsPct: number;    // Stamp duty on options buy
 
-  // Slippage
+  // Slippage (equity — % of share price)
   slippageEnabled: boolean;
   slippageUltraPct: number;          // Slippage for ultra-liquid
   slippageHighPct: number;           // Slippage for high-liquid
   slippageMediumPct: number;         // Slippage for medium-liquid
   slippageLowPct: number;            // Slippage for low-liquid
+
+  // Options slippage (% of PREMIUM, not underlying price). An option's own
+  // order book is much thinner than its underlying stock's — reusing the
+  // equity slippage tiers directly against premium (as this file did before)
+  // understates real bid-ask spread cost by roughly an order of magnitude.
+  // These are still approximations (real spread varies by strike/moneyness/
+  // expiry proximity), but are calibrated to real NSE options spread ranges
+  // rather than equity share-price ranges.
+  optionsSlippageUltraPct: number;   // NIFTY/BANKNIFTY ATM-ish strikes
+  optionsSlippageHighPct: number;    // Liquid large-cap stock options
+  optionsSlippageMediumPct: number;  // Mid-liquidity stock options
+  optionsSlippageLowPct: number;     // Illiquid strikes/names
 }
 
 export const DEFAULT_COST_CONFIG: TransactionCostConfig = {
@@ -75,6 +87,15 @@ export const DEFAULT_COST_CONFIG: TransactionCostConfig = {
   slippageHighPct: 0.08,
   slippageMediumPct: 0.15,
   slippageLowPct: 0.30,
+
+  // Real NSE stock/index options bid-ask spreads run roughly 1-3% of premium
+  // on liquid ATM strikes and 5-15%+ on illiquid ones — these are premium-
+  // relative, not share-price-relative, so they're deliberately much larger
+  // than the equity slippage tiers above.
+  optionsSlippageUltraPct: 1.0,
+  optionsSlippageHighPct: 2.0,
+  optionsSlippageMediumPct: 4.0,
+  optionsSlippageLowPct: 8.0,
 };
 
 // ── Liquidity Tiers ──────────────────────────────────────────
@@ -180,6 +201,54 @@ export function calculateSlippage(
 }
 
 /**
+ * Calculate slippage-adjusted premiums for an options round-trip trade.
+ * Same shape as calculateSlippage() but uses the options-specific (premium-
+ * relative) percentage tiers instead of the equity (share-price-relative)
+ * ones — see optionsSlippage*Pct on TransactionCostConfig for why these
+ * need to be a separate, much larger table.
+ */
+export function calculateOptionsSlippage(
+  entryPremium: number,
+  exitPremium: number,
+  totalShares: number,
+  underlyingSymbol: string,
+  config: TransactionCostConfig = DEFAULT_COST_CONFIG,
+): SlippageResult {
+  if (!config.slippageEnabled) {
+    return {
+      adjustedEntryPrice: entryPremium,
+      adjustedExitPrice: exitPremium,
+      entrySlippage: 0,
+      exitSlippage: 0,
+      totalSlippage: 0,
+    };
+  }
+
+  const tier = getLiquidityTier(underlyingSymbol);
+  let slippagePct: number;
+  switch (tier) {
+    case 'ultra':  slippagePct = config.optionsSlippageUltraPct; break;
+    case 'high':   slippagePct = config.optionsSlippageHighPct; break;
+    case 'medium': slippagePct = config.optionsSlippageMediumPct; break;
+    case 'low':    slippagePct = config.optionsSlippageLowPct; break;
+  }
+
+  const entrySlippagePerUnit = entryPremium * (slippagePct / 100);
+  const exitSlippagePerUnit = exitPremium * (slippagePct / 100);
+
+  const adjustedEntryPrice = Math.round((entryPremium + entrySlippagePerUnit) * 100) / 100;
+  const adjustedExitPrice = Math.round((exitPremium - exitSlippagePerUnit) * 100) / 100;
+
+  return {
+    adjustedEntryPrice,
+    adjustedExitPrice,
+    entrySlippage: Math.round(entrySlippagePerUnit * totalShares * 100) / 100,
+    exitSlippage: Math.round(exitSlippagePerUnit * totalShares * 100) / 100,
+    totalSlippage: Math.round((entrySlippagePerUnit + exitSlippagePerUnit) * totalShares * 100) / 100,
+  };
+}
+
+/**
  * Calculate all transaction costs for an EQUITY DELIVERY round-trip trade.
  * Returns detailed breakdown of every charge.
  */
@@ -264,8 +333,9 @@ export function calculateOptionsCosts(
   // 6. Stamp duty: 0.003% on buy side (lower than equity delivery)
   const stampDuty = Math.round(buyValue * (config.stampDutyBuyOptionsPct / 100) * 100) / 100;
 
-  // 7. Slippage for options (use underlying symbol's liquidity tier)
-  const slippageResult = calculateSlippage(entryPremium, exitPremium, totalShares, symbol, config);
+  // 7. Slippage for options — premium-relative tiers, NOT the equity
+  // share-price-relative ones (see calculateOptionsSlippage's docstring).
+  const slippageResult = calculateOptionsSlippage(entryPremium, exitPremium, totalShares, symbol, config);
   const slippage = slippageResult.totalSlippage;
 
   const totalCosts = Math.round((brokerage + stt + exchangeCharges + gst + sebiFees + stampDuty + slippage) * 100) / 100;

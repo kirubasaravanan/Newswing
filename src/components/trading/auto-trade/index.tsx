@@ -19,6 +19,8 @@ import { SchedulerPanel } from './scheduler-panel';
 import { PositionsPanel } from './positions-panel';
 import { AuditLogPanel } from './audit-log-panel';
 import { RulesPanel } from './rules-panel';
+import { SwingWatchlistCard } from '../swing-watchlist-card';
+import { OptionsWatchlistCard } from '../options-watchlist-card';
 import type {
   WalletData, PositionRules, SchedulerState, AutoTradeLog,
   OpenPosition, DrawdownData,
@@ -154,12 +156,6 @@ export function AutoTradeTab() {
         toast.success('Circuit Breaker Reset');
       }
     } catch { toast.error('Reset failed'); }
-  };
-
-  const handleRebalanceWatchlistNow = () => {
-    toast.success('Watchlist Rebalanced!', {
-      description: 'Nifty 500 relative strength scanned. Top 7 Leaders refreshed.',
-    });
   };
 
   return (
@@ -309,59 +305,9 @@ export function AutoTradeTab() {
               </div>
             </div>
 
-            {/* Top 7 Dynamic Rank-Weighted Watchlist + Next Candidates */}
-            <div className="lg:col-span-2 rounded-xl border border-border bg-card/70 p-4 shadow-sm space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    🏆 Top 7 Dynamic Rank-Weighted Allocation Watchlist
-                  </span>
-                  <Badge variant="outline" className="text-[10px] text-emerald-400 bg-emerald-500/10 border-emerald-500/30">
-                    +161.4% ROI Engine Active
-                  </Badge>
-                </div>
-                <Button size="sm" variant="outline" onClick={handleRebalanceWatchlistNow} className="h-7 text-xs gap-1">
-                  <RefreshCw className="h-3 w-3" /> Rebalance Watchlist Now
-                </Button>
-              </div>
-
-              {/* Active Top 7 List */}
-              <div className="grid grid-cols-7 gap-1.5">
-                {[
-                  { sym: 'TATAELXSI', r: '#1', wt: '25%' },
-                  { sym: 'DEEPAKNTR', r: '#2', wt: '20%' },
-                  { sym: 'ADANIENT', r: '#3', wt: '16%' },
-                  { sym: 'TATAPOWER', r: '#4', wt: '13%' },
-                  { sym: 'HINDCOPPER', r: '#5', wt: '11%' },
-                  { sym: 'VEDL', r: '#6', wt: '9%' },
-                  { sym: 'SUZLON', r: '#7', wt: '6%' },
-                ].map(item => {
-                  const isHeld = openPositions.some((p: any) => p.symbol?.toUpperCase() === item.sym || p.symbol?.toUpperCase()?.includes(item.sym));
-                  const status = isHeld ? 'HOLDING' : 'READY';
-
-                  return (
-                    <div key={item.sym} className="rounded-lg bg-secondary/40 border border-border/50 p-2 text-center relative">
-                      <div className="text-[9px] text-amber-400 font-bold">{item.r}</div>
-                      <div className="text-[11px] font-mono font-bold truncate">{item.sym}</div>
-                      <div className="text-[10px] text-emerald-400 font-mono font-semibold">{item.wt}</div>
-                      <Badge variant="outline" className={cn(
-                        "text-[8px] px-1 py-0 mt-1 uppercase font-bold",
-                        status === 'HOLDING' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/10 text-amber-300 border-amber-500/20'
-                      )}>{status}</Badge>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Next 3 Candidate Stocks */}
-              <div className="flex items-center justify-between text-xs pt-1 border-t border-border/40">
-                <span className="text-muted-foreground text-[11px]">Next 3 Candidates (Weekly 7-Day Rebalance & Vacant Slot Filler):</span>
-                <div className="flex items-center gap-2">
-                  <Badge variant="secondary" className="text-[10px] font-mono">#8 HDFCAMC (7%)</Badge>
-                  <Badge variant="secondary" className="text-[10px] font-mono">#9 TRENT (5%)</Badge>
-                  <Badge variant="secondary" className="text-[10px] font-mono">#10 ADANIPOWER (4%)</Badge>
-                </div>
-              </div>
+            <div className="lg:col-span-2 space-y-4">
+              <SwingWatchlistCard />
+              <OptionsWatchlistCard />
             </div>
           </div>
 

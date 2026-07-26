@@ -181,7 +181,7 @@ function SingleBacktest({ config }: { config: any }) {
     }
   };
 
-  const { stats, trades, equityCurve } = result || { stats: null, trades: [], equityCurve: [] };
+  const { stats, trades, equityCurve, monthlyPnl } = result || { stats: null, trades: [], equityCurve: [], monthlyPnl: [] };
 
   return (
     <>
@@ -301,38 +301,44 @@ function SingleBacktest({ config }: { config: any }) {
           </CardContent></Card>
 
           {/* ── MONTHLY RETURNS HEATMAP MATRIX FOR RETAIL USERS ──── */}
+          {/* Uses the real per-month P&L already computed by screening-engine.ts
+              (grouped by each trade's actual exit month) — this used to render
+              12 hardcoded fake Jan-Dec percentages plus a fake "88.5%" badge
+              regardless of what the backtest actually returned. */}
           <Card className="border-border"><CardContent className="p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold flex items-center gap-2">
                 <BarChart3 className="h-4 w-4 text-emerald-400" /> Historical Monthly Strategy Returns Heatmap (%)
               </h3>
-              <Badge variant="outline" className="text-[10px] bg-emerald-500/10 text-emerald-400 border-emerald-500/30 font-mono">
-                Consistency Score: 88.5% Green Months
-              </Badge>
+              {monthlyPnl.length > 0 && (
+                <Badge variant="outline" className="text-[10px] bg-emerald-500/10 text-emerald-400 border-emerald-500/30 font-mono">
+                  Consistency Score: {Math.round((monthlyPnl.filter((m: any) => m.netPnl > 0).length / monthlyPnl.length) * 1000) / 10}% Green Months
+                </Badge>
+              )}
             </div>
 
-            <div className="grid grid-cols-6 md:grid-cols-12 gap-1.5 text-center text-xs font-mono">
-              {[
-                { month: 'Jan', ret: '+4.2%' }, { month: 'Feb', ret: '+2.8%' }, { month: 'Mar', ret: '+6.1%' },
-                { month: 'Apr', ret: '+3.5%' }, { month: 'May', ret: '-1.2%' }, { month: 'Jun', ret: '+5.4%' },
-                { month: 'Jul', ret: '+4.8%' }, { month: 'Aug', ret: '+3.1%' }, { month: 'Sep', ret: '+2.4%' },
-                { month: 'Oct', ret: '+5.2%' }, { month: 'Nov', ret: '+3.9%' }, { month: 'Dec', ret: '+4.5%' },
-              ].map((m) => {
-                const isPos = !m.ret.startsWith('-');
-                return (
-                  <div
-                    key={m.month}
-                    className={cn(
-                      "p-2 rounded-lg border text-center font-bold",
-                      isPos ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" : "bg-red-500/15 border-red-500/30 text-red-400"
-                    )}
-                  >
-                    <div className="text-[10px] text-muted-foreground font-sans">{m.month}</div>
-                    <div className="text-xs mt-0.5">{m.ret}</div>
-                  </div>
-                );
-              })}
-            </div>
+            {monthlyPnl.length === 0 ? (
+              <div className="text-xs text-muted-foreground py-4 text-center">No monthly breakdown yet — run a backtest first.</div>
+            ) : (
+              <div className="grid grid-cols-6 md:grid-cols-12 gap-1.5 text-center text-xs font-mono">
+                {monthlyPnl.map((m: any) => {
+                  const retPct = config.liveCapital > 0 ? (m.netPnl / config.liveCapital) * 100 : 0;
+                  const isPos = retPct >= 0;
+                  return (
+                    <div
+                      key={m.month}
+                      className={cn(
+                        "p-2 rounded-lg border text-center font-bold",
+                        isPos ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" : "bg-red-500/15 border-red-500/30 text-red-400"
+                      )}
+                    >
+                      <div className="text-[10px] text-muted-foreground font-sans">{m.month}</div>
+                      <div className="text-xs mt-0.5">{isPos ? '+' : ''}{retPct.toFixed(1)}%</div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </CardContent></Card>
 
           {/* ── EXPANDED DETAILED TRADE LOG TABLE ───────────────── */}
@@ -451,10 +457,10 @@ function BatchBacktest({ config }: { config: any }) {
       {result && (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <StatCard label="Portfolio Tested" value={`${result.meta?.successful || 7}/7 Leaders`} color="emerald" />
-            <StatCard label="Portfolio Win Rate" value={`${result.aggregated?.avgWinRate || 58.3}%`} color="emerald" />
-            <StatCard label="Portfolio Profit Factor" value={`${result.aggregated?.avgProfitFactor || 1.72}x`} color="emerald" />
-            <StatCard label="5-Yr Portfolio Final Capital" value={`₹${Math.round(result.aggregated?.portfolioFinalCapital || 690784).toLocaleString('en-IN')}`} color="emerald" />
+            <StatCard label="Portfolio Tested" value={`${result.meta?.successful ?? 0}/7 Leaders`} color="emerald" />
+            <StatCard label="Portfolio Win Rate" value={`${result.aggregated?.avgWinRate ?? 0}%`} color="emerald" />
+            <StatCard label="Portfolio Profit Factor" value={`${result.aggregated?.avgProfitFactor ?? 0}x`} color="emerald" />
+            <StatCard label="5-Yr Portfolio Final Capital" value={`₹${Math.round(result.aggregated?.portfolioFinalCapital ?? 0).toLocaleString('en-IN')}`} color="emerald" />
           </div>
 
           <Card className="border-border"><CardContent className="p-4">
@@ -476,7 +482,7 @@ function BatchBacktest({ config }: { config: any }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {(result.ranked || TOP_7_RANKED_SYMBOLS).map((item: any) => (
+                  {(result.ranked || []).map((item: any) => (
                     <tr key={item.symbol} className="border-b border-border/50 hover:bg-secondary/30">
                       <td className="py-2 font-bold text-amber-400">#{item.rank}</td>
                       <td className="py-2 font-mono font-bold">{item.symbol}</td>

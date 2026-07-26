@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { blackScholes, timeToExpiryYears, getOptionLotSize } from '@/lib/options/black-scholes';
-import { fetchSpotPrice } from '@/lib/options/option-chain';
+import { getContractCurrentPrice } from '@/lib/trading/data-provider';
 
 export async function GET() {
   try {
@@ -22,25 +21,29 @@ export async function GET() {
       const margin = trade.marginUsed || entryCost;
       totalMargin += Math.abs(margin);
 
-      // Fetch live spot
-      let currentPremium = trade.entryPremium;
+      // Fetch the real live option premium (DhanHQ option chain LTP) — matches
+      // the same getContractCurrentPrice pattern already used by recalcWallet()
+      // and equity-curve/route.ts. This previously used a Black-Scholes
+      // theoretical premium estimate (assumed IV, fixed 7% risk-free rate)
+      // instead of the actual market-quoted price, silently diverging from
+      // real P&L and violating the app's own no-theoretical-data mandate.
+      let currentPremium = trade.currentPremium ?? trade.entryPremium;
       let unrealizedPnl = 0;
 
       try {
-        const spot = await fetchSpotPrice(trade.symbol);
-        const T = timeToExpiryYears(trade.expiryDate);
-        const iv = trade.entryIV || 0.15;
-        const bs = blackScholes(spot, trade.strikePrice, T, 0.07, iv, trade.optionType as 'CE' | 'PE');
-        currentPremium = bs.premium;
-        unrealizedPnl = (currentPremium - trade.entryPremium) * totalShares * direction;
+        const compositeSymbol = `${trade.symbol}_${trade.optionType}_${trade.strikePrice}_${trade.expiryDate}`;
+        const livePremium = await getContractCurrentPrice(compositeSymbol, trade.entryPremium);
+        if (livePremium > 0) {
+          currentPremium = livePremium;
+          unrealizedPnl = (currentPremium - trade.entryPremium) * totalShares * direction;
 
-        // Update current premium in DB
-        await db.optionTrade.update({
-          where: { id: trade.id },
-          data: { currentPremium: Math.round(currentPremium * 100) / 100 },
-        });
+          await db.optionTrade.update({
+            where: { id: trade.id },
+            data: { currentPremium: Math.round(currentPremium * 100) / 100 },
+          });
+        }
       } catch {
-        // If spot fetch fails, use entry premium
+        // Real quote unavailable — keep last known premium, don't fabricate one
       }
 
       totalUnrealizedPnl += unrealizedPnl;

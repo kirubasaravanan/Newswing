@@ -35,6 +35,8 @@ export interface TradeSignal {
   engine: 'OPTIONS' | 'SWING';
   dataSource: string;
   timestamp: string;
+  /** Cosmetic only — e.g. '⭐ TOP-5 PRIORITY' — never affects trading/sizing. */
+  priorityTag?: string;
 }
 
 export interface PaperTradeResult {
@@ -271,7 +273,7 @@ export async function sendDiscordEquityPartialBook(result: EquityPartialBook): P
 export async function sendDiscordSignal(signal: TradeSignal): Promise<boolean> {
   const emoji = signal.optionType === 'CE' ? '🟢' : '🔴';
   const embed = {
-    title: `${emoji} OPTIONS SIGNAL: ${signal.symbol} ${signal.strike} ${signal.optionType}  |  ${signal.direction}`,
+    title: `${emoji} OPTIONS SIGNAL: ${signal.symbol} ${signal.strike} ${signal.optionType}  |  ${signal.direction}${signal.priorityTag ? `  [${signal.priorityTag}]` : ''}`,
     description: `⭐ Setup ${signal.setupType}  |  Expiry: **${signal.expiry}**`,
     color: signal.optionType === 'CE' ? 0x00d4aa : 0xff4444,
     fields: [
