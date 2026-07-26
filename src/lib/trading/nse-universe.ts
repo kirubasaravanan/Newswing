@@ -129,7 +129,7 @@ const NIFTY_100_EXTRA: NSEStock[] = [
   { symbol: 'HAVELLS', name: 'Havells India', sector: 'Electrical', category: 'NIFTY100' },
   { symbol: 'VBL', name: 'Varun Beverages', sector: 'FMCG', category: 'NIFTY100' },
   { symbol: 'DIXON', name: 'Dixon Technologies', sector: 'Electronics', category: 'NIFTY100' },
-  { symbol: 'ZOMATO', name: 'Zomato', sector: 'Internet', category: 'NIFTY100' },
+  { symbol: 'ETERNAL', name: 'Eternal (formerly Zomato)', sector: 'Internet', category: 'NIFTY100' },
 ];
 
 // ── F&O Segment (beyond Nifty 100) ────────────────────
