@@ -33,7 +33,16 @@ const NIFTY_50: NSEStock[] = [
   { symbol: 'LT', name: 'Larsen & Toubro', sector: 'Infrastructure', category: 'NIFTY50' },
   { symbol: 'AXISBANK', name: 'Axis Bank', sector: 'Banking', category: 'NIFTY50' },
   { symbol: 'WIPRO', name: 'Wipro', sector: 'IT', category: 'NIFTY50' },
-  { symbol: 'TATAMOTORS', name: 'Tata Motors', sector: 'Auto', category: 'NIFTY50' },
+  // Split into two listed companies 2025-10-01 (see dhan-client.ts's
+  // DHAN_SECURITY_MAP comment for the full history) — both real, distinct,
+  // independently tradeable equities now. Letting the dynamic RS-ranking
+  // scan (rs-ranking.ts) evaluate each on its own merit rather than
+  // guessing which one "TATAMOTORS" should mean. TMPV carries the original
+  // multi-year price history (so it'll clear runScreening()'s SMA200/EMA50
+  // history requirement immediately); TMCV listed 2025-11-12 and won't
+  // clear that bar until it has ~200 real trading days of its own.
+  { symbol: 'TMPV', name: 'Tata Motors Passenger Vehicles', sector: 'Auto', category: 'NIFTY50' },
+  { symbol: 'TMCV', name: 'Tata Motors (Commercial Vehicles)', sector: 'Auto', category: 'NIFTY100' },
   { symbol: 'BAJFINANCE', name: 'Bajaj Finance', sector: 'Finance', category: 'NIFTY50' },
   { symbol: 'MARUTI', name: 'Maruti Suzuki', sector: 'Auto', category: 'NIFTY50' },
   { symbol: 'SUNPHARMA', name: 'Sun Pharma', sector: 'Pharma', category: 'NIFTY50' },

@@ -29,7 +29,7 @@ export interface TradeSignal {
   lotSize: number;
   lots: number;
   totalCapital: number;
-  confluenceScore: number;
+  confluenceScore: number; // 0-100 scale (options-scanner.ts's sig.confidence) — NOT 0-10, see the "/10" bug fixed 2026-07-27
   setupType: string;
   direction: string;
   engine: 'OPTIONS' | 'SWING';
@@ -37,6 +37,13 @@ export interface TradeSignal {
   timestamp: string;
   /** Cosmetic only — e.g. '⭐ TOP-5 PRIORITY' — never affects trading/sizing. */
   priorityTag?: string;
+  // [ADD 2026-07-27] Real per-trade SL/TP percentages (structure-based,
+  // convertToPremiumTargets in route.ts) — the message used to hardcode
+  // "(-25%)"/"(+50%)" labels from BEFORE that fix shipped, silently showing
+  // the wrong number on every single options alert since. Optional so any
+  // other caller not yet passing these doesn't break.
+  stopLossPct?: number;
+  targetPct?: number;
 }
 
 export interface PaperTradeResult {
@@ -280,11 +287,11 @@ export async function sendDiscordSignal(signal: TradeSignal): Promise<boolean> {
       { name: '💰 Entry Premium', value: `₹${fmt(signal.premium)}`, inline: true },
       { name: '📊 Spot Price', value: `₹${fmt(signal.spotPrice)}`, inline: true },
       { name: '🎯 Strike', value: `${signal.strike}`, inline: true },
-      { name: '🛑 Stop Loss (−25%)', value: `₹${fmt(signal.stopLoss)}`, inline: true },
-      { name: '🎯 Take Profit (+50%)', value: `₹${fmt(signal.takeProfit)}`, inline: true },
+      { name: `🛑 Stop Loss${signal.stopLossPct !== undefined ? ` (${signal.stopLossPct.toFixed(0)}%)` : ''}`, value: `₹${fmt(signal.stopLoss)}`, inline: true },
+      { name: `🎯 Take Profit${signal.targetPct !== undefined ? ` (+${signal.targetPct.toFixed(0)}%)` : ''}`, value: `₹${fmt(signal.takeProfit)}`, inline: true },
       { name: '📦 Lots / Qty', value: `${signal.lots} lots (${signal.lots * signal.lotSize} qty)`, inline: true },
       { name: '💵 Capital', value: `₹${signal.totalCapital.toLocaleString('en-IN')}`, inline: true },
-      { name: '⭐ Confidence', value: `${signal.confluenceScore}/10`, inline: true },
+      { name: '⭐ Confidence', value: `${Math.round(signal.confluenceScore)}%`, inline: true },
       { name: '🔌 Source', value: signal.dataSource, inline: true },
     ],
     footer: { text: '📋 PAPER TRADE SIGNAL — No real order placed | NewSwing PMS v2' },
@@ -498,6 +505,19 @@ export interface HeartbeatPayload {
   realizedPnl: number;
   nextSquareOffTime: string;
   swingStocks?: SwingStockStatus[];
+  // [ADD 2026-07-27] Merged in from the old separate 15-min health check,
+  // which was firing 4x as often as this heartbeat for heavily overlapping
+  // information (open positions, regime, general status). One consolidated
+  // hourly update instead of two competing periodic pings — see route.ts's
+  // dispatchHourlyHeartbeat and the removed automatic health-check dispatch.
+  circuitBreaker?: boolean;
+  circuitBreakerReason?: string;
+  optionsOpenPositions?: number;
+  equityTradeReason?: string;
+  optionsTradeReason?: string;
+  availableCapital?: number;
+  deployedCapital?: number;
+  peakCapital?: number;
 }
 
 export async function sendDiscordHeartbeat(payload: HeartbeatPayload): Promise<boolean> {
@@ -538,12 +558,41 @@ export async function sendDiscordHeartbeat(payload: HeartbeatPayload): Promise<b
     }
   }
 
+  const statusLine = payload.circuitBreaker
+    ? `🚨 **HALTED** (${payload.circuitBreakerReason || 'circuit breaker active'})`
+    : `🟢 OPEN (${payload.niftyRegime})`;
+
+  const fields: any[] = [];
+  // Capital + options summary — only shown when the caller actually supplied
+  // it (keeps this payload usable for a lighter-weight call too, without
+  // forcing every caller to fetch wallet/options status).
+  if (payload.availableCapital !== undefined || payload.optionsOpenPositions !== undefined) {
+    const lines: string[] = [];
+    if (payload.optionsOpenPositions !== undefined) lines.push(`• **Options Open**: ${payload.optionsOpenPositions}`);
+    if (payload.availableCapital !== undefined) lines.push(`• **Available**: ₹${Math.round(payload.availableCapital).toLocaleString('en-IN')}`);
+    if (payload.deployedCapital !== undefined) lines.push(`• **Deployed**: ₹${Math.round(payload.deployedCapital).toLocaleString('en-IN')}`);
+    if (payload.peakCapital !== undefined) lines.push(`• **Peak NAV**: ₹${Math.round(payload.peakCapital).toLocaleString('en-IN')}`);
+    if (lines.length) fields.push({ name: '💰 Capital & Options', value: lines.join('\n'), inline: false });
+  }
+  // Only surface WHY nothing is trading when there's actually a reason worth
+  // flagging (blocked/halted) — a routine "scanning, nothing met the bar yet"
+  // reason on every single hourly ping is the kind of noise this merge was
+  // meant to cut, not add back under a different field name.
+  const noteworthy = (r?: string) => r && /BLOCKED|HALTED|🛑|🚨/.test(r);
+  if (noteworthy(payload.equityTradeReason) || noteworthy(payload.optionsTradeReason)) {
+    const lines: string[] = [];
+    if (noteworthy(payload.equityTradeReason)) lines.push(`Equity: ${payload.equityTradeReason}`);
+    if (noteworthy(payload.optionsTradeReason)) lines.push(`Options: ${payload.optionsTradeReason}`);
+    fields.push({ name: '⚠️ Why nothing new is trading', value: lines.join('\n'), inline: false });
+  }
+  fields.push(...swingFields);
+
   const embed: any = {
-    title: `💓 PMS Hourly Heartbeat [${payload.timeIST}]`,
-    description: `• **Market**: OPEN (${payload.niftyRegime})\n• **Open Positions**: ${payload.openPositions}\n• **Unrealized PnL**: **${pnlFormatted}**\n• **3:10 PM Square-Off**: Armed (${payload.nextSquareOffTime})`,
-    color: isPos ? 0x00d4aa : 0xff4444,
-    fields: swingFields,
-    footer: { text: 'NewSwing PMS Autonomous Engine | Hourly Status' },
+    title: `💓 PMS Hourly Status [${payload.timeIST}]`,
+    description: `• **Market**: ${statusLine}\n• **Open Positions**: ${payload.openPositions}\n• **Unrealized PnL**: **${pnlFormatted}**\n• **3:10 PM Square-Off**: Armed (${payload.nextSquareOffTime})`,
+    color: payload.circuitBreaker ? 0xff4444 : isPos ? 0x00d4aa : 0xffa500,
+    fields,
+    footer: { text: 'NewSwing PMS Autonomous Engine | Hourly Status (merged health check, 2026-07-27)' },
     timestamp: new Date().toISOString(),
   };
 

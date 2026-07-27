@@ -26,8 +26,13 @@ import { getFullUniverse, runL1Filter, type NSEStock } from '@/lib/trading/unive
 import { isNseTradingHoliday } from '@/lib/trading/market-hours';
 import { scanOptionsUniverse, type OptionsSignal, SNIPER_MIN_SCORE, SNIPER_MIN_CONFIDENCE, INDEX_SYMBOLS } from '@/lib/trading/options-scanner';
 import { convertToPremiumTargets } from '@/lib/trading/market-structure';
-import { recordSignal, resolveSignalByTradeId } from '@/lib/trading/signal-recorder';
+import { recordSignal, resolveSignalByTradeId, getSymbolReputationAdjustment } from '@/lib/trading/signal-recorder';
+import { checkIndiaEventBlackout } from '@/lib/trading/india-event-calendar';
+import { getInstitutionalFlowBias } from '@/lib/trading/institutional-flow';
 import { fetchDhanOptionChain } from '@/lib/options/dhan-option-provider';
+import { recordIV, getIVPercentile, getIVSpikePct } from '@/lib/options/iv-percentile';
+import { updateOCConfluence } from '@/lib/options/oc-confluence';
+import { getSmoothedScore } from '@/lib/options/score-stabilizer';
 import { EMA, ATR } from 'technicalindicators';
 import { db } from '@/lib/db';
 import {
@@ -69,8 +74,14 @@ interface PositionRules {
   adaptiveSizing: boolean;         // Reduce size after consecutive losses
   streakPenaltyPct: number;        // % size reduction per consecutive loss after 3
   // Options guardrails engine
-  optDailyLossCap: number;         // Halt new options entries once today's realized options loss hits this ₹
-  optDailyProfitLock: number;      // Halt new options entries once today's realized options profit hits this ₹ ("quit while ahead")
+  // [FIX] Were flat rupee amounts (₹20,000 / ₹40,000) picked when options
+  // capital was ~₹3L (6.67%/13.33% of that). Capital has since moved (₹10L
+  // live as of 2026-07-27) without these being touched, silently shrinking
+  // the real protection to ~2%/4% of current capital — or the reverse on a
+  // smaller account, where a flat ₹20K could be a much harsher % than
+  // intended. Now a % of CURRENT capital, computed fresh at check time.
+  optDailyLossCapPct: number;      // Halt new options entries once today's realized options loss hits this % of current capital
+  optDailyProfitLockPct: number;   // Halt new options entries once today's realized options profit hits this % of current capital ("quit while ahead")
   optMaxPerSector: number;         // Max concurrent open options positions sharing the same sector
   optNoEntryMinsToClose: number;   // Don't open NEW options positions within this many minutes of the 3:15pm square-off
   optMaxIndexPositions: number;    // Max concurrent open options positions across ALL indices combined (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY move together on the same market-wide beta)
@@ -99,8 +110,8 @@ const DEFAULT_RULES: PositionRules = {
   // Options guardrails — no equivalent existed before; the options engine only
   // had a flat entry-count cap (OPT_DAILY_LIMIT), with no P&L-based circuit
   // breaker at all (opt_todayPnl was read in status but never actually written).
-  optDailyLossCap: 20000,          // ~6.7% of ₹3L options capital
-  optDailyProfitLock: 40000,       // roughly one strong day's worth of wins — lock in gains, stop for the day
+  optDailyLossCapPct: 6.67,        // was flat ₹20,000 (~6.7% of the ₹3L capital it was set against) — now a real % of current capital
+  optDailyProfitLockPct: 13.33,    // was flat ₹40,000 (~13.3% of ₹3L) — roughly one strong day's worth of wins, now scaled the same way
   optMaxPerSector: 2,              // avoid 3+ correlated single-sector bets blowing up together
   optNoEntryMinsToClose: 45,       // no fresh entries after ~2:45pm — no room to develop before 3:15pm square-off
   optMaxIndexPositions: 2,         // mirrors optMaxPerSector's logic — the 4 indices are one correlated basket, not 4 independent bets
@@ -213,6 +224,7 @@ function isNonTradingDay(now: Date = new Date()): boolean {
   return isNseTradingHoliday(now);
 }
 
+
 function timeToClose(): number {
   const now = new Date();
   const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000) + (now.getTimezoneOffset() * 60 * 1000));
@@ -243,14 +255,17 @@ async function getRules(): Promise<PositionRules> {
       // v2 rules
       maxDrawdownPct: parseFloat(m['rules_maxDrawdownPct'] || '') || DEFAULT_RULES.maxDrawdownPct,
       dailyLossLimit: parseFloat(m['rules_dailyLossLimit'] || '') || DEFAULT_RULES.dailyLossLimit,
-      // Temporarily disabled (default false) — user requested to test performance
-      // without the bearish regime filter. Re-enable via Rules tab UI if needed.
-      niftyRegimeFilter: m['rules_niftyRegimeFilter'] === 'true',
+      // Fail-safe default: ON unless explicitly disabled via the Rules tab UI.
+      // (Previously defaulted OFF whenever unset, which silently left the
+      // engine trading unfiltered through bearish regimes — confirmed live:
+      // no rules_niftyRegimeFilter key existed in AppSettings while
+      // sched_niftyRegime was BEARISH.)
+      niftyRegimeFilter: m['rules_niftyRegimeFilter'] !== 'false',
       atrTrailMultiplier: parseFloat(m['rules_atrTrailMultiplier'] || '') || DEFAULT_RULES.atrTrailMultiplier,
       adaptiveSizing: m['rules_adaptiveSizing'] !== 'false',
       streakPenaltyPct: parseFloat(m['rules_streakPenaltyPct'] || '') || DEFAULT_RULES.streakPenaltyPct,
-      optDailyLossCap: parseFloat(m['rules_optDailyLossCap'] || '') || DEFAULT_RULES.optDailyLossCap,
-      optDailyProfitLock: parseFloat(m['rules_optDailyProfitLock'] || '') || DEFAULT_RULES.optDailyProfitLock,
+      optDailyLossCapPct: parseFloat(m['rules_optDailyLossCapPct'] || '') || DEFAULT_RULES.optDailyLossCapPct,
+      optDailyProfitLockPct: parseFloat(m['rules_optDailyProfitLockPct'] || '') || DEFAULT_RULES.optDailyProfitLockPct,
       optMaxPerSector: parseInt(m['rules_optMaxPerSector'] || '') || DEFAULT_RULES.optMaxPerSector,
       optNoEntryMinsToClose: parseInt(m['rules_optNoEntryMinsToClose'] || '') || DEFAULT_RULES.optNoEntryMinsToClose,
       optMaxIndexPositions: parseInt(m['rules_optMaxIndexPositions'] || '') || DEFAULT_RULES.optMaxIndexPositions,
@@ -368,6 +383,38 @@ async function resetDailyCounters() {
     // Reset circuit breaker on new day (fresh start)
     await setSchedulerKV('sched_circuitBreaker', 'false');
     await setSchedulerKV('sched_circuitBreakerReason', '');
+  }
+}
+
+// ── Daily restricted-symbol re-check ────────────────────
+// Catches the class of bug found manually this session (4 of 74
+// SWING_PROVEN_SYMBOLS turned out to be trading under restricted
+// trade-to-trade settlement; the TATAMOTORS demerger before that) — a
+// stock's real trading status can drift without any static list here
+// knowing. Piggybacks on the same once-per-day cadence as
+// resetDailyCounters() and the Dhan scrip master's own daily refresh
+// (dhan-option-provider.ts), rather than a new cron job.
+async function checkRestrictedSymbolsDaily() {
+  const today = new Date().toISOString().split('T')[0];
+  const lastCheck = (await db.appSettings.findUnique({ where: { key: 'sched_lastSeriesCheckDate' } }))?.value;
+  if (lastCheck === today) return;
+  await setSchedulerKV('sched_lastSeriesCheckDate', today);
+  try {
+    const { SWING_PROVEN_SYMBOLS } = await import('@/lib/trading/swing-proven-symbols');
+    const { findFlaggedSymbols } = await import('@/lib/trading/symbol-series-check');
+    const flagged = findFlaggedSymbols(Array.from(SWING_PROVEN_SYMBOLS));
+    if (flagged.length > 0) {
+      const summary = flagged.map(f => `${f.symbol}:${f.series ?? 'NOT_FOUND'}`).join(', ');
+      await db.autoTradeLog.create({
+        data: {
+          action: 'SWING_RESTRICTED_SYMBOL_ALERT', symbol: 'GUARDRAIL', signal: '', executed: false,
+          reason: `${flagged.length} proven-symbol(s) now flagged (restricted series or not found in scrip master): ${summary} — review swing-proven-symbols.ts`,
+        },
+      });
+      console.warn(`[SwingProvenSymbols] ${flagged.length} flagged: ${summary}`);
+    }
+  } catch (err) {
+    console.warn('[SwingProvenSymbols] Daily series check failed (non-blocking):', err);
   }
 }
 
@@ -660,8 +707,46 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
     };
   }
 
+  // Tiered event blackout — RBI policy day, Union Budget day, or a
+  // high-impact US macro print (FOMC/CPI/NFP, real via the same
+  // ForexFactory feed the Forex engine already uses) — same concept Forex
+  // already had (macro_filter.py), equity/options had none of this before.
+  // Blanket "no new entries this tick" like the regime filter above;
+  // existing open positions are managed regardless (matches Forex's own
+  // convention — a blackout blocks new risk, never an existing exit).
+  const eventBlackout = await checkIndiaEventBlackout();
+  if (eventBlackout.inBlackout) {
+    return {
+      entries, skipped: [{ symbol: 'EVENT_BLACKOUT', reason: `${eventBlackout.event} (${eventBlackout.tier}, ${eventBlackout.minutesToEvent}min) — no new equity entries` }],
+      l1Passed: 0, l2Signals: 0, totalScanned: stocks.length, circuitBreaker: false, niftyRegime,
+    };
+  }
+
+  // Institutional flow (real FII/DII net cash-market flow) — INFORMATIONAL
+  // ONLY for equity, not a scoring adjustment. Equity's runScreening() is a
+  // flat boolean AND-gate + count score with no confidence field to nudge
+  // (unlike options, which has one) — adding a weighted factor there would
+  // mean touching the same core scoring redesign the user explicitly said
+  // to leave alone. Logged once per day for real visibility instead.
+  try {
+    const flow = await getInstitutionalFlowBias();
+    if (flow) {
+      const today = new Date().toISOString().split('T')[0];
+      const dayStartIST = new Date(today + 'T00:00:00+05:30');
+      const alreadyLoggedToday = await db.autoTradeLog.findFirst({
+        where: { action: 'INSTITUTIONAL_FLOW_INFO', createdAt: { gte: dayStartIST } },
+      });
+      if (!alreadyLoggedToday) {
+        await db.autoTradeLog.create({
+          data: { action: 'INSTITUTIONAL_FLOW_INFO', symbol: 'MARKET', signal: '', executed: false, reason: flow.reason },
+        });
+      }
+    }
+  } catch { /* NSE fetch failed this cycle — informational only, never blocks scanning */ }
+
   // v2: Circuit breaker & daily loss check
   await resetDailyCounters();
+  await checkRestrictedSymbolsDaily();
   const { drawdownPct } = await getPortfolioDrawdown();
   const st = await getSchedulerState();
   if (drawdownPct >= rules.maxDrawdownPct) {
@@ -868,6 +953,24 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
         },
       });
 
+      // Recorder — equity never had this (only options did), despite
+      // rank-bucket-intelligence.ts already tracking win-rate-by-RS-rank.
+      // This adds the missing piece: which of the 6 individual conditions
+      // (trend/pullback/trigger/volume/RS/gap) actually predicts a win,
+      // from real forward-tested outcomes — resolved in autoCheckExits().
+      const equityReasons: string[] = [];
+      if (signal.checks.trendAbove) equityReasons.push('Trend above SMA200 and EMA20>EMA50');
+      if (signal.checks.pullbackOk) equityReasons.push('Pullback to EMA20 zone');
+      if (signal.checks.triggerOk) equityReasons.push('Breakout trigger (close > prior bar high)');
+      if (signal.checks.volumeOk) equityReasons.push('Volume surge >=1.2x average');
+      if (signal.checks.rsOk) equityReasons.push('Outperforming Nifty 50 (20-session relative strength)');
+      if (signal.checks.gapOk) equityReasons.push('Bullish gap confirmation');
+      await recordSignal(
+        { symbol: stock.symbol, direction: 'LONG', score: signal.score, confidence: Math.round((signal.score / 6) * 1000) / 10, reasons: equityReasons },
+        true,
+        trade.id
+      );
+
       await resetDailyCounters();
       const st2 = await getSchedulerState();
       await setSchedulerKV('sched_todayEntries', String(st2.todayEntries + 1));
@@ -906,10 +1009,18 @@ async function autoCheckExits() {
   const minsToClose = timeToClose();
   const shouldTimeExit = minsToClose <= rules.timeExitMins && minsToClose > 0;
 
+  // [FIX] Previously called getContractCurrentPrice() once per open
+  // position inside this loop — N sequential Dhan API round-trips when
+  // Dhan's own getDhanMarketQuotes() already accepts an array of many
+  // securities in one call. It was just always being invoked with a
+  // one-item array from a per-symbol call site. Batched here instead: one
+  // real quote call for every open equity position's price, up front.
+  const { getCurrentPricesBatch } = await import('@/lib/trading/data-provider');
+  const priceMap = openTrades.length > 0 ? await getCurrentPricesBatch(openTrades.map((t) => t.symbol)) : {};
+
   for (const trade of openTrades) {
     try {
-      const { getContractCurrentPrice } = await import('@/lib/trading/data-provider');
-      const cp = await getContractCurrentPrice(trade.symbol, trade.entryPrice);
+      const cp = priceMap[trade.symbol] ?? 0;
       if (cp <= 0) { holding.push({ symbol: trade.symbol, error: 'Price unavailable' }); continue; }
 
       const days = Math.floor((Date.now() - new Date(trade.entryDate).getTime()) / 86400000);
@@ -1133,6 +1244,12 @@ async function autoCheckExits() {
           await setSchedulerKV('sched_lastAdaptiveFactor', '1');
         }
 
+        // Validator — stamp the real outcome back onto this trade's recorded
+        // signal (mirrors autoOptionsCheckExits' resolveSignalByTradeId) so
+        // getFactorAttribution() can finally compute real per-factor win
+        // rates for equity too, not just options.
+        await resolveSignalByTradeId(trade.id, netPnl > 0, netPnl);
+
         await resetDailyCounters();
         const st2 = await getSchedulerState();
         await setSchedulerKV('sched_todayExits', String(st2.todayExits + 1));
@@ -1299,7 +1416,18 @@ async function getSwingTop7Status(): Promise<Array<{
   }
 }
 
-// ── Hourly Heartbeat Dispatcher ─────────────────────────
+// ── Hourly Status Dispatcher (merged heartbeat + health check) ──────────
+// [FIX 2026-07-27] This used to be a separate hourly "heartbeat" running
+// alongside an automatic 15-min "health check" — the two overlapped heavily
+// (both reported open positions, Nifty regime, general status) and together
+// produced up to ~5 periodic status pings an hour on top of real trade
+// alerts. Consolidated into ONE hourly update carrying everything useful
+// from both: circuit-breaker state, capital summary, and WHY equity/options
+// aren't trading if something's actually blocking them (health check's
+// diagnostic value) alongside the per-stock alignment table (heartbeat's
+// unique value). The old automatic 15-min dispatch is gone — see the
+// removed block in runSchedulerTickInner(); buildSystemHealthReport() and
+// the manual on-demand `health_check` action are untouched for debugging.
 async function dispatchHourlyHeartbeat(now: Date) {
   const lastHbStr = (await db.appSettings.findUnique({ where: { key: 'sched_lastHeartbeatAt' } }))?.value;
   const lastHbTime = lastHbStr ? new Date(lastHbStr).getTime() : 0;
@@ -1310,6 +1438,7 @@ async function dispatchHourlyHeartbeat(now: Date) {
     const st = await getSchedulerState();
     const w = await recalcWallet();
     const openCount = await db.paperTrade.count({ where: { status: 'OPEN', autoTraded: true } });
+    const health = await buildSystemHealthReport();
 
     // Fetch the 7 swing stocks' alignment status for the heartbeat
     const swingStocks = await getSwingTop7Status();
@@ -1322,6 +1451,14 @@ async function dispatchHourlyHeartbeat(now: Date) {
       realizedPnl: w.realizedPnl || 0,
       nextSquareOffTime: '3:10 PM IST',
       swingStocks,
+      circuitBreaker: health.circuitBreaker,
+      circuitBreakerReason: health.circuitBreakerReason,
+      optionsOpenPositions: health.options.openPositions,
+      equityTradeReason: health.equity.tradeReason,
+      optionsTradeReason: health.options.tradeReason,
+      availableCapital: health.wallet.availableCapital,
+      deployedCapital: health.wallet.deployedCapital,
+      peakCapital: health.wallet.peakCapital,
     });
     await setSchedulerKV('sched_lastHeartbeatAt', now.toISOString());
   } catch (err) {
@@ -1555,29 +1692,16 @@ async function runSchedulerTickInner() {
   await dispatchEODSummary(now);
   await dispatchWeeklyRebalanceNotice(now);
 
-  // ── Automatic 15-Minute Discord Health Check Dispatcher ──
-  // Runs regardless of the intraday market-hours WINDOW: a DhanHQ token can
-  // lapse at any hour, so the warning must not wait for market open to fire
-  // on a real trading day. But it must still never fire on a weekend/holiday
-  // — nothing to check (no token refresh, no trading) and this was firing
-  // immediately on every app start regardless of day, since a fresh start
-  // has no recent "last sent" timestamp to compare against.
-  let healthCheckSent = false;
-  if (!isNonTradingDay(now)) {
-    const lastHealthStr = (await db.appSettings.findUnique({ where: { key: 'sched_lastHealthCheckAt' } }))?.value;
-    const lastHealthTime = lastHealthStr ? new Date(lastHealthStr).getTime() : 0;
-    if (now.getTime() - lastHealthTime >= 15 * 60000) {
-      try {
-        const { sendDiscordHealthCheck } = await import('@/lib/notifications/discord');
-        const report = await buildSystemHealthReport();
-        await sendDiscordHealthCheck(report);
-        await setSchedulerKV('sched_lastHealthCheckAt', now.toISOString());
-        healthCheckSent = true;
-      } catch (err) {
-        console.warn('[AutoTrade] 15-min Discord health check dispatch error:', err);
-      }
-    }
-  }
+  // [REMOVED 2026-07-27] The automatic 15-min Discord health check used to
+  // dispatch here. Its own comment admitted it ran "regardless of the
+  // intraday market-hours window" — firing every 15 minutes around the
+  // clock, long after market close, for information that heavily overlapped
+  // the hourly heartbeat anyway (open positions, regime, general status).
+  // Folded into ONE consolidated hourly update instead (see
+  // dispatchHourlyHeartbeat above, called below at the end of this
+  // function) — no more automatic 15-min pings at all. `buildSystemHealthReport()`
+  // and the manual `health_check` API action are untouched for on-demand use.
+  const healthCheckSent = false; // kept in the return shape below so existing callers reading this field don't break
 
   if (!isMarketHours()) return { marketHours: false, message: 'Market closed', healthCheckSent };
   const state = await getSchedulerState();
@@ -1669,7 +1793,11 @@ export function getOptionLotSize(symbol: string): number {
   if (sym === 'HDFCBANK') return 650;
   if (sym === 'ICICIBANK') return 700;
   if (sym === 'BAJFINANCE') return 750;
-  if (sym === 'TATAMOTORS') return 550; // unverified in this pass
+  // Tata Motors demerged 2025-10-01 — continuing entity (Dhan security ID
+  // 3456, unchanged) now trades as "TMPV"; lot size verified live against
+  // the Dhan scrip master (2026-07-27), replacing the old unverified 550.
+  // The new "TMCV" entity has no F&O contracts at all yet.
+  if (sym === 'TMPV') return 1600;
   if (sym === 'BHARTIARTL') return 475;
   if (sym === 'HAL') return 300; // unverified in this pass
 
@@ -1703,21 +1831,53 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       return { signalsGenerated: 0, entriesCreated: 0, errors: [`Daily options entry limit (${OPT_DAILY_LIMIT}) reached`] };
     }
 
+    // Tiered event blackout — same as equity's autoScanAndTrade above;
+    // options are more sensitive to this than equity given intraday
+    // leverage/theta, not less.
+    const eventBlackout = await checkIndiaEventBlackout();
+    if (eventBlackout.inBlackout) {
+      await db.autoTradeLog.create({ data: { action: 'OPT_EVENT_BLACKOUT', symbol: 'GUARDRAIL', signal: '', executed: false, reason: `${eventBlackout.event} (${eventBlackout.tier}, ${eventBlackout.minutesToEvent}min) — no new options entries` } });
+      return { signalsGenerated: 0, entriesCreated: 0, errors: [`Event blackout: ${eventBlackout.event}`] };
+    }
+
     // ── Options guardrails engine ───────────────────────────────────────
     // Previously the options engine had NO P&L-based circuit breaker at all
     // (opt_todayPnl was read in the status endpoint but never written by
-    // anything) — only the flat entry-count cap above. These three gates
-    // close that gap: stop digging on a bad day, stop pressing on a good
-    // one, and don't open fresh risk with no runway before square-off.
+    // anything) — only the flat entry-count cap above. These gates close
+    // that gap: stop digging on a bad day, stop pressing on a good one,
+    // don't open fresh risk with no runway before square-off, and — new —
+    // don't keep opening options positions if the WHOLE portfolio (equity +
+    // options combined, see getPortfolioDrawdown()) is already down big.
     const rules = await getRules();
     const optTodayPnl = parseFloat((await db.appSettings.findUnique({ where: { key: 'opt_todayPnl' } }))?.value || '0');
 
-    if (optTodayPnl <= -rules.optDailyLossCap) {
-      await db.autoTradeLog.create({ data: { action: 'OPT_CIRCUIT_BREAKER', symbol: 'GUARDRAIL', signal: '', executed: false, reason: `Daily options loss cap hit: ₹${optTodayPnl.toFixed(0)} <= -₹${rules.optDailyLossCap}` } });
+    // Portfolio-wide drawdown circuit breaker — equity's autoScanAndTrade
+    // already halts on this (rules.maxDrawdownPct), but the options entry
+    // path never checked it at all: the portfolio could be down past the
+    // drawdown limit and options would keep opening fresh risk regardless.
+    // getPortfolioDrawdown() already includes options' own unrealized P&L in
+    // the calculation (its own comment confirms this) — it just was never
+    // consulted here as a gate.
+    const { drawdownPct } = await getPortfolioDrawdown();
+    if (drawdownPct >= rules.maxDrawdownPct) {
+      await db.autoTradeLog.create({ data: { action: 'OPT_CIRCUIT_BREAKER', symbol: 'GUARDRAIL', signal: '', executed: false, reason: `Portfolio drawdown ${drawdownPct.toFixed(1)}% >= ${rules.maxDrawdownPct}% — no new options entries` } });
+      return { signalsGenerated: 0, entriesCreated: 0, errors: [`Portfolio drawdown ${drawdownPct.toFixed(1)}% exceeds ${rules.maxDrawdownPct}% limit`] };
+    }
+
+    // Daily loss cap / profit lock — now a % of CURRENT capital (see the
+    // PositionRules field comments for why this changed from a flat ₹
+    // amount), computed fresh each check so it stays meaningful as capital
+    // actually grows or shrinks.
+    const wallet = await getWallet();
+    const optDailyLossCapAmount = wallet.totalCapital * (rules.optDailyLossCapPct / 100);
+    const optDailyProfitLockAmount = wallet.totalCapital * (rules.optDailyProfitLockPct / 100);
+
+    if (optTodayPnl <= -optDailyLossCapAmount) {
+      await db.autoTradeLog.create({ data: { action: 'OPT_CIRCUIT_BREAKER', symbol: 'GUARDRAIL', signal: '', executed: false, reason: `Daily options loss cap hit: ₹${optTodayPnl.toFixed(0)} <= -₹${optDailyLossCapAmount.toFixed(0)} (${rules.optDailyLossCapPct}% of ₹${wallet.totalCapital.toFixed(0)} capital)` } });
       return { signalsGenerated: 0, entriesCreated: 0, errors: [`Daily options loss cap reached (₹${optTodayPnl.toFixed(0)})`] };
     }
-    if (optTodayPnl >= rules.optDailyProfitLock) {
-      await db.autoTradeLog.create({ data: { action: 'OPT_PROFIT_LOCK', symbol: 'GUARDRAIL', signal: '', executed: false, reason: `Daily options profit lock hit: ₹${optTodayPnl.toFixed(0)} >= ₹${rules.optDailyProfitLock} — quitting while ahead` } });
+    if (optTodayPnl >= optDailyProfitLockAmount) {
+      await db.autoTradeLog.create({ data: { action: 'OPT_PROFIT_LOCK', symbol: 'GUARDRAIL', signal: '', executed: false, reason: `Daily options profit lock hit: ₹${optTodayPnl.toFixed(0)} >= ₹${optDailyProfitLockAmount.toFixed(0)} (${rules.optDailyProfitLockPct}% of ₹${wallet.totalCapital.toFixed(0)} capital) — quitting while ahead` } });
       return { signalsGenerated: 0, entriesCreated: 0, errors: [`Daily options profit lock reached (₹${optTodayPnl.toFixed(0)}) — no new entries today`] };
     }
     if (timeToClose() <= rules.optNoEntryMinsToClose) {
@@ -1754,6 +1914,23 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
     // since these are different books with independent P&L.
     const optConsecutiveLosses = parseInt((await db.appSettings.findUnique({ where: { key: 'opt_consecutiveLosses' } }))?.value || '0', 10);
     const optAdaptiveFactor = getAdaptiveFactor(optConsecutiveLosses, rules);
+
+    // ── Risk-based sizing setup — fetch capital once, track running balance ──
+    // Options previously ignored risk entirely: every entry traded exactly 1
+    // exchange lot (getOptionLotSize) regardless of premium, and nothing
+    // checked available capital before creating the trade. This is the exact
+    // "fixed size, wildly different ₹ risk" bug ODSS's own paper-trader found
+    // and fixed in its history (its header comment: "a ₹1.77 option risked
+    // ₹3.7k while a ₹88 option risked ₹18.5k — same size, 5x the risk, same
+    // capital"). Now sized to rules.riskPerTradePct of total capital per
+    // trade, capped by what's actually available, walked down like ODSS's
+    // selectAffordableStrike. availableCapitalTracker is decremented as each
+    // trade in this scan commits, so a burst of signals in one cycle can't
+    // collectively overspend the wallet.
+    const walletState = await recalcWallet();
+    let availableCapitalTracker = walletState.available;
+    const equityForRisk = walletState.totalCapital;
+
     const { OPTIONS_TOP10_SYMBOLS, OPTIONS_TOP5_PRIORITY, OPT_TOP10_CONCURRENCY_CAP } = await import('@/lib/trading/options-proven-symbols');
     // Stock-options concurrency tally (TOP-10 basket, cap=3 — see
     // options-proven-symbols.ts for the real backtest this was picked from).
@@ -1783,24 +1960,42 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
     // backtest decision — see options-proven-symbols.ts for the 6-scenario
     // comparison this came from. Index signals aren't gated — there is no
     // historical-options backtest for indices to gate them against.
-    const highConfidence = scanResult.signals
+    // Live dynamic prioritization (ODSS-inspired — see the port note in
+    // worklog/Obsidian): the confluence score above is already computed
+    // fresh every scan across the full F&O universe (getFNOUniverse(),
+    // options-scanner.ts) — the proven-symbols filter is a deliberate,
+    // backtested SAFETY gate (which symbols are allowed to trade at all),
+    // not stale data, and stays as-is. What WAS static despite the scoring
+    // being live: when the sector/index/TOP10-concurrency caps below have
+    // fewer open slots than eligible signals this scan, the loop previously
+    // took whichever symbol happened to come first in scan order (not
+    // sorted at all) — meaning a mediocre signal could claim a scarce slot
+    // ahead of a stronger one purely by iteration order.
+    const highConfidenceRaw = scanResult.signals
       .filter(s => s.confidence >= minConfidence)
       .filter(s => INDEX_SYMBOLS.includes(s.symbol) || OPTIONS_TOP10_SYMBOLS.has(s.symbol.toUpperCase()));
 
+    // Score stabilizer (ODSS conviction-engine-inspired, scoped down — see
+    // score-stabilizer.ts) — ranks by an EMA-smoothed score across scans
+    // rather than this single scan's raw confidence, so a symbol that's
+    // been consistently decent isn't edged out of a scarce slot by another
+    // symbol's one-scan noise spike. The MIN_CONFIDENCE gate above still
+    // applies to the raw score (a real signal-quality bar); only the
+    // PRIORITY ORDER for scarce-slot competition uses the smoothed score.
+    const withSmoothed = await Promise.all(
+      highConfidenceRaw.map(async (s) => ({
+        sig: s,
+        smoothed: await getSmoothedScore(s.symbol, s.direction, s.confidence),
+      }))
+    );
+    withSmoothed.sort((a, b) => b.smoothed - a.smoothed);
+    const highConfidence = withSmoothed.map((w) => w.sig);
+
     for (let i = 0; i < highConfidence.length; i++) {
       const sig = highConfidence[i];
+      const originalTechnicalConfidence = sig.confidence; // before any IV/OC/reputation adjustment below — for the decision-trace record
       const tradeSymbol = `${sig.symbol}_${sig.direction}_${sig.strike}_${sig.expiry}`;
-      let lotSize = getOptionLotSize(sig.symbol);
-      if (optAdaptiveFactor < 1.0) {
-        const adjustedLots = Math.max(1, Math.floor(lotSize * optAdaptiveFactor));
-        await db.autoTradeLog.create({
-          data: {
-            action: 'OPT_ADAPTIVE_SIZING', symbol: tradeSymbol, signal: '', executed: false,
-            reason: `Adaptive sizing: ${lotSize} -> ${adjustedLots} lots (${(optAdaptiveFactor * 100).toFixed(0)}% factor, ${optConsecutiveLosses} consecutive losses)`,
-          },
-        });
-        lotSize = adjustedLots;
-      }
+      const exchangeLotSize = getOptionLotSize(sig.symbol);
 
       // ── DUPLICATE SUPPRESSION (BEFORE sending any signal) ──────────────
       // Rule: once a strike is triggered, don't re-trigger until that trade
@@ -1872,6 +2067,10 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       // ── Fetch REAL live option premium (+ real delta) from DhanHQ Option Chain ───────
       let premium = 0;
       let realDelta = 0.5;
+      let ivCautionPenalty = 0; // 0..1, applied to confidence below (graduated, not a hard block by itself)
+      let ivCautionReason = '';
+      let ivPercentileSnapshot: number | null = null;
+      let ocSummary: { score: number; entrySignal: string; oiAction: string } | null = null;
       try {
         const chain = await fetchDhanOptionChain(sig.symbol, sig.expiry);
         if (chain && chain.chain && chain.chain.length > 0) {
@@ -1885,12 +2084,118 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
             premium = quote.ltp;
             realDelta = quote.delta || 0.5;
           }
+
+          // ── IV regime gating (ported from ODSS's iv-percentile.ts +
+          // oc-confluence.ts's getIVSpikePct) — only meaningful now that
+          // real per-strike IV exists (dhan-option-provider.ts's
+          // impliedVolatility() wiring, fixed this same session). Straddle
+          // study cited in ODSS's own code (74,515 direction-neutral
+          // observations): buying when IV sits in the richest 20% of a
+          // symbol's own range is consistently the worst-performing bucket.
+          // Matches ODSS's real behavior exactly: percentile alone and a
+          // mild spike are graduated confidence penalties (never a hard
+          // block by themselves); only a severe spike (>=45%/hr) hard-skips,
+          // same as ODSS forcing entrySignal to WAIT at that threshold.
+          try {
+            const atmRows = chain.chain.filter(r => r.moneyness === 'ATM');
+            const ivValues = atmRows.flatMap(r => [r.ce?.iv, r.pe?.iv]).filter((v): v is number => !!v && v > 0);
+            if (ivValues.length > 0) {
+              const atmIV = ivValues.reduce((a, b) => a + b, 0) / ivValues.length;
+              await recordIV(sig.symbol, atmIV);
+              const pct = await getIVPercentile(sig.symbol, atmIV);
+              ivPercentileSnapshot = pct;
+              if (pct !== null && pct >= 0.8) {
+                ivCautionPenalty = Math.max(ivCautionPenalty, 0.15);
+                ivCautionReason = `IV in richest ${Math.round((1 - pct) * 100)}% for ${sig.symbol} — historically the worst time to buy`;
+              }
+              const spike = await getIVSpikePct(sig.symbol);
+              if (spike !== null && spike >= 25) {
+                ivCautionPenalty = Math.max(ivCautionPenalty, 0.15);
+                ivCautionReason = `ATM IV +${spike}% in the last hour — premiums expensive`;
+                if (spike >= 45) {
+                  ivCautionPenalty = 1; // hard skip — mirrors ODSS forcing entrySignal to WAIT at this threshold
+                  ivCautionReason = `ATM IV spiked +${spike}% in the last hour — standing down until it settles`;
+                }
+              }
+            }
+          } catch { /* no chain / not enough IV history yet — no caution, not a block */ }
+
+          // ── Order-flow / OI confluence (ported from ODSS's oc-confluence.ts) ──
+          // Tracks how OI, PCR and ATM delta actually move over 5m/15m/1h and
+          // scores whether the REAL option chain agrees with this technical
+          // signal — something the confluence scanner never looked at before
+          // (it's built entirely from price/structure technicals). Mirrors
+          // ODSS's real production behavior: a chain that's actively AVOIDing
+          // this direction vetoes the entry for this scan (skip, not a
+          // permanent block — it can still fire next scan if the chain
+          // turns). ODSS's "promote a WAIT signal to ENTER_NOW" half isn't
+          // ported — newswing's signals are pass/fail against the confluence
+          // gate already, there's no WAIT tier to promote from.
+          try {
+            const oc = await updateOCConfluence(sig.symbol, chain, sig.direction);
+            if (oc) ocSummary = { score: oc.ocScore, entrySignal: oc.entrySignal, oiAction: oc.oiAction };
+            if (oc && oc.entrySignal === 'AVOID') {
+              await db.autoTradeLog.create({
+                data: {
+                  action: 'OPT_OC_VETO', symbol: tradeSymbol, signal: '', executed: false,
+                  reason: `Skipped — chain contradicts: ${oc.headline}`,
+                },
+              });
+              continue;
+            }
+          } catch { /* no chain history yet — no veto, not a block */ }
         }
       } catch (err) {
         console.warn(`[Options Auto-Trade] Real LTP fetch failed for ${sig.symbol} ${sig.strike} ${sig.direction}:`, err);
       }
 
       if (premium <= 0) continue;
+
+      if (ivCautionPenalty >= 1) {
+        await db.autoTradeLog.create({
+          data: {
+            action: 'OPT_IV_STANDDOWN', symbol: tradeSymbol, signal: '', executed: false,
+            reason: `Skipped — ${ivCautionReason}`,
+          },
+        });
+        continue;
+      }
+      if (ivCautionPenalty > 0) {
+        sig.confidence = Math.max(0, sig.confidence - ivCautionPenalty * 100);
+      }
+
+      // ── Symbol reputation (ported from ODSS's Conviction DNA, scoped down —
+      // see getSymbolReputationAdjustment in signal-recorder.ts) — does THIS
+      // symbol actually perform well when picked, regardless of which
+      // factors fired? Built on the existing signalRecord data (no new
+      // recording infra needed). Returns null (no adjustment) until there's
+      // enough independent by-day history — never guesses on thin data.
+      let reputationNote: string | undefined;
+      try {
+        const rep = await getSymbolReputationAdjustment(sig.symbol);
+        if (rep) {
+          sig.confidence = Math.max(0, Math.min(100, sig.confidence + rep.adjustment));
+          reputationNote = rep.reason;
+        }
+      } catch { /* signalRecord not queryable this cycle — no adjustment, not a block */ }
+
+      // ── Institutional flow bias (real FII/DII net cash-market flow, NSE) —
+      // the "smart money" signal Forex already has via real CFTC COT
+      // positioning; equity/options had no analogous signal before this.
+      // Market-wide (not symbol-specific), so applies the same way to every
+      // signal this scan. Modest cap (+-8, smaller than reputation's +-15) —
+      // research (2026-07-27) found FII/DII flow is more a lagging
+      // confirmation than a leading predictor, so this stays a small nudge,
+      // not a strong factor. Returns null (no adjustment) if NSE's real
+      // endpoint fails or the combined flow is inside the neutral band.
+      let institutionalFlowNote: string | undefined;
+      try {
+        const flow = await getInstitutionalFlowBias();
+        if (flow && flow.adjustment !== 0) {
+          sig.confidence = Math.max(0, Math.min(100, sig.confidence + flow.adjustment));
+          institutionalFlowNote = flow.reason;
+        }
+      } catch { /* NSE fetch failed this cycle — no adjustment, not a block */ }
 
       // ── Structure-based adaptive SL/TP (replaces a flat -25%/+50%) ──────
       // Uses the real underlying spot-distance-to-support/resistance
@@ -1904,7 +2209,41 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       );
       const sl = Math.round(premium * (1 + structureTargets.stopLossPct / 100) * 100) / 100;
       const tp = Math.round(premium * (1 + structureTargets.targetPct / 100) * 100) / 100;
-      const totalCapNeeded = premium * lotSize;
+
+      // ── Risk-based lot sizing ────────────────────────────────────────
+      // riskPerLot = what 1 exchange lot actually loses if SL is hit (premium
+      // move * lot size), not the full premium paid — matches how the SL is
+      // actually defined (a % move in premium, structureTargets.stopLossPct).
+      const riskPerLot = premium * (Math.abs(structureTargets.stopLossPct) / 100) * exchangeLotSize;
+      const riskBudget = equityForRisk * (rules.riskPerTradePct / 100);
+      const lotsByRisk = riskPerLot > 0 ? Math.floor(riskBudget / riskPerLot) : 0;
+      const lotsByCapital = Math.floor(availableCapitalTracker / (premium * exchangeLotSize));
+      let lots = Math.min(lotsByRisk, lotsByCapital);
+      // Never go below 1 lot purely from the risk budget being tight (a
+      // single lot is still allowed if capital covers it) — but never trade
+      // if capital genuinely can't cover even 1 lot.
+      if (lots < 1 && lotsByCapital >= 1) lots = 1;
+      if (optAdaptiveFactor < 1.0) lots = Math.max(1, Math.floor(lots * optAdaptiveFactor));
+
+      if (lots < 1) {
+        await db.autoTradeLog.create({
+          data: {
+            action: 'OPT_INSUFFICIENT_CAPITAL', symbol: tradeSymbol, signal: '', executed: false,
+            reason: `Skipped — 1 lot (${exchangeLotSize} qty @ ₹${premium}) needs ₹${(premium * exchangeLotSize).toFixed(0)}, only ₹${availableCapitalTracker.toFixed(0)} available`,
+          },
+        });
+        continue;
+      }
+
+      await db.autoTradeLog.create({
+        data: {
+          action: 'OPT_RISK_SIZING', symbol: tradeSymbol, signal: '', executed: false,
+          reason: `Risk sizing: ${lots} lot(s) x ${exchangeLotSize} = ${lots * exchangeLotSize} qty (risk budget ₹${riskBudget.toFixed(0)} @ ${rules.riskPerTradePct}%, risk/lot ₹${riskPerLot.toFixed(0)}, capital cap ${lotsByCapital} lots, adaptive factor ${(optAdaptiveFactor * 100).toFixed(0)}%)`,
+        },
+      });
+
+      const qty = lots * exchangeLotSize;
+      const totalCapNeeded = premium * qty;
 
       // ── Send Discord Signal Alert ──────────────────────────────────────
       try {
@@ -1917,10 +2256,12 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
           premium,
           stopLoss: sl,
           takeProfit: tp,
-          lotSize,
-          lots: 1,
+          lotSize: exchangeLotSize,
+          lots,
           totalCapital: totalCapNeeded,
           confluenceScore: sig.confidence,
+          stopLossPct: structureTargets.stopLossPct,
+          targetPct: structureTargets.targetPct,
           setupType: sig.score >= 40 ? 'A+' : 'B',
           direction: sig.direction === 'CE' ? 'CALL BUY 🟢' : 'PUT BUY 🔴',
           engine: 'OPTIONS',
@@ -1965,7 +2306,7 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
           direction: sig.direction,
           entryDate: new Date(),
           entryPrice: premium,
-          qty: lotSize,
+          qty,
           stopLoss: sl,
           targetPrice: tp,
           status: 'OPEN',
@@ -1986,6 +2327,24 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
             atrPct: sig.atrPct,
             realLtpFetched: true,
             sector: sig.sector,
+            // Multi-engine decision trace (ODSS-inspired — see the port note
+            // in Obsidian/worklog): each of these was computed by an
+            // independent check (technical confluence already in `score`/
+            // `reasons` above; IV-regime, order-flow/OI, and symbol
+            // reputation below) that can graduate the final confidence up or
+            // down or veto outright. Recorded here so the decision is
+            // auditable after the fact, not just a black-box number — and so
+            // getSymbolReputationAdjustment() has real data to compound on
+            // for future signals on this symbol.
+            decisionVote: {
+              technicalConfidence: originalTechnicalConfidence,
+              ivPercentile: ivPercentileSnapshot,
+              ivCautionReason: ivCautionReason || undefined,
+              ocConfluence: ocSummary,
+              symbolReputation: reputationNote,
+              institutionalFlow: institutionalFlowNote,
+              finalConfidence: sig.confidence,
+            },
           }),
         },
       });
@@ -1999,6 +2358,7 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       if (sig.sector) sectorOpenCount[sig.sector] = (sectorOpenCount[sig.sector] || 0) + 1;
       if (INDEX_SYMBOLS.includes(sig.symbol)) openIndexCount++;
       if (OPTIONS_TOP10_SYMBOLS.has(sig.symbol)) openTop10Count++;
+      availableCapitalTracker -= totalCapNeeded;
       todayEntries++;
       entriesCreated++;
       await db.appSettings.upsert({ where: { key: 'opt_todayEntries' }, update: { value: String(todayEntries) }, create: { key: 'opt_todayEntries', value: String(todayEntries) } });
@@ -2255,6 +2615,10 @@ async function getOptionsStatus() {
   for (const x of s) m[x.key] = x.value;
   const rules = await getRules();
   const optTodayPnl = parseFloat(m['opt_todayPnl'] || '0');
+  const walletForGuardrails = await getWallet();
+  const dailyLossCapAmount = walletForGuardrails.totalCapital * (rules.optDailyLossCapPct / 100);
+  const dailyProfitLockAmount = walletForGuardrails.totalCapital * (rules.optDailyProfitLockPct / 100);
+  const { drawdownPct: portfolioDrawdownPct } = await getPortfolioDrawdown();
 
   return {
     enabled: m['opt_enabled'] !== 'false', // always-on: default true unless explicitly 'false'
@@ -2263,10 +2627,15 @@ async function getOptionsStatus() {
     todayExits: parseInt(m['opt_todayExits'] || '0'),
     todayPnl: optTodayPnl,
     guardrails: {
-      dailyLossCap: rules.optDailyLossCap,
-      dailyProfitLock: rules.optDailyProfitLock,
-      lossCapHit: optTodayPnl <= -rules.optDailyLossCap,
-      profitLockHit: optTodayPnl >= rules.optDailyProfitLock,
+      dailyLossCap: Math.round(dailyLossCapAmount),
+      dailyLossCapPct: rules.optDailyLossCapPct,
+      dailyProfitLock: Math.round(dailyProfitLockAmount),
+      dailyProfitLockPct: rules.optDailyProfitLockPct,
+      lossCapHit: optTodayPnl <= -dailyLossCapAmount,
+      profitLockHit: optTodayPnl >= dailyProfitLockAmount,
+      portfolioDrawdownPct: Math.round(portfolioDrawdownPct * 10) / 10,
+      maxDrawdownPct: rules.maxDrawdownPct,
+      drawdownBreakerActive: portfolioDrawdownPct >= rules.maxDrawdownPct,
       maxPerSector: rules.optMaxPerSector,
       maxIndexPositions: rules.optMaxIndexPositions,
       noEntryMinsToClose: rules.optNoEntryMinsToClose,

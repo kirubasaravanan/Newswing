@@ -48,7 +48,7 @@ const OPTIONS_SYMBOLS = [
   { symbol: 'RELIANCE', name: 'Reliance Stock Options (CE/PE)' },
   { symbol: 'TATASTEEL', name: 'Tata Steel Stock Options (CE/PE)' },
   { symbol: 'INFY', name: 'Infosys Stock Options (CE/PE)' },
-  { symbol: 'TATAMOTORS', name: 'Tata Motors Stock Options (CE/PE)' },
+  { symbol: 'TMPV', name: 'Tata Motors Passenger Vehicles Options (CE/PE)' }, // demerged 2025-10-01, continuing entity — see dhan-client.ts
   { symbol: 'BAJFINANCE', name: 'Bajaj Finance Stock Options (CE/PE)' },
 ];
 
@@ -107,7 +107,8 @@ const ALL_SELECTABLE_SCRIPS = [
   { symbol: 'RELIANCE', name: 'Reliance Industries Ltd.' },
   { symbol: 'SBIN', name: 'State Bank of India' },
   { symbol: 'LT', name: 'Larsen & Toubro Ltd.' },
-  { symbol: 'TATAMOTORS', name: 'Tata Motors Ltd.' },
+  { symbol: 'TMPV', name: 'Tata Motors Passenger Vehicles Ltd.' }, // demerged 2025-10-01, continuing entity
+  { symbol: 'TMCV', name: 'Tata Motors Ltd. (Commercial Vehicles, new listing 2025-11-12)' },
   { symbol: 'BAJFINANCE', name: 'Bajaj Finance Ltd.' },
   { symbol: 'HAL', name: 'Hindustan Aeronautics Ltd.' },
   { symbol: 'BHARTIARTL', name: 'Bharti Airtel Ltd.' },
@@ -506,9 +507,27 @@ function BatchBacktest({ config }: { config: any }) {
 
 // ── Walk-Forward Analysis ────────────────────────────────
 function WalkForwardBacktest({ config }: { config: any }) {
-  const [symbol, setSymbol] = useState('TATAELXSI');
+  // Real active weekly ranking (rs-ranking.ts), fetched from the same
+  // endpoint the batch backtest actually uses — not the hardcoded
+  // TOP_7_RANKED_SYMBOLS import, which can (and on 2026-07-27, did) show
+  // completely different symbols than the system's real current picks.
+  // Falls back to the static list only if the fetch itself fails.
+  const [universe, setUniverse] = useState<{ symbol: string; rank: number }[]>(TOP_7_RANKED_SYMBOLS);
+  const [symbol, setSymbol] = useState(TOP_7_RANKED_SYMBOLS[0]?.symbol || 'RELIANCE');
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
+
+  useEffect(() => {
+    fetch('/api/backtest/batch')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.symbols) && data.symbols.length > 0) {
+          setUniverse(data.symbols);
+          setSymbol(data.symbols[0].symbol);
+        }
+      })
+      .catch(() => { /* keep the static fallback already in state */ });
+  }, []);
 
   const runWalkForward = async () => {
     setRunning(true);
@@ -554,7 +573,7 @@ function WalkForwardBacktest({ config }: { config: any }) {
             <Select value={symbol} onValueChange={setSymbol}>
               <SelectTrigger className="w-56 h-9 text-sm"><SelectValue /></SelectTrigger>
               <SelectContent className="max-h-60">
-                {TOP_7_RANKED_SYMBOLS.map((s) => (
+                {universe.map((s) => (
                   <SelectItem key={s.symbol} value={s.symbol}>#{s.rank} {s.symbol}</SelectItem>
                 ))}
               </SelectContent>

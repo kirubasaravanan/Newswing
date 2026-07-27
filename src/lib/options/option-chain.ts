@@ -401,7 +401,7 @@ type LiquidityTier = 'ultra' | 'high' | 'medium' | 'low';
 function getLiquidityTier(symbol: string): LiquidityTier {
   const ultra = ['NIFTY', 'BANKNIFTY'];
   const high = ['FINNIFTY', 'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN'];
-  const medium = ['AXISBANK', 'KOTAKBANK', 'BAJFINANCE', 'ITC', 'LT', 'BHARTIARTL', 'HINDUNILVR', 'TATAMOTORS'];
+  const medium = ['AXISBANK', 'KOTAKBANK', 'BAJFINANCE', 'ITC', 'LT', 'BHARTIARTL', 'HINDUNILVR', 'TMPV'];
 
   if (ultra.includes(symbol)) return 'ultra';
   if (high.includes(symbol)) return 'high';

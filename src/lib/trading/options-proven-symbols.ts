@@ -19,13 +19,23 @@
  * PF 1.49 on 100 real trades still clears swing's own >=15-trade floor by a
  * wide margin, but flagged here for visibility.
  *
+ * [UPDATE 2026-07-27] Tata Motors demerged 2025-10-01: the original,
+ * price-continuous listing this backtest actually ran against (unchanged
+ * Dhan security ID 3456) is now traded under "TMPV", not "TATAMOTORS" —
+ * renamed below so this proven-symbol gate and the live options scanner's
+ * option-chain lookup (which matches by symbol string) agree. The new
+ * "TMCV" entity that legally kept the "Tata Motors" name is a fresh
+ * 2025-11-12 listing with no F&O contracts at all yet (verified against the
+ * Dhan scrip master) — it cannot be added here; there is no real backtest
+ * (and no options market) to prove it against.
+ *
  * Static snapshot, not a live recompute. Re-run
  * scripts/real-stock-options-backtest.mjs periodically (quarterly, or after
  * any change to options-scanner.ts's scoring rules) and refresh this list.
  */
 export const OPTIONS_PROVEN_SYMBOLS = new Set([
   'PIDILITIND', 'ITC', 'SOLARINDS', 'CROMPTON', 'BERGEPAINT', 'IRCTC',
-  'SUNPHARMA', 'VEDL', 'AXISBANK', 'UPL', 'TATAMOTORS', 'ADANIPORTS',
+  'SUNPHARMA', 'VEDL', 'AXISBANK', 'UPL', 'TMPV', 'ADANIPORTS',
   'CIPLA', 'ASIANPAINT', 'BATAINDIA', 'ICICIBANK', 'HAVELLS', 'GODREJAGRO',
   'BEML', 'TRENT',
 ]);
@@ -78,7 +88,7 @@ export const OPTIONS_PROVEN_METRICS: Record<string, OptionsProvenMetrics> = {
   VEDL: { profitFactor: 1.5, totalTrades: 974, winRate: 42.3, sharpeRatio: 3.55 },
   AXISBANK: { profitFactor: 1.5, totalTrades: 1000, winRate: 41.2, sharpeRatio: 3.28 },
   UPL: { profitFactor: 1.49, totalTrades: 927, winRate: 38.7, sharpeRatio: 2.78 },
-  TATAMOTORS: { profitFactor: 1.49, totalTrades: 100, winRate: 38, sharpeRatio: 1.27 },
+  TMPV: { profitFactor: 1.49, totalTrades: 100, winRate: 38, sharpeRatio: 1.27 }, // stats from the pre-demerger "TATAMOTORS" backtest — same continuous price series, see file header
   ADANIPORTS: { profitFactor: 1.44, totalTrades: 1010, winRate: 37.3, sharpeRatio: 3.04 },
   CIPLA: { profitFactor: 1.43, totalTrades: 888, winRate: 37.6, sharpeRatio: 2.86 },
   ASIANPAINT: { profitFactor: 1.43, totalTrades: 916, winRate: 39.5, sharpeRatio: 2.77 },

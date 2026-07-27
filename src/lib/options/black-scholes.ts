@@ -361,7 +361,7 @@ const DIVIDEND_YIELDS: Record<string, number> = {
   LT: 0.015,
   BHARTIARTL: 0.003,
   MARUTI: 0.005,
-  TATAMOTORS: 0.001,
+  TMPV: 0.001, // inherited from pre-demerger "TATAMOTORS" — not independently re-verified for the renamed entity
   SUNPHARMA: 0.003,
   WIPRO: 0.003,
   ASIANPAINT: 0.008,
@@ -417,7 +417,12 @@ const LOT_SIZES: Record<string, number> = {
   LT: 175,
   BHARTIARTL: 475,
   MARUTI: 50,
-  TATAMOTORS: 550,   // unverified in this pass
+  // Tata Motors demerged 2025-10-01 — the continuing entity (Dhan security
+  // ID 3456, unchanged) now trades as "TMPV". Lot size below is REAL,
+  // verified directly against the live Dhan scrip master's TMPV F&O rows
+  // (2026-07-27) — 1600, not the old table's unverified 550. The new "TMCV"
+  // entity has no F&O contracts listed at all yet, so no entry is possible.
+  TMPV: 1600,
   SUNPHARMA: 1250,   // unverified in this pass
   WIPRO: 1500,       // unverified in this pass
   ASIANPAINT: 250,

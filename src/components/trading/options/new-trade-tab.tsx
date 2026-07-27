@@ -71,7 +71,7 @@ function NewTradeTab() {
       NIFTY: 25, BANKNIFTY: 15, FINNIFTY: 25, RELIANCE: 250, TCS: 175,
       INFY: 300, HDFCBANK: 550, ICICIBANK: 700, SBIN: 1500, AXISBANK: 900,
       KOTAKBANK: 800, BAJFINANCE: 250, ITC: 3200, HINDUNILVR: 300, LT: 150,
-      BHARTIARTL: 475, MARUTI: 100, TATAMOTORS: 550, SUNPHARMA: 1250, WIPRO: 1500,
+      BHARTIARTL: 475, MARUTI: 100, TMPV: 1600, SUNPHARMA: 1250, WIPRO: 1500, // TMPV: real verified lot size (2026-07-27), replaces pre-demerger "TATAMOTORS: 550" (unverified)
     };
     setLotSize(lsMap[symbol] || 100);
   }, [symbol]);

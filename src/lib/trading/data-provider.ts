@@ -41,8 +41,13 @@ const SYMBOL_MAP: Record<string, string> = {
   'SHREECEM': 'SHREECEM.NS',
   'ACC': 'ACC.NS',
   'NAM-INDIA': 'NAM-INDIA.NS',
-  // Recently restructured/renamed on Yahoo
-  'TATAMOTORS': 'TMCV.NS',
+  // Tata Motors demerged 2025-10-01 into TMPV (continuing entity) and TMCV
+  // (new listing) — both already follow the standard symbol+'.NS' Yahoo
+  // convention (TMPV.NS / TMCV.NS, confirmed live), so no override entry is
+  // needed here anymore; the old 'TATAMOTORS': 'TMCV.NS' override actually
+  // pointed the WRONG direction for this codebase's purposes (TMCV is the
+  // brand-new, historically-discontinuous listing — see dhan-client.ts's
+  // DHAN_SECURITY_MAP comment for the full explanation).
 };
 
 export function toYahooSymbol(nseSymbol: string): string {
@@ -387,6 +392,71 @@ export async function getCurrentPrice(symbol: string): Promise<{
     console.error(`Yahoo quote failed for ${symbol}:`, err);
     throw err;
   }
+}
+
+/**
+ * Batch equity current-price lookup — one real Dhan quote call for ALL
+ * symbols instead of the old pattern of calling getCurrentPrice()/
+ * getContractCurrentPrice() once per symbol in a loop. getDhanMarketQuotes()
+ * already accepted an array of securities; it was just always being called
+ * with a one-item array from a per-symbol loop (found while investigating a
+ * real "why is this slow" question). Equity-only (option contracts need the
+ * option-chain path in getContractCurrentPrice(), not this).
+ */
+export async function getCurrentPricesBatch(symbols: string[]): Promise<Record<string, number>> {
+  const result: Record<string, number> = {};
+  const needsYahoo: string[] = [];
+
+  if (process.env.DATA_PROVIDER === 'dhan') {
+    const securities: Array<{ securityId: string; exchangeSegment: string }> = [];
+    const symbolByKey = new Map<string, string>();
+    for (const symbol of symbols) {
+      const secMeta = DHAN_SECURITY_MAP[symbol.toUpperCase()];
+      if (secMeta) {
+        securities.push({ securityId: secMeta.securityId, exchangeSegment: secMeta.exchangeSegment });
+        symbolByKey.set(`${secMeta.exchangeSegment}:${secMeta.securityId}`, symbol);
+      } else {
+        needsYahoo.push(symbol);
+      }
+    }
+    if (securities.length > 0) {
+      try {
+        const quotesRes = await getDhanMarketQuotes(securities);
+        for (const [key, symbol] of symbolByKey.entries()) {
+          const [segment, secId] = key.split(':');
+          const eqData = quotesRes?.data?.[segment]?.[secId];
+          const ltp = eqData?.last_price || eqData?.ohlc?.close || eqData?.average_price || 0;
+          if (ltp > 0) {
+            result[symbol] = Math.round(ltp * 100) / 100;
+          } else {
+            needsYahoo.push(symbol);
+          }
+        }
+      } catch (err) {
+        console.warn('[getCurrentPricesBatch] Dhan batch quote fetch failed, falling back to Yahoo for all:', err);
+        needsYahoo.push(...symbolByKey.values());
+      }
+    }
+  } else {
+    needsYahoo.push(...symbols);
+  }
+
+  // Yahoo has no real batch-quote endpoint in this codebase, so these stay
+  // per-symbol — but parallelized (Promise.allSettled), not a sequential
+  // await-in-a-loop, and only for symbols the Dhan batch call above didn't
+  // already resolve.
+  if (needsYahoo.length > 0) {
+    const yahooResults = await Promise.allSettled(
+      needsYahoo.map(async (symbol) => ({ symbol, quote: await rateLimitedFetch(() => fetchYahooQuote(symbol)) }))
+    );
+    for (const r of yahooResults) {
+      if (r.status === 'fulfilled' && r.value.quote.price > 0) {
+        result[r.value.symbol] = r.value.quote.price;
+      }
+    }
+  }
+
+  return result;
 }
 
 export function getDataProviderStatus(): DataProviderStatus {

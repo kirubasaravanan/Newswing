@@ -23,7 +23,7 @@ export const DEFAULT_STOCKS: StockInfo[] = [
   { symbol: 'LT', name: 'Larsen & Toubro', sector: 'Infrastructure' },
   { symbol: 'WIPRO', name: 'Wipro', sector: 'IT' },
   { symbol: 'AXISBANK', name: 'Axis Bank', sector: 'Banking' },
-  { symbol: 'TATAMOTORS', name: 'Tata Motors', sector: 'Auto' },
+  { symbol: 'TMPV', name: 'Tata Motors Passenger Vehicles', sector: 'Auto' }, // demerged 2025-10-01, continuing entity — see dhan-client.ts
   { symbol: 'BAJFINANCE', name: 'Bajaj Finance', sector: 'Finance' },
   { symbol: 'MARUTI', name: 'Maruti Suzuki', sector: 'Auto' },
   { symbol: 'SUNPHARMA', name: 'Sun Pharma', sector: 'Pharma' },

@@ -99,7 +99,16 @@ export const DHAN_SECURITY_MAP: Record<string, { securityId: string; exchangeSeg
   'LT': { securityId: '11483', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
   'AXISBANK': { securityId: '5900', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
   'BAJFINANCE': { securityId: '317', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
-  'TATAMOTORS': { securityId: '3456', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
+  // Tata Motors demerged (effective 2025-10-01): the ORIGINAL listing (this
+  // security ID, unchanged) was renamed to Tata Motors Passenger Vehicles —
+  // Dhan's own trading symbol for ID 3456 is now "TMPV", not "TATAMOTORS".
+  // A brand-new company (TMCV, security ID 759782, listed 2025-11-12) kept
+  // the "Tata Motors" name going forward but has no price history before
+  // its listing date and — as of this check (2026-07-27) — no F&O contracts
+  // at all yet, so it's equity-only. Verified against the bundled Dhan
+  // scrip master, not guessed. See both entries below.
+  'TMPV': { securityId: '3456', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
+  'TMCV': { securityId: '759782', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
   'MARUTI': { securityId: '10999', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
   'SUNPHARMA': { securityId: '3351', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
   'WIPRO': { securityId: '3787', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
@@ -107,6 +116,22 @@ export const DHAN_SECURITY_MAP: Record<string, { securityId: string; exchangeSeg
   'TATASTEEL': { securityId: '3499', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
   'TITAN': { securityId: '3506', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
   'POWERGRID': { securityId: '14977', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
+
+  // Options TOP-10 proven-symbols basket (options-proven-symbols.ts) — these
+  // were previously MISSING from this map entirely, which (before the
+  // fail-closed fix above) meant every one of them silently pulled NIFTY's
+  // own candle data as "their" VWAP. 7 of the 10 live here; ITC, SUNPHARMA,
+  // AXISBANK were already mapped above. IDs verified against the bundled
+  // Dhan scrip master (db/dhan-scrip-master.csv, NSE/E/EQ rows) — cross-checked
+  // the existing entries above against the same file and they match exactly,
+  // so this file is a trustworthy source, not guessed.
+  'PIDILITIND': { securityId: '2664', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
+  'SOLARINDS': { securityId: '13332', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
+  'CROMPTON': { securityId: '17094', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
+  'BERGEPAINT': { securityId: '404', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
+  'IRCTC': { securityId: '13611', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
+  'VEDL': { securityId: '3063', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
+  'UPL': { securityId: '11287', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY' },
 };
 
 /**
@@ -119,9 +144,15 @@ export async function getDhanHistoricalDaily(
   targetEngine: 'INTRADAY_OPTIONS' | 'EQUITY_SWING' = 'INTRADAY_OPTIONS'
 ) {
   const sec = DHAN_SECURITY_MAP[symbol.toUpperCase()];
-  const securityId = sec ? sec.securityId : '13';
-  const exchangeSegment = sec ? sec.exchangeSegment : 'NSE_EQ';
-  const instrument = sec ? sec.instrument : 'EQUITY';
+  if (!sec) {
+    // Previously defaulted to securityId '13' (NIFTY) under NSE_EQ for any
+    // unmapped symbol — silently fetching a completely different instrument
+    // under the wrong segment and returning it as if it were real data for
+    // `symbol`. Fail closed instead: no data beats wrong data.
+    console.warn(`[DhanClient] getDhanHistoricalDaily: no DHAN_SECURITY_MAP entry for "${symbol}" — returning empty rather than defaulting to NIFTY's security ID.`);
+    return [];
+  }
+  const { securityId, exchangeSegment, instrument } = sec;
 
   const res = await dhanFetch<any>('/charts/historical', 'POST', {
     securityId,
@@ -172,9 +203,15 @@ export async function getDhanIntradayMinuteCandles(
   targetEngine: 'INTRADAY_OPTIONS' | 'EQUITY_SWING' = 'INTRADAY_OPTIONS'
 ): Promise<DhanIntradayCandle[]> {
   const sec = DHAN_SECURITY_MAP[symbol.toUpperCase()];
-  const securityId = sec ? sec.securityId : '13';
-  const exchangeSegment = sec ? sec.exchangeSegment : 'NSE_EQ';
-  const instrument = sec ? sec.instrument : 'EQUITY';
+  if (!sec) {
+    // Same fail-closed fix as getDhanHistoricalDaily above — this is the
+    // path that fed Factor 20 (VWAP) in the live options scanner with
+    // silently-wrong-instrument data for any symbol outside the ~20-symbol
+    // map (dhan-client.ts's own DHAN_SECURITY_MAP).
+    console.warn(`[DhanClient] getDhanIntradayMinuteCandles: no DHAN_SECURITY_MAP entry for "${symbol}" — returning empty rather than defaulting to NIFTY's security ID.`);
+    return [];
+  }
+  const { securityId, exchangeSegment, instrument } = sec;
 
   const res = await dhanFetch<any>('/charts/intraday', 'POST', {
     securityId,

@@ -261,6 +261,40 @@ export async function fetchNSESpotQuote(symbol: string): Promise<NSESpotQuote | 
   };
 }
 
+// ── FII/DII institutional flow ─────────────────────────────────
+// Real "smart money" signal — Forex already has this via real CFTC COT
+// positioning (cot_positioning.py); equity/options had no analogous signal
+// at all. NSE publishes real daily net FII/FPI and DII cash-market flow via
+// the same session-cookie mechanism as the option-chain endpoints above.
+
+export interface FiiDiiFlowEntry {
+  category: 'FII/FPI' | 'DII';
+  date: string; // as NSE reports it, e.g. "27-Jul-2026"
+  buyValueCr: number;
+  sellValueCr: number;
+  netValueCr: number;
+}
+
+/**
+ * Fetch the latest real FII/DII cash-market net flow (in ₹ crore) from NSE.
+ * Returns null if NSE fails — caller should treat missing data as "no
+ * opinion", not assume a neutral/zero flow (same convention as every other
+ * real-data check this session: IV percentile, COT, session anticipation).
+ */
+export async function fetchFiiDiiFlow(): Promise<FiiDiiFlowEntry[] | null> {
+  const data = await fetchNSE<Array<{ category: string; date: string; buyValue: string; sellValue: string; netValue: string }>>(
+    '/api/fiidiiTradeReact'
+  );
+  if (!data || !Array.isArray(data) || data.length === 0) return null;
+  return data.map((d) => ({
+    category: d.category === 'DII' ? 'DII' : 'FII/FPI',
+    date: d.date,
+    buyValueCr: parseFloat(d.buyValue),
+    sellValueCr: parseFloat(d.sellValue),
+    netValueCr: parseFloat(d.netValue),
+  }));
+}
+
 /**
  * Fetch the current India VIX from NSE.
  * Falls back gracefully — not critical for trading.

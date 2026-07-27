@@ -16,7 +16,7 @@
  */
 
 import { dhanFetch, getDhanConfig, DHAN_SECURITY_MAP } from '@/lib/trading/dhan-client';
-import { blackScholes, getOptionLotSize, getDividendYield, getSymbolType, getSettlementType, timeToExpiryYears, INDEX_SYMBOLS } from './black-scholes';
+import { blackScholes, impliedVolatility, getOptionLotSize, getDividendYield, getSymbolType, getSettlementType, timeToExpiryYears, INDEX_SYMBOLS } from './black-scholes';
 import { calculatePCR, calculateMaxPain, type OptionChainRow, type OptionChainResult, type ExpiryInfo } from './option-chain';
 
 import fs from 'fs';
@@ -445,12 +445,29 @@ export async function fetchDhanOptionChain(
       const dist = Math.round(((strike - underlyingPrice) / underlyingPrice) * 10000) / 100;
       const isATM = strike === atmStrike;
 
-      // Greeks calculation via BSM using real Dhan LTP
+      // Real implied volatility, backed out from the REAL Dhan LTP via
+      // Newton-Raphson (impliedVolatility() in black-scholes.ts) — this
+      // function already existed, correctly implemented, but was never
+      // called anywhere in the codebase. Every Greek here (delta especially
+      // — consumed downstream for stop/target sizing in auto-trade/route.ts)
+      // was previously computed off a hardcoded flat 20% vol assumption
+      // regardless of the real market premium, and the `iv` field reported
+      // to the rest of the app (IV-percentile gating, UI) was the same
+      // fabricated 20 for every single strike, every symbol, always.
+      // Falls back to 20% only when the solver can't converge (e.g. a
+      // strike priced below intrinsic value from a stale/crossed quote) —
+      // same fallback the old code used unconditionally.
+      const ceIVResult = T > 0 && ceLtp > 0 ? impliedVolatility(underlyingPrice, strike, T, r, ceLtp, 'CE') : null;
+      const peIVResult = T > 0 && peLtp > 0 ? impliedVolatility(underlyingPrice, strike, T, r, peLtp, 'PE') : null;
+      const ceIVDecimal = ceIVResult?.converged ? ceIVResult.iv : 0.20;
+      const peIVDecimal = peIVResult?.converged ? peIVResult.iv : 0.20;
+
+      // Greeks calculation via BSM using real Dhan LTP and the real IV just solved for
       const ceBS = T > 0 && ceLtp > 0
-        ? blackScholes(underlyingPrice, strike, T, r, 0.20, 'CE', dividendYield)
+        ? blackScholes(underlyingPrice, strike, T, r, ceIVDecimal, 'CE', dividendYield)
         : { delta: 0, gamma: 0, theta: 0, vega: 0 };
       const peBS = T > 0 && peLtp > 0
-        ? blackScholes(underlyingPrice, strike, T, r, 0.20, 'PE', dividendYield)
+        ? blackScholes(underlyingPrice, strike, T, r, peIVDecimal, 'PE', dividendYield)
         : { delta: 0, gamma: 0, theta: 0, vega: 0 };
 
       chain.push({
@@ -459,7 +476,7 @@ export async function fetchDhanOptionChain(
         moneyness: isATM ? 'ATM' : strike < underlyingPrice ? 'ITM' : 'OTM',
         ce: {
           ltp: Math.round(ceLtp * 100) / 100,
-          iv: 20,
+          iv: Math.round(ceIVDecimal * 10000) / 100,
           delta: ceBS.delta,
           gamma: ceBS.gamma,
           theta: ceBS.theta,
@@ -474,7 +491,7 @@ export async function fetchDhanOptionChain(
         },
         pe: {
           ltp: Math.round(peLtp * 100) / 100,
-          iv: 20,
+          iv: Math.round(peIVDecimal * 10000) / 100,
           delta: peBS.delta,
           gamma: peBS.gamma,
           theta: peBS.theta,

@@ -14,8 +14,23 @@
  * trades that closed before this recorder existed.
  */
 import { db } from '@/lib/db';
-import type { OptionsSignal } from './options-scanner';
 import { assessReliability, type ReliabilityTier } from './stat-reliability';
+
+// Structural, not OptionsSignal-specific — equity signals (ScreeningResult)
+// don't share a type with options signals, but both have these 5 fields.
+// This is what makes it possible to wire equity's runScreening() picks into
+// the same recorder/attribution system options already used, instead of
+// equity having no forward-tested per-factor attribution at all (a real gap
+// found while auditing task 13 — rank-bucket-intelligence.ts already tracks
+// win-rate-by-RS-rank for equity, but nothing tracked which of the 6
+// trend/pullback/trigger/volume/RS/gap conditions actually predicts wins).
+export interface RecordableSignal {
+  symbol: string;
+  direction: string;
+  score: number;
+  confidence: number;
+  reasons: string[];
+}
 
 /**
  * Strips dynamic numbers/price levels from a reason string so the same
@@ -32,7 +47,7 @@ export function normalizeFactorKey(reason: string): string {
     .trim();
 }
 
-export async function recordSignal(sig: OptionsSignal, executed: boolean, tradeId?: string): Promise<string | null> {
+export async function recordSignal(sig: RecordableSignal, executed: boolean, tradeId?: string): Promise<string | null> {
   try {
     const rec = await db.signalRecord.create({
       data: {
@@ -105,4 +120,79 @@ export async function getFactorAttribution(): Promise<FactorAttribution[]> {
       };
     })
     .sort((a, b) => b.winRate - a.winRate);
+}
+
+export interface SymbolReputation {
+  symbol: string;
+  totalTrades: number;
+  wins: number;
+  winRate: number;
+  avgPnl: number;
+  effectiveN: number;
+  winRateCI: { lower: number; upper: number };
+  reliabilityTier: ReliabilityTier;
+}
+
+/**
+ * Per-symbol track record — the same reliability math getFactorAttribution()
+ * already uses (Wilson interval + by-day effective-N, stat-reliability.ts),
+ * just grouped by SYMBOL instead of by factor/reason text. This is the real
+ * gap vs ODSS's Conviction DNA (Elo + Bayesian + survivorship per-symbol
+ * reputation): a "does THIS stock tend to perform well when picked,
+ * regardless of which factors fired" question the factor-level attribution
+ * above can't answer on its own. Reuses signalRecord — no new recording
+ * infrastructure needed, this data was already being captured.
+ */
+export async function getSymbolReputation(): Promise<SymbolReputation[]> {
+  const resolved = await db.signalRecord.findMany({ where: { resolved: true } });
+
+  const bySymbol = new Map<string, { count: number; wins: number; totalPnl: number; entryDates: Date[] }>();
+  for (const r of resolved) {
+    const bucket = bySymbol.get(r.symbol) || { count: 0, wins: 0, totalPnl: 0, entryDates: [] };
+    bucket.count++;
+    if (r.win) bucket.wins++;
+    bucket.totalPnl += r.netPnl || 0;
+    bucket.entryDates.push(r.createdAt);
+    bySymbol.set(r.symbol, bucket);
+  }
+
+  return Array.from(bySymbol.entries())
+    .map(([symbol, s]) => {
+      const reliability = assessReliability(s.wins, s.entryDates);
+      return {
+        symbol,
+        totalTrades: s.count,
+        wins: s.wins,
+        winRate: s.count > 0 ? Math.round((s.wins / s.count) * 1000) / 10 : 0,
+        avgPnl: s.count > 0 ? Math.round((s.totalPnl / s.count) * 100) / 100 : 0,
+        effectiveN: reliability.effectiveN,
+        winRateCI: { lower: reliability.effectiveWinRate.lower, upper: reliability.effectiveWinRate.upper },
+        reliabilityTier: reliability.tier,
+      };
+    })
+    .sort((a, b) => b.winRate - a.winRate);
+}
+
+const REPUTATION_MAX_ADJUSTMENT = 15; // points, same scale as the IV-caution penalty
+const REPUTATION_BASELINE_WIN_RATE = 50; // a strategy without edge is ~50% by construction; deviation from this is the signal
+
+/**
+ * Confidence adjustment (-15..+15) for a single symbol, based on its real
+ * resolved track record. Returns null — never a fabricated 0 — until there's
+ * enough independent (by-day) history to say anything (same LOW-tier "no
+ * opinion" convention used everywhere else this session: IV percentile,
+ * COT/CB data, session anticipation).
+ */
+export async function getSymbolReputationAdjustment(symbol: string): Promise<{ adjustment: number; reason: string } | null> {
+  const all = await getSymbolReputation();
+  const row = all.find((r) => r.symbol === symbol);
+  if (!row || row.reliabilityTier === 'LOW') return null;
+  const centerWinRate = (row.winRateCI.lower + row.winRateCI.upper) / 2;
+  const deviation = centerWinRate - REPUTATION_BASELINE_WIN_RATE;
+  // Scale so a +-20pp deviation from baseline reaches the full +-15 adjustment
+  const adjustment = Math.max(-REPUTATION_MAX_ADJUSTMENT, Math.min(REPUTATION_MAX_ADJUSTMENT, (deviation / 20) * REPUTATION_MAX_ADJUSTMENT));
+  const reason = adjustment >= 0
+    ? `${symbol} track record: ${row.winRate}% win rate over ${row.totalTrades} resolved trades (${row.reliabilityTier} confidence)`
+    : `${symbol} track record: ${row.winRate}% win rate over ${row.totalTrades} resolved trades — below baseline (${row.reliabilityTier} confidence)`;
+  return { adjustment: Math.round(adjustment * 10) / 10, reason };
 }

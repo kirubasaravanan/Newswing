@@ -18,14 +18,26 @@
  * script periodically (e.g. quarterly, or after any change to the swing
  * entry rules in screening-engine.ts) and refresh this list by hand, the
  * same way the options top-20-by-PF basket was derived.
+ *
+ * [FIX 2026-07-27] 4 of the original 74 backtested names — EDUCOMP,
+ * ZEELEARN, RSWM, ONMOBILE — were found (checked live against the Dhan
+ * scrip master) to now be trading under restricted trade-to-trade
+ * settlement (series BE/BZ), not standard EQ. T2T means delivery-only
+ * settlement with no intraday netting — materially different mechanics
+ * than this backtest assumed, and not something an automated swing engine
+ * should be trading into blind. Removed rather than silently left in.
+ * See symbol-series-check.ts — REVIEW_RESTRICTED_SYMBOLS below runs this
+ * check against the current list once per day (piggybacking on the same
+ * daily scrip-master refresh dhan-option-provider.ts already does) so this
+ * doesn't silently go stale again.
  */
 export const SWING_PROVEN_SYMBOLS = new Set([
-  'MAZDOCK', 'ZEELEARN', 'EDUCOMP', 'ADANIENT', 'PCJEWELLER', 'TATAELXSI',
+  'MAZDOCK', 'ADANIENT', 'PCJEWELLER', 'TATAELXSI',
   'BOSCHLTD', 'DIXON', 'HINDCOPPER', 'AARTIDRUGS', 'RENUKA', 'MOTILALOFS',
   'THYROCARE', 'LODHA', 'IRFC', 'HONAUT', 'VEDL', 'HAPPSTMNDS', 'SUZLON',
   'ADANIPOWER', 'HDFCAMC', 'BEL', 'SHILPAMED', 'HAL', 'TITAN', 'TRIDENT',
-  'EICHERMOT', 'FLUOROCHEM', 'TRENT', 'RSWM', 'PNB', 'TATAINVEST', 'RVNL',
-  'UNIONBANK', 'ONMOBILE', 'CUMMINSIND', 'SOLARINDS', 'HCLTECH', 'SBIN',
+  'EICHERMOT', 'FLUOROCHEM', 'TRENT', 'PNB', 'TATAINVEST', 'RVNL',
+  'UNIONBANK', 'CUMMINSIND', 'SOLARINDS', 'HCLTECH', 'SBIN',
   'KAJARIACER', 'KALYANKJIL', 'INFY', 'ADANIGREEN', 'SCHNEIDER',
   'NATIONALUM', 'BHEL', 'JYOTHYLAB', 'BEML', 'HEROMOTOCO', 'GREENPOWER',
   'TASTYBITE', 'HINDALCO', 'ITC', 'CANBK', 'DEEPAKNTR', 'IRCON',
@@ -33,6 +45,19 @@ export const SWING_PROVEN_SYMBOLS = new Set([
   'GABRIEL', 'NCC', 'DRREDDY', 'IDFCFIRSTB', 'RELIANCE', 'CDSL', 'RBLBANK',
   'ICICIBANK', 'SOBHA', 'INDIANB', 'DLF', 'VAIBHAVGBL',
 ]);
+
+/**
+ * Symbols removed above so their exclusion reason stays documented and
+ * doesn't get silently lost — also lets the periodic check below report
+ * "still restricted, correctly excluded" vs "was restricted, now clear"
+ * instead of just re-discovering the same thing from scratch each time.
+ */
+export const EXCLUDED_RESTRICTED_SYMBOLS: Record<string, string> = {
+  EDUCOMP: 'Trade-to-trade series BZ as of 2026-07-27',
+  ZEELEARN: 'Trade-to-trade series BE as of 2026-07-27',
+  RSWM: 'Trade-to-trade series BE as of 2026-07-27',
+  ONMOBILE: 'Trade-to-trade series BE as of 2026-07-27',
+};
 
 /**
  * Per-symbol real backtest metrics for the 74 names above — same source

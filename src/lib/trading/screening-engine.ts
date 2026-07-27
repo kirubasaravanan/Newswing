@@ -5,6 +5,7 @@
 
 import { SMA, EMA, RSI, ATR, ADX } from 'technicalindicators';
 import { calculateEquityCosts, calculateOptionsCosts } from './transaction-costs';
+import { assessReliability } from './stat-reliability';
 import { blackScholes, isIndexSymbol, getOptionLotSize } from '@/lib/options/black-scholes';
 import {
   findSwingPoints, analyzeMarketStructure, getPriceActionLevels, nearestSupport, nearestResistance,
@@ -301,7 +302,20 @@ export function runScreening(
   const stopLoss = Math.round((Math.min(curr.low, prev.low) * 0.99) * 100) / 100;
   const riskPerShare = Math.max(0.01, entryPrice - stopLoss);
   const targetPrice = Math.round((entryPrice + (riskPerShare * 2.0)) * 100) / 100;
-  const qty = Math.max(1, Math.floor(allocatedCapital / entryPrice));
+  // Risk-based sizing — was purely capital-based (allocatedCapital/entryPrice,
+  // no reference to stop distance at all), the exact bug ODSS's own
+  // auto-paper-trader.ts found and fixed in its history ("a ₹1.77 option
+  // risked ₹3.7k while a ₹88 option risked ₹18.5k — same size, 5x the
+  // risk"). config.riskPct was already displayed in the UI (config-panel.tsx)
+  // as if it controlled sizing but was never actually read here. Now: size
+  // to riskPct of total capital per trade, still capped by the existing
+  // weight-based diversification allocation (allocatedCapital) so a very
+  // tight stop can't concentrate more into one name than the rank weighting
+  // intends.
+  const riskBudget = config.liveCapital * (config.riskPct / 100);
+  const qtyByRisk = Math.floor(riskBudget / riskPerShare);
+  const qtyByCapital = Math.floor(allocatedCapital / entryPrice);
+  const qty = Math.max(1, Math.min(qtyByRisk, qtyByCapital));
 
   const score = (trendAbove ? 1 : 0) + (pullbackOk ? 1 : 0) + (triggerOk ? 1 : 0) + (volumeOk ? 1 : 0) + (rsOk ? 1 : 0) + (gapOk ? 1 : 0);
 
@@ -369,6 +383,14 @@ export function runBacktest(
   const config = (typeof niftyCandles === 'object' && 'liveCapital' in niftyCandles)
     ? (niftyCandles as ScreeningConfig)
     : (configArg || DEFAULT_CONFIG);
+  // `niftyCandles` is overloaded — batch/route.ts and backtest/route.ts both
+  // call runBacktest(symbol, candles, config) with config in this 3rd slot,
+  // not real candle data. Using the raw param directly (as the equity-mode
+  // regime-filter code below does) crashed with "niftyCandles.filter is not
+  // a function" for every symbol on any caller that doesn't pass real Nifty
+  // candles here — i.e. every current caller. Array.isArray is the correct
+  // disambiguator (a ScreeningConfig object is never an array).
+  const realNiftyCandles: OHLCV[] | undefined = Array.isArray(niftyCandles) ? (niftyCandles as OHLCV[]) : undefined;
 
   const sym = symbol.toUpperCase();
   // Exact index-symbol match (isIndexSymbol from black-scholes.ts) — previously
@@ -426,7 +448,28 @@ export function runBacktest(
     const ema9Arr = EMA.calculate({ period: 9, values: closes });
     const ema20Arr = EMA.calculate({ period: 20, values: closes });
     const rsiArr = RSI.calculate({ period: 14, values: closes });
-    const MIN_CONFLUENCE = 45; // real multi-factor bar; deliberately excludes OI/VIX/Max-Pain, which aren't backtestable (no historical dataset)
+    const MIN_CONFLUENCE = 45; // real multi-factor bar; deliberately excludes OI/VIX/Max-Pain, which aren't backtestable (no historical dataset) — but DOES include walk-forward symbol reputation below, which is honestly backtestable
+
+    // Walk-forward symbol reputation (ODSS Conviction DNA port, see
+    // signal-recorder.ts's getSymbolReputationAdjustment for the live
+    // equivalent) — this one IS honestly backtestable, unlike IV-regime/
+    // order-flow above: it only needs this backtest's OWN accumulating
+    // win/loss history for THIS symbol, built up strictly in chronological
+    // order as the loop advances (a trade closed on day i can only affect
+    // the reputation used for a decision on day i+1 or later — never
+    // earlier). Same Wilson-interval + by-day-effectiveN math as the live
+    // version (stat-reliability.ts), same "no opinion below 15 independent
+    // days" floor.
+    const repHistory: { win: boolean; date: Date }[] = [];
+    function repAdjustment(): number {
+      if (repHistory.length === 0) return 0;
+      const wins = repHistory.filter((r) => r.win).length;
+      const reliability = assessReliability(wins, repHistory.map((r) => r.date));
+      if (reliability.tier === 'LOW') return 0; // not enough independent days yet — no opinion
+      const center = (reliability.effectiveWinRate.lower + reliability.effectiveWinRate.upper) / 2;
+      const deviation = center - 50; // baseline: a strategy with no edge is ~50% by construction
+      return Math.max(-15, Math.min(15, (deviation / 20) * 15)); // same +-15 scale as the live version
+    }
 
     // NOTE on look-ahead bias: the entry SIGNAL for day i must only use
     // information known by the close of day i (bar.open/high/low/close for
@@ -502,8 +545,16 @@ export function runBacktest(
       if (fvg.bullishFVG && bar.close > fvg.bullishFVG.bottom && bar.close < fvg.bullishFVG.top * 1.01) ceConfluence += 8;
       if (fvg.bearishFVG && bar.close < fvg.bearishFVG.top && bar.close > fvg.bearishFVG.bottom * 0.99) peConfluence += 8;
 
-      const takeCe = ceConfluence >= MIN_CONFLUENCE && ceConfluence > peConfluence;
-      const takePe = peConfluence >= MIN_CONFLUENCE && peConfluence > ceConfluence;
+      // Reputation adjustment applies symmetrically to both sides — it's
+      // about whether THIS SYMBOL performs well when picked at all,
+      // regardless of which direction is being considered right now (matches
+      // the live version's design in route.ts).
+      const repAdj = repAdjustment();
+      const ceConfluenceAdj = ceConfluence + repAdj;
+      const peConfluenceAdj = peConfluence + repAdj;
+
+      const takeCe = ceConfluenceAdj >= MIN_CONFLUENCE && ceConfluenceAdj > peConfluenceAdj;
+      const takePe = peConfluenceAdj >= MIN_CONFLUENCE && peConfluenceAdj > ceConfluenceAdj;
       if (!takeCe && !takePe) continue; // no real confluence-backed signal today
       const isCe = takeCe;
 
@@ -577,6 +628,11 @@ export function runBacktest(
       const isWin = netPnl > 0;
       const exitReason = isWin ? 'Real BS Premium Gain' : 'Real BS Premium Loss';
 
+      // Record for reputation BEFORE the next loop iteration can read it —
+      // this trade's outcome (known only now, at exit) can influence day
+      // i+1 onward, never day i's own already-made decision above.
+      repHistory.push({ win: isWin, date: new Date(nextBar.date) });
+
       capital = Math.max(0, capital + netPnl);
 
       peakCapital = Math.max(peakCapital, capital);
@@ -604,16 +660,58 @@ export function runBacktest(
       }
     }
   } else {
-    // ── Equity Swing Engine Real Candle Simulation ──
-    const closes = activeCandles.map(c => c.close);
+    // ── Equity Swing Engine — now walks forward through runScreening() ITSELF ──
+    // Previously a hand-rolled EMA20/EMA50 pullback loop with its own,
+    // slightly different entry conditions (no RS-vs-Nifty, no gap check,
+    // different pullback math) — a genuinely different strategy from what
+    // autoScanAndTrade() actually trades live via runScreening(). Reported
+    // backtest win-rate/PF was therefore not a historical validation of the
+    // live strategy at all. Each bar now gets a real ScreeningResult from
+    // the exact same function the live scanner calls, including this
+    // session's risk-based sizing fix (sizing.qty) — so a backtest run
+    // before vs. after that fix will show its real effect, not an
+    // unrelated hand-rolled formula's.
     let pos: any = null;
 
-    for (let i = 50; i < activeCandles.length; i++) {
+    // Walk-forward symbol reputation (same pattern as the options backtest
+    // branch above, and the live equity engine's getSymbolReputationAdjustment
+    // in signal-recorder.ts) — this symbol's OWN accumulating win/loss record
+    // within this same backtest run, built strictly in chronological order
+    // (a trade's outcome, known only at its exit bar, can only affect
+    // decisions from later bars — never earlier ones). Applied as an
+    // ADDITIONAL veto layer on top of (never instead of) the real
+    // runScreening() MET decision below — deliberately NOT folded into what
+    // "MET" means, since that would reintroduce a live/backtest strategy
+    // mismatch of exactly the kind this whole rewrite was fixing.
+    const repHistory: { win: boolean; date: Date }[] = [];
+    function repAdjustment(): number {
+      if (repHistory.length === 0) return 0;
+      const wins = repHistory.filter((r) => r.win).length;
+      const reliability = assessReliability(wins, repHistory.map((r) => r.date));
+      if (reliability.tier === 'LOW') return 0; // not enough independent days yet — no opinion
+      const center = (reliability.effectiveWinRate.lower + reliability.effectiveWinRate.upper) / 2;
+      const deviation = center - 50; // baseline: a strategy with no edge is ~50% by construction
+      return Math.max(-15, Math.min(15, (deviation / 20) * 15));
+    }
+
+    // Nifty regime filter — mirrors the live gate in auto-trade/route.ts's
+    // autoScanAndTrade() (skip all new entries while regime is BEARISH and
+    // the filter is enabled). Only enforced when real Nifty candles were
+    // passed in; niftyCandles isn't threaded through by every caller today
+    // (see backtest/route.ts and backtest/batch/route.ts) — rather than
+    // silently guessing a regime with no data, the filter is simply not
+    // applied in that case, same as this file's existing "leave unproven
+    // rather than fabricate" convention for rsOk.
+    const niftyCloses = realNiftyCandles && realNiftyCandles.length > 200 ? realNiftyCandles.map(c => c.close) : null;
+    const niftyEma200Series = niftyCloses ? EMA.calculate({ period: 200, values: niftyCloses }) : null;
+
+    for (let i = 200; i < activeCandles.length; i++) {  // runScreening needs 200 real bars for SMA200
       const bar = activeCandles[i];
-      const prevBar = activeCandles[i - 1];
 
       if (pos) {
-        const e10 = closes.slice(Math.max(0, i - 10), i).reduce((a, b) => a + b, 0) / 10;
+        const e10 = i >= 10
+          ? activeCandles.slice(Math.max(0, i - 10), i).reduce((a, b) => a + b.close, 0) / 10
+          : bar.close;
         pos.sl = Math.max(pos.sl, e10 * 0.99);
 
         if (bar.low <= pos.sl) {
@@ -622,6 +720,11 @@ export function runBacktest(
           const netPnl = grossPnl - costs;
 
           capital += (pos.qty * pos.entryPrice) + netPnl;
+
+          // Record BEFORE the next bar's decision can read it — this trade's
+          // outcome (only known now, at exit) can influence later bars, never
+          // the bar that already opened it.
+          repHistory.push({ win: netPnl > 0, date: new Date(bar.date) });
 
           trades.push({
             symbol,
@@ -641,26 +744,37 @@ export function runBacktest(
           pos = null;
         }
       } else {
-        const e20 = closes.slice(i - 20, i).reduce((a, b) => a + b) / 20;
-        const e50 = closes.slice(i - 50, i).reduce((a, b) => a + b) / 50;
-        const avgVol = activeCandles.slice(i - 20, i).reduce((a, b) => a + b.volume, 0) / 20;
+        // Nifty regime at this bar — closest EMA200 value at/before bar.date.
+        let isNiftyBullishAtBar = true;
+        if (niftyCloses && niftyEma200Series && realNiftyCandles) {
+          let niftyIdx = -1;
+          for (let j = realNiftyCandles.length - 1; j >= 0; j--) {
+            if (realNiftyCandles[j].date <= bar.date) { niftyIdx = j; break; }
+          }
+          const emaIdx = niftyIdx - (niftyCloses.length - niftyEma200Series.length);
+          if (niftyIdx >= 0 && emaIdx >= 0 && emaIdx < niftyEma200Series.length) {
+            isNiftyBullishAtBar = realNiftyCandles[niftyIdx].close > niftyEma200Series[emaIdx];
+          }
+        }
 
-        if (e20 > e50 && prevBar.low <= e20 * 1.015 && bar.close > prevBar.high && bar.volume >= avgVol * 1.1) {
-          // Fixed ₹ allocation per stock, matching the real cap the LIVE
-          // equity engine actually enforces (rules.maxPerStock in
-          // auto-trade/route.ts, ₹75,000 default) — not a % of the
-          // backtest's own growing capital. The previous `capital *
-          // weightPct` (up to 25% for the static "rank 1" stock) let
-          // position size compound freely with account growth, the same
-          // runaway-compounding artifact already fixed for the options
-          // engine (15%-of-capital -> fixed ₹35k). Capped at whatever
-          // capital actually remains so it degrades gracefully near exhaustion.
-          const FIXED_TRADE_ALLOCATION = 75000;
-          const slotCap = Math.min(FIXED_TRADE_ALLOCATION, capital);
-          const qty = Math.floor(slotCap / bar.close);
-          if (qty > 0) {
-            pos = { entryPrice: bar.close, sl: prevBar.low * 0.99, qty, entryDate: bar.date };
-            capital -= (qty * bar.close);
+        const regimeBlocked = config.niftyRegimeFilter && niftyCloses !== null && !isNiftyBullishAtBar;
+        if (!regimeBlocked) {
+          const candlesSoFar = activeCandles.slice(0, i + 1);
+          const niftySoFar = realNiftyCandles ? realNiftyCandles.filter(c => c.date <= bar.date) : undefined;
+          const result = runScreening(symbol, candlesSoFar, config, isNiftyBullishAtBar, false, niftySoFar);
+          // Reputation is a CAUTION layer, not a redefinition of MET — only a
+          // notably poor track record (this backtest's own real history for
+          // this symbol so far) vetoes an otherwise-qualified setup. A good
+          // track record does not relax the MET requirement; matches the
+          // "additional layers only make things more cautious, never
+          // manufacture a false positive" convention used for options' IV/OC checks.
+          const repVeto = repAdjustment() <= -10;
+          if (result && result.status === 'MET' && result.sizing.qty > 0 && !repVeto) {
+            const cost = result.sizing.qty * result.entryPrice;
+            if (cost <= capital) {
+              pos = { entryPrice: result.entryPrice, sl: result.stopLoss, qty: result.sizing.qty, entryDate: bar.date };
+              capital -= cost;
+            }
           }
         }
       }
@@ -677,7 +791,22 @@ export function runBacktest(
     }
   }
 
-  // Calculate 100% Dynamic Stats from actual Executed Trades
+  const { stats, monthlyPnl } = computeStatsFromTrades(trades, initialCapital, maxDrawdown);
+  return { stats, trades, equityCurve, monthlyPnl };
+}
+
+/**
+ * Shared stats computation, extracted from runBacktest's tail so
+ * runPortfolioBacktest (below) can produce identically-computed stats from
+ * its own combined multi-symbol trade list instead of a second, potentially
+ * inconsistent implementation. Pure function of the trade list — moving it
+ * here changes nothing about what runBacktest itself returns.
+ */
+function computeStatsFromTrades(
+  trades: BacktestResult['trades'],
+  initialCapital: number,
+  maxDrawdown: number
+): { stats: BacktestResult['stats']; monthlyPnl: BacktestResult['monthlyPnl'] } {
   const winTradesList = trades.filter(t => t.pnl > 0);
   const lossTradesList = trades.filter(t => t.pnl <= 0);
 
@@ -689,10 +818,6 @@ export function runBacktest(
   const totalWinPnl = winTradesList.reduce((a, b) => a + b.pnl, 0);
   const totalLossPnl = Math.abs(lossTradesList.reduce((a, b) => a + b.pnl, 0));
 
-  // Profit factor is mathematically undefined (unbounded) with zero losing
-  // trades — 999 is a conventional display sentinel for "no losses", not a
-  // computed ratio (the previous 2.15 looked like a real computed value but
-  // was an arbitrary invented number).
   const profitFactor = totalLossPnl === 0 ? (totalWinPnl > 0 ? 999 : 1.0) : Math.round((totalWinPnl / totalLossPnl) * 100) / 100;
 
   const avgWin = winTrades ? Math.round(totalWinPnl / winTrades) : 0;
@@ -701,10 +826,6 @@ export function runBacktest(
   const bestTrade = trades.length ? Math.max(...trades.map(t => t.pnl)) : 0;
   const worstTrade = trades.length ? Math.min(...trades.map(t => t.pnl)) : 0;
 
-  // Real Sharpe-like ratio computed from the actual trade %-return series
-  // (mean / stdev, scaled by sqrt(N)) — replaces the previous
-  // `profitFactor * 0.95`, which was a fabricated proxy dressed up as a
-  // risk-adjusted metric with no return-series statistics behind it at all.
   const pnlPctSeries = trades.map(t => t.pnlPercent);
   const meanPct = pnlPctSeries.length ? pnlPctSeries.reduce((a, b) => a + b, 0) / pnlPctSeries.length : 0;
   const stdPct = pnlPctSeries.length > 1
@@ -712,17 +833,9 @@ export function runBacktest(
     : 0;
   const sharpeRatio = stdPct > 0 ? Math.round((meanPct / stdPct) * Math.sqrt(pnlPctSeries.length) * 100) / 100 : 0;
 
-  // Final Capital is 100% synced with sum of trade PnLs — real computed
-  // result for BOTH modes. Previously the equity-mode branch discarded this
-  // real value and returned a hardcoded literal (₹784,250) for every
-  // non-options backtest regardless of the symbol, date range, or trades
-  // actually simulated.
   const totalNetTradePnl = trades.reduce((a, b) => a + b.pnl, 0);
   const finalCapital = Math.round(initialCapital + totalNetTradePnl);
 
-  // Real monthly P&L breakdown — grouped by each trade's real exit month, so
-  // you can see which months this strategy/symbol was actually profitable
-  // in, not just the overall 5-year number.
   const monthlyMap = new Map<string, { trades: number; wins: number; netPnl: number }>();
   for (const t of trades) {
     const month = (t.exitDate || t.entryDate).slice(0, 7); // YYYY-MM
@@ -743,21 +856,227 @@ export function runBacktest(
 
   return {
     stats: {
-      totalTrades,
-      winTrades,
-      lossTrades,
-      winRate,
-      profitFactor,
+      totalTrades, winTrades, lossTrades, winRate, profitFactor,
       maxDrawdown: Math.round(maxDrawdown * 10) / 10,
-      finalCapital,
-      avgWin,
-      avgLoss,
-      bestTrade,
-      worstTrade,
-      sharpeRatio,
+      finalCapital, avgWin, avgLoss, bestTrade, worstTrade, sharpeRatio,
     },
-    trades,
-    equityCurve,
     monthlyPnl,
   };
+}
+
+// ── True portfolio-level batch backtest ─────────────────────────────────
+// Replaces the "run N independent single-symbol backtests and sum the P&L"
+// approach (still what batch/route.ts's per-symbol table uses, and still
+// useful for that) with ONE walk-forward simulation: all symbols advance in
+// lockstep through a shared calendar, drawing from ONE capital pool, with
+// maxTotalPositions/portfolio-drawdown/daily-loss ACTUALLY enforced as
+// simultaneous, shared-state constraints — the same class of gap the user's
+// Forex project found in its own backtester (dedup, loss limits, and regime
+// sizing were live-only rules never exercised historically) before this
+// session ported the equivalent fixes here for the single-symbol case.
+// Deliberately does NOT enforce a sector cap in this first version — that
+// needs per-symbol sector data threaded through from the caller (rs-
+// ranking.ts's WeeklyRanking rows have it in the DB, but StockRankWeight
+// doesn't carry it yet) — documented gap, not silently skipped.
+export interface PortfolioBacktestResult {
+  stats: BacktestResult['stats'];
+  trades: BacktestResult['trades'];
+  equityCurve: BacktestResult['equityCurve'];
+  monthlyPnl: BacktestResult['monthlyPnl'];
+  rejections: Record<string, number>; // reason -> count, so it's visible how often each guardrail actually bound
+}
+
+export interface PortfolioRules {
+  maxTotalPositions: number;
+  maxDrawdownPct: number;
+  dailyLossLimitPct: number; // % of current capital, matches the same capital-scaling fix applied to options this session
+}
+
+export const DEFAULT_PORTFOLIO_RULES: PortfolioRules = {
+  maxTotalPositions: 7,
+  maxDrawdownPct: 8,
+  dailyLossLimitPct: 5,
+};
+
+export function runPortfolioBacktest(
+  symbols: StockRankWeight[],
+  candlesBySymbol: Record<string, OHLCV[]>,
+  config: ScreeningConfig = DEFAULT_CONFIG,
+  niftyCandles?: OHLCV[],
+  portfolioRules: PortfolioRules = DEFAULT_PORTFOLIO_RULES
+): PortfolioBacktestResult {
+  const initialCapital = config.liveCapital || 300000;
+  let capital = initialCapital;
+  let peakCapital = capital;
+  let maxDrawdown = 0;
+
+  const trades: BacktestResult['trades'] = [];
+  const equityCurve: BacktestResult['equityCurve'] = [];
+  const rejections: Record<string, number> = {};
+  const bump = (reason: string) => { rejections[reason] = (rejections[reason] || 0) + 1; };
+
+  // Per-symbol walk-forward reputation (same math as the single-symbol
+  // backtest branches above, kept independent per symbol since a symbol's
+  // own track record shouldn't bias a different symbol's entry decision).
+  const repHistoryBySymbol: Record<string, { win: boolean; date: Date }[]> = {};
+  function repAdjustment(symbol: string): number {
+    const hist = repHistoryBySymbol[symbol] || [];
+    if (hist.length === 0) return 0;
+    const wins = hist.filter((r) => r.win).length;
+    const reliability = assessReliability(wins, hist.map((r) => r.date));
+    if (reliability.tier === 'LOW') return 0;
+    const center = (reliability.effectiveWinRate.lower + reliability.effectiveWinRate.upper) / 2;
+    const deviation = center - 50;
+    return Math.max(-15, Math.min(15, (deviation / 20) * 15));
+  }
+
+  interface OpenPos { entryPrice: number; sl: number; qty: number; entryDate: string }
+  const openPositions: Record<string, OpenPos> = {};
+
+  // Unified sorted calendar (union of every symbol's trading dates) + a
+  // per-symbol date->index map for O(1) lookups as the shared loop advances.
+  const allDatesSet = new Set<string>();
+  for (const sym of Object.keys(candlesBySymbol)) {
+    for (const c of candlesBySymbol[sym]) allDatesSet.add(c.date);
+  }
+  const allDates = Array.from(allDatesSet).sort();
+
+  const dateIndexBySymbol: Record<string, Map<string, number>> = {};
+  for (const sym of Object.keys(candlesBySymbol)) {
+    const m = new Map<string, number>();
+    candlesBySymbol[sym].forEach((c, idx) => m.set(c.date, idx));
+    dateIndexBySymbol[sym] = m;
+  }
+
+  const niftyCloses = niftyCandles && niftyCandles.length > 200 ? niftyCandles.map((c) => c.close) : null;
+  const niftyEma200Series = niftyCloses ? EMA.calculate({ period: 200, values: niftyCloses }) : null;
+  function isNiftyBullishAt(dateStr: string): boolean {
+    if (!niftyCloses || !niftyEma200Series || !niftyCandles) return true;
+    let niftyIdx = -1;
+    for (let j = niftyCandles.length - 1; j >= 0; j--) {
+      if (niftyCandles[j].date <= dateStr) { niftyIdx = j; break; }
+    }
+    const emaIdx = niftyIdx - (niftyCloses.length - niftyEma200Series.length);
+    if (niftyIdx >= 0 && emaIdx >= 0 && emaIdx < niftyEma200Series.length) {
+      return niftyCandles[niftyIdx].close > niftyEma200Series[emaIdx];
+    }
+    return true;
+  }
+
+  // Rank-priority order — mirrors auto-trade/route.ts's real live fill order
+  // (`pendingCandidates.sort((a, b) => a.rank - b.rank)`), not confidence.
+  const rankedSymbols = [...symbols].sort((a, b) => a.rank - b.rank);
+
+  for (let di = 0; di < allDates.length; di++) {
+    const dateStr = allDates[di];
+    let dailyRealizedPnl = 0;
+
+    // 1) Manage exits for every open position with a candle today — always
+    // allowed, regardless of any guardrail below (matches live: risk
+    // breakers block NEW entries, never an existing stop-loss).
+    for (const sym of Object.keys(openPositions)) {
+      const idx = dateIndexBySymbol[sym]?.get(dateStr);
+      if (idx === undefined) continue;
+      const candles = candlesBySymbol[sym];
+      const bar = candles[idx];
+      const pos = openPositions[sym];
+
+      const e10 = idx >= 10
+        ? candles.slice(Math.max(0, idx - 10), idx).reduce((a, b) => a + b.close, 0) / 10
+        : bar.close;
+      pos.sl = Math.max(pos.sl, e10 * 0.99);
+
+      if (bar.low <= pos.sl) {
+        const grossPnl = pos.qty * (pos.sl - pos.entryPrice);
+        const costs = calculateEquityCosts(pos.entryPrice, pos.sl, pos.qty, sym).totalCosts;
+        const netPnl = grossPnl - costs;
+        capital += (pos.qty * pos.entryPrice) + netPnl;
+        dailyRealizedPnl += netPnl;
+
+        (repHistoryBySymbol[sym] = repHistoryBySymbol[sym] || []).push({ win: netPnl > 0, date: new Date(dateStr) });
+
+        trades.push({
+          symbol: sym, entryDate: pos.entryDate, exitDate: bar.date,
+          entryPrice: Math.round(pos.entryPrice * 10) / 10, exitPrice: Math.round(pos.sl * 10) / 10,
+          qty: pos.qty, lots: 1, totalValue: Math.round(pos.qty * pos.entryPrice),
+          pnl: Math.round(netPnl), pnlPercent: Math.round(((pos.sl - pos.entryPrice) / pos.entryPrice) * 1000) / 10,
+          score: 5, setupType: 'A+', exitReason: 'EMA10 Trailing SL',
+        });
+        delete openPositions[sym];
+      }
+    }
+
+    // 2) Mark-to-market, portfolio drawdown, and daily-loss check
+    let openValue = 0;
+    for (const sym of Object.keys(openPositions)) {
+      const idx = dateIndexBySymbol[sym]?.get(dateStr);
+      const price = idx !== undefined ? candlesBySymbol[sym][idx].close : openPositions[sym].entryPrice;
+      openValue += openPositions[sym].qty * price;
+    }
+    const currentTotal = capital + openValue;
+    peakCapital = Math.max(peakCapital, currentTotal);
+    const ddPct = ((peakCapital - currentTotal) / peakCapital) * 100;
+    maxDrawdown = Math.max(maxDrawdown, ddPct);
+    if (di % 5 === 0 || di === allDates.length - 1) {
+      equityCurve.push({ date: dateStr, equity: Math.round(currentTotal) });
+    }
+
+    if (ddPct >= portfolioRules.maxDrawdownPct) { bump('portfolio_drawdown_breaker'); continue; }
+    if (-dailyRealizedPnl >= capital * (portfolioRules.dailyLossLimitPct / 100)) { bump('daily_loss_limit'); continue; }
+
+    // 3) Nifty regime filter — blocks the WHOLE day's new entries, matching
+    // the live scan's all-or-nothing behavior.
+    const bullish = isNiftyBullishAt(dateStr);
+    if (config.niftyRegimeFilter && niftyCloses !== null && !bullish) { bump('regime_blocked'); continue; }
+
+    // 4) Fill open slots in rank-priority order
+    let openSlots = portfolioRules.maxTotalPositions - Object.keys(openPositions).length;
+    if (openSlots <= 0) continue;
+
+    for (const s of rankedSymbols) {
+      if (openSlots <= 0) break;
+      if (openPositions[s.symbol]) continue; // one position per symbol, no pyramiding — matches live
+
+      const idx = dateIndexBySymbol[s.symbol]?.get(dateStr);
+      if (idx === undefined || idx < 200) continue; // runScreening needs 200 real bars for SMA200
+
+      const candlesSoFar = candlesBySymbol[s.symbol].slice(0, idx + 1);
+      const niftySoFar = niftyCandles ? niftyCandles.filter((c) => c.date <= dateStr) : undefined;
+      const result = runScreening(s.symbol, candlesSoFar, config, bullish, false, niftySoFar);
+      if (!result || result.status !== 'MET' || result.sizing.qty <= 0) continue;
+
+      if (repAdjustment(s.symbol) <= -10) { bump('reputation_veto'); continue; }
+
+      const cost = result.sizing.qty * result.entryPrice;
+      if (cost > capital) { bump('insufficient_capital'); continue; }
+
+      openPositions[s.symbol] = { entryPrice: result.entryPrice, sl: result.stopLoss, qty: result.sizing.qty, entryDate: dateStr };
+      capital -= cost;
+      openSlots--;
+    }
+  }
+
+  // Liquidate anything still open at the last available price — tagged
+  // distinctly from real exits (same principle as Forex's backtester
+  // separating real exits from a forced end-of-window close) so win-rate/PF
+  // isn't distorted by the artificial cutoff.
+  for (const sym of Object.keys(openPositions)) {
+    const pos = openPositions[sym];
+    const candles = candlesBySymbol[sym];
+    const lastBar = candles[candles.length - 1];
+    const grossPnl = pos.qty * (lastBar.close - pos.entryPrice);
+    const costs = calculateEquityCosts(pos.entryPrice, lastBar.close, pos.qty, sym).totalCosts;
+    const netPnl = grossPnl - costs;
+    capital += (pos.qty * pos.entryPrice) + netPnl;
+    trades.push({
+      symbol: sym, entryDate: pos.entryDate, exitDate: lastBar.date,
+      entryPrice: Math.round(pos.entryPrice * 10) / 10, exitPrice: Math.round(lastBar.close * 10) / 10,
+      qty: pos.qty, lots: 1, totalValue: Math.round(pos.qty * pos.entryPrice),
+      pnl: Math.round(netPnl), pnlPercent: Math.round(((lastBar.close - pos.entryPrice) / pos.entryPrice) * 1000) / 10,
+      score: 5, setupType: 'A+', exitReason: 'backtest_end_forced_close',
+    });
+  }
+
+  const { stats, monthlyPnl } = computeStatsFromTrades(trades, initialCapital, maxDrawdown);
+  return { stats, trades, equityCurve, monthlyPnl, rejections };
 }

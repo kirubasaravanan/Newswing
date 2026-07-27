@@ -48,7 +48,7 @@ const PROFILES: Record<string, StockProfile> = {
   'LT':           { symbol: 'LT', name: 'Larsen & Toubro', sector: 'Infrastructure', basePrice: 3650, volatility: 0.016, trendBias: 0.0002 },
   'WIPRO':        { symbol: 'WIPRO', name: 'Wipro', sector: 'IT', basePrice: 560, volatility: 0.016, trendBias: 0.0000 },
   'AXISBANK':     { symbol: 'AXISBANK', name: 'Axis Bank', sector: 'Banking', basePrice: 1180, volatility: 0.017, trendBias: 0.0002 },
-  'TATAMOTORS':   { symbol: 'TATAMOTORS', name: 'Tata Motors', sector: 'Auto', basePrice: 980, volatility: 0.022, trendBias: 0.0004 },
+  'TMPV':   { symbol: 'TMPV', name: 'Tata Motors Passenger Vehicles', sector: 'Auto', basePrice: 980, volatility: 0.022, trendBias: 0.0004 },
   'BAJFINANCE':   { symbol: 'BAJFINANCE', name: 'Bajaj Finance', sector: 'Finance', basePrice: 7400, volatility: 0.020, trendBias: 0.0003 },
   'MARUTI':       { symbol: 'MARUTI', name: 'Maruti Suzuki', sector: 'Auto', basePrice: 12800, volatility: 0.016, trendBias: 0.0002 },
   'SUNPHARMA':    { symbol: 'SUNPHARMA', name: 'Sun Pharma', sector: 'Pharma', basePrice: 1780, volatility: 0.015, trendBias: 0.0002 },
