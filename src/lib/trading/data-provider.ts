@@ -20,8 +20,23 @@ const SYMBOL_MAP: Record<string, string> = {
   'NIFTY': '^NSEI',
   'NIFTY50': '^NSEI',
   'BANKNIFTY': '^NSEBANK',
-  'FINNIFTY': '^CNXFIN',
-  'NIFTYMIDCAP': '^CNXMIDCAP',
+  // [FIX 2026-07-28] '^CNXFIN' was returning "Insufficient data: 1 candle"
+  // on every real scan today — that ticker now resolves to a dated futures
+  // contract ("NIFTY FINSRV25 50"), not the continuous index. Verified live
+  // against Yahoo's chart API before swapping: NIFTY_FIN_SERVICE.NS returns
+  // real current data (₹26,089.80, real 52-week range).
+  'FINNIFTY': 'NIFTY_FIN_SERVICE.NS',
+  // [FIX 2026-07-28] Was keyed 'NIFTYMIDCAP', but every other place in this
+  // codebase (DHAN_SECURITY_MAP, the options backtest's INDICES set) uses
+  // 'MIDCPNIFTY' — the key mismatch meant this entry was never actually
+  // looked up, silently falling through to the broken default
+  // 'MIDCPNIFTY.NS' (real 404 on Yahoo, confirmed live today). Also swapped
+  // the value: MIDCPNIFTY options are based on the "Nifty Midcap SELECT"
+  // index specifically, not the more common "Nifty Midcap 100/150" — the
+  // old '^CNXMIDCAP' value was the wrong index variant regardless of the
+  // key bug. Verified live: NIFTY_MID_SELECT.NS returns real current data
+  // (₹14,588.95, real 52-week range).
+  'MIDCPNIFTY': 'NIFTY_MID_SELECT.NS',
   // NSE symbols that differ from Yahoo Finance symbols
   'BAJAJAUTO': 'BAJAJ-AUTO.NS',
   'M&M': 'M&M.NS',
@@ -303,6 +318,7 @@ export async function getHistoricalData(
       if (Array.isArray(dhanCandles) && dhanCandles.length > 0) {
         console.log(`[HISTORICAL DATA] Loaded ${dhanCandles.length} real candles for ${symbol} from DhanHQ Broker API`);
         historicalCache.set(cacheKey, { data: dhanCandles, fetchedAt: Date.now() });
+        symbolFailures.delete(symbol); // Reset Yahoo circuit breaker — a Dhan success means the symbol is fine
         return { data: dhanCandles, source: 'dhan' as any };
       }
     } catch (err) {

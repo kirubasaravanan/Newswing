@@ -24,7 +24,8 @@ import { runScreening, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/tradin
 import { getHistoricalData, getCurrentPrice, getContractCurrentPrice } from '@/lib/trading/data-provider';
 import { getFullUniverse, runL1Filter, type NSEStock } from '@/lib/trading/universe-scanner';
 import { isNseTradingHoliday } from '@/lib/trading/market-hours';
-import { scanOptionsUniverse, type OptionsSignal, SNIPER_MIN_SCORE, SNIPER_MIN_CONFIDENCE, INDEX_SYMBOLS } from '@/lib/trading/options-scanner';
+import { scanOptionsUniverse, rescoreForExit, type OptionsSignal, SNIPER_MIN_SCORE, SNIPER_MIN_CONFIDENCE, INDEX_SYMBOLS } from '@/lib/trading/options-scanner';
+import { recordShadowOptionSignals, checkShadowOptionExits } from '@/lib/trading/shadow-options';
 import { convertToPremiumTargets } from '@/lib/trading/market-structure';
 import { recordSignal, resolveSignalByTradeId, getSymbolReputationAdjustment } from '@/lib/trading/signal-recorder';
 import { checkIndiaEventBlackout } from '@/lib/trading/india-event-calendar';
@@ -65,6 +66,7 @@ interface PositionRules {
   partialBookPct: number;
   cooldownDays: number;
   maxSectorPct: number;
+  maxPerSectorCount: number;       // Max concurrent open equity positions sharing the same sector — count-based, alongside maxSectorPct's capital-based cap. Mirrors optMaxPerSector's precedent on the options side (2026-07-28): capital % and position count measure different things — a stock using a wide stop can eat 30% of maxSectorPct in one position, while 2 tight-stop stocks in the same sector might together be only 10% yet represent the same correlated-sector-shock exposure as options' 2-position cap already guards against.
   timeExitMins: number;
   // v2 additions
   maxDrawdownPct: number;          // Halt entries if portfolio drawdown exceeds this %
@@ -97,8 +99,9 @@ const DEFAULT_RULES: PositionRules = {
   trailToR: 0.5, 
   partialBookR: 2.0, 
   partialBookPct: 30,
-  cooldownDays: 1, 
-  maxSectorPct: 35, 
+  cooldownDays: 1,
+  maxSectorPct: 35,
+  maxPerSectorCount: 2,             // same value as options' optMaxPerSector — precedented, not arbitrary
   timeExitMins: 30,
   // Dual-Broker Risk Controls
   maxDrawdownPct: 8,               // 8% max drawdown circuit breaker
@@ -251,6 +254,7 @@ async function getRules(): Promise<PositionRules> {
       partialBookPct: parseFloat(m['rules_partialBookPct'] || '') || DEFAULT_RULES.partialBookPct,
       cooldownDays: parseInt(m['rules_cooldownDays'] || '') || DEFAULT_RULES.cooldownDays,
       maxSectorPct: parseFloat(m['rules_maxSectorPct'] || '') || DEFAULT_RULES.maxSectorPct,
+      maxPerSectorCount: parseInt(m['rules_maxPerSectorCount'] || '') || DEFAULT_RULES.maxPerSectorCount,
       timeExitMins: parseInt(m['rules_timeExitMins'] || '') || DEFAULT_RULES.timeExitMins,
       // v2 rules
       maxDrawdownPct: parseFloat(m['rules_maxDrawdownPct'] || '') || DEFAULT_RULES.maxDrawdownPct,
@@ -485,6 +489,19 @@ async function getSectorAllocation(): Promise<Record<string, number>> {
   return pct;
 }
 
+// Count-based companion to getSectorAllocation()'s capital-% view — see
+// maxPerSectorCount's comment on PositionRules for why both are needed.
+async function getSectorPositionCounts(): Promise<Record<string, number>> {
+  const open = await db.paperTrade.findMany({ where: { status: 'OPEN' } });
+  const counts: Record<string, number> = {};
+  for (const t of open) {
+    const ws = await db.watchlistStock.findUnique({ where: { symbol: t.symbol } });
+    const sector = ws?.sector || t.tags?.split(',').find((tag: string) => !['auto','aplus','b','partial-booked'].includes(tag)) || 'Unknown';
+    counts[sector] = (counts[sector] || 0) + 1;
+  }
+  return counts;
+}
+
 // ── v2: Drawdown & Circuit Breaker ─────────────────────
 async function getPortfolioDrawdown(): Promise<{ drawdownPct: number; peakCapital: number; currentCapital: number }> {
   const w = await getWallet();
@@ -651,13 +668,26 @@ async function canOpen(symbol: string, entryPrice: number, qty: number, rules: P
     }
   }
 
-  // Sector concentration check
+  // Sector concentration check — capital % (existing)
   if (sector && rules.maxSectorPct > 0) {
     const sectorAlloc = await getSectorAllocation();
     const currentPct = sectorAlloc[sector] || 0;
     const newPct = currentPct + ((entryPrice * qty) / w.totalCapital) * 100;
     if (newPct > rules.maxSectorPct) {
       return { ok: false, reason: `Sector cap: ${sector} at ${currentPct.toFixed(1)}% (max ${rules.maxSectorPct}%)` };
+    }
+  }
+
+  // Sector concentration check — position count (new, mirrors options'
+  // optMaxPerSector). Independent of the % check above: a handful of
+  // small, tight-stop positions in one sector can pass the capital cap
+  // while still being 3+ correlated bets that move together on one
+  // sector-wide shock.
+  if (sector && rules.maxPerSectorCount > 0) {
+    const sectorCounts = await getSectorPositionCounts();
+    const currentCount = sectorCounts[sector] || 0;
+    if (currentCount >= rules.maxPerSectorCount) {
+      return { ok: false, reason: `Sector count cap: ${currentCount} positions already open in ${sector} (max ${rules.maxPerSectorCount})` };
     }
   }
 
@@ -966,7 +996,7 @@ async function autoScanAndTrade(config: ScreeningConfig, bypassRegime: boolean =
       if (signal.checks.rsOk) equityReasons.push('Outperforming Nifty 50 (20-session relative strength)');
       if (signal.checks.gapOk) equityReasons.push('Bullish gap confirmation');
       await recordSignal(
-        { symbol: stock.symbol, direction: 'LONG', score: signal.score, confidence: Math.round((signal.score / 6) * 1000) / 10, reasons: equityReasons },
+        { symbol: stock.symbol, direction: 'LONG', score: signal.score, confidence: Math.round((signal.score / 6) * 1000) / 10, reasons: equityReasons, checks: signal.checks },
         true,
         trade.id
       );
@@ -1443,6 +1473,30 @@ async function dispatchHourlyHeartbeat(now: Date) {
     // Fetch the 7 swing stocks' alignment status for the heartbeat
     const swingStocks = await getSwingTop7Status();
 
+    // Real per-position detail for open options — was just a bare count
+    // before ("Options Open: 1" with no way to tell what it was or how it's
+    // doing), user flagged this directly. Live premium fetch is fine here
+    // (once/hour, not per-poll) — falls back to null pnl (shown as "live
+    // price unavailable") rather than fabricating a value if the chain fetch fails.
+    const optOpenTrades = await db.paperTrade.findMany({
+      where: { status: 'OPEN', tags: { contains: 'options' }, autoTraded: true },
+    });
+    const optionsPositionsDetail = await Promise.all(optOpenTrades.map(async (t) => {
+      const underlying = t.symbol.split('_')[0];
+      const notes = t.notes ? JSON.parse(t.notes) : {};
+      const strike = notes.strike || 0;
+      const expiry = notes.expiry || '';
+      let currentPremium: number | null = null;
+      try {
+        const chain = await fetchDhanOptionChain(underlying, expiry);
+        const row = chain?.chain?.find(r => r.strike === strike);
+        const quote = t.direction === 'CE' ? row?.ce : row?.pe;
+        if (quote && quote.ltp > 0) currentPremium = quote.ltp;
+      } catch { /* leave null — no fabricated price */ }
+      const pnl = currentPremium != null ? (currentPremium - t.entryPrice) * t.qty : null;
+      return { symbol: underlying, strike, direction: t.direction, entryPrice: t.entryPrice, currentPremium, pnl };
+    }));
+
     await sendDiscordHeartbeat({
       timeIST: istTimeStr(now),
       niftyRegime: st.niftyRegime || 'UNKNOWN',
@@ -1454,6 +1508,7 @@ async function dispatchHourlyHeartbeat(now: Date) {
       circuitBreaker: health.circuitBreaker,
       circuitBreakerReason: health.circuitBreakerReason,
       optionsOpenPositions: health.options.openPositions,
+      optionsPositionsDetail,
       equityTradeReason: health.equity.tradeReason,
       optionsTradeReason: health.options.tradeReason,
       availableCapital: health.wallet.availableCapital,
@@ -1587,6 +1642,22 @@ async function dispatchEODSummary(now: Date) {
       : 0;
     const estCapitalForConcurrency = avgCapitalPerTrade * (peakConcurrentOptions + peakConcurrentEquity);
 
+    // Options shadow forward-test — cumulative IST time-of-day pattern
+    // (e.g. "9:30-10:00 consistently strong, 11:30-12:00 consistently
+    // weak"). Only surface slots with enough sample size (>=3 closed
+    // signals) to avoid a single lucky/unlucky trade skewing the read.
+    let shadowBestSlots: any[] | undefined;
+    let shadowWorstSlots: any[] | undefined;
+    try {
+      const { getShadowOptionsTimeOfDayBreakdown } = await import('@/lib/trading/shadow-options');
+      const slots = (await getShadowOptionsTimeOfDayBreakdown()).filter(s => s.count >= 3);
+      if (slots.length > 0) {
+        const bySize = [...slots].sort((a, b) => b.netPnl - a.netPnl);
+        shadowBestSlots = bySize.slice(0, 3);
+        shadowWorstSlots = bySize.slice(-3).reverse();
+      }
+    } catch { /* not enough shadow data yet, or a transient error — skip this section */ }
+
     await sendDiscordEODSummary({
       date: today,
       totalTrades,
@@ -1606,7 +1677,24 @@ async function dispatchEODSummary(now: Date) {
       profitFactor,
       avgCapitalPerTrade,
       estCapitalForConcurrency,
+      shadowBestSlots,
+      shadowWorstSlots,
     });
+
+    if (shadowBestSlots || shadowWorstSlots) {
+      const { appendObsidianEntry } = await import('@/lib/obsidian-log');
+      const lines: string[] = [];
+      if (shadowBestSlots?.length) {
+        lines.push('Best time-of-day slots (cumulative):');
+        for (const s of shadowBestSlots) lines.push(`- ${s.slot} IST — ${s.count} trades, ${s.winRate}% WR, net ₹${Math.round(s.netPnl).toLocaleString('en-IN')} (${s.topSymbols.join(', ')})`);
+      }
+      if (shadowWorstSlots?.length) {
+        lines.push('', 'Worst time-of-day slots (cumulative):');
+        for (const s of shadowWorstSlots) lines.push(`- ${s.slot} IST — ${s.count} trades, ${s.winRate}% WR, net ₹${Math.round(s.netPnl).toLocaleString('en-IN')} (${s.topSymbols.join(', ')})`);
+      }
+      appendObsidianEntry('Options Shadow Forward-Test — Time-of-Day Pattern (EOD)', lines.join('\n'));
+    }
+
     await setSchedulerKV('sched_lastEODDate', today);
   } catch (err) {
     console.warn('[AutoTrade] EOD summary dispatch error:', err);
@@ -1761,13 +1849,138 @@ async function runSchedulerTickInner() {
       } catch (err) {
         console.warn('[AutoTrade] Options exit check error:', err);
       }
+      try {
+        await checkShadowOptionExits();
+      } catch (err) {
+        console.warn('[AutoTrade] Shadow option exit check error:', err);
+      }
     }
   }
 
   // ── Hourly Heartbeat (market hours only) ──
   await dispatchHourlyHeartbeat(now);
 
+  // ── Hourly Postmortem Scan — equity and options run separately, each
+  // gated independently so one being slow/erroring doesn't block the other.
+  await dispatchPostmortemScan('equity', now);
+  await dispatchPostmortemScan('options', now);
+
+  // ── Hourly Options Shadow Forward-Test Report ──
+  await dispatchShadowOptionsReport(now);
+
   return { ...results, marketHours: true, enabled: true, schedulerState: await getSchedulerState() };
+}
+
+// Read-only reporting only — no trading-behavior change. Same 1-hour
+// cadence pattern as dispatchHourlyHeartbeat/dispatchPostmortemScan.
+async function dispatchShadowOptionsReport(now: Date) {
+  const key = 'sched_lastShadowReportAt';
+  const lastStr = (await db.appSettings.findUnique({ where: { key } }))?.value;
+  const lastTime = lastStr ? new Date(lastStr).getTime() : 0;
+  if (now.getTime() - lastTime < 60 * 60000) return; // 1 hour cadence
+
+  try {
+    const { getShadowOptionsHourlyReport, getShadowClosedSignalsSince, getShadowOpenSignalsDetail } = await import('@/lib/trading/shadow-options');
+    const report = await getShadowOptionsHourlyReport();
+    const timeIST = now.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+
+    // Detail since the last report (or the last hour, on the very first run
+    // when there's no previous timestamp yet).
+    const since = lastTime > 0 ? new Date(lastTime) : new Date(now.getTime() - 60 * 60000);
+    const [closedDetail, openDetail] = await Promise.all([
+      getShadowClosedSignalsSince(since),
+      getShadowOpenSignalsDetail(),
+    ]);
+    const fmtIST = (d: Date) => d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+    const closedSinceLastReport = closedDetail.map(r => ({
+      symbol: r.symbol, direction: r.direction, strike: r.strike, expiry: r.expiry, inTop10: r.inTop10,
+      entryPremium: r.entryPremium, exitPremium: r.exitPremium, exitReason: r.exitReason,
+      openedAtIST: fmtIST(r.openedAt), closedAtIST: r.closedAt ? fmtIST(r.closedAt) : '?',
+      pnlPercent: r.pnlPercent, netPnl: r.netPnl,
+    }));
+    const currentlyOpen = openDetail.map(r => ({
+      symbol: r.symbol, direction: r.direction, strike: r.strike, expiry: r.expiry, inTop10: r.inTop10,
+      entryPremium: r.entryPremium, openedAtIST: fmtIST(r.openedAt),
+    }));
+
+    const { sendDiscordShadowOptionsReport } = await import('@/lib/notifications/discord');
+    await sendDiscordShadowOptionsReport({ timeIST, ...report, closedSinceLastReport, currentlyOpen });
+
+    const { appendObsidianEntry } = await import('@/lib/obsidian-log');
+    const lines = [
+      `Concurrent open (uncapped): ${report.openCount} — capital deployed ₹${Math.round(report.capitalDeployed).toLocaleString('en-IN')} (real cap: 3 concurrent TOP-10 positions).`,
+      `Today: closed ${report.closedTodayCount}, winRate ${report.closedTodayWinRate}%, net ₹${Math.round(report.closedTodayNetPnl).toLocaleString('en-IN')}. Capital to rotate today's signals: ₹${Math.round(report.capitalRequiredToday).toLocaleString('en-IN')}.`,
+      `Cumulative: closed ${report.cumulativeClosedCount}, winRate ${report.cumulativeWinRate}%, net ₹${Math.round(report.cumulativeNetPnl).toLocaleString('en-IN')}.`,
+    ];
+    if (report.byExitReason.length) {
+      lines.push('', 'By exit reason (cumulative):');
+      for (const b of report.byExitReason) {
+        lines.push(`- \`${b.reason}\`: ${b.count} — winRate ${b.winRate}% — net ₹${Math.round(b.netPnl).toLocaleString('en-IN')}`);
+      }
+    }
+    if (closedSinceLastReport.length) {
+      lines.push('', `Closed since last report (${closedSinceLastReport.length}):`);
+      for (const r of closedSinceLastReport) {
+        lines.push(`- ${r.symbol} ${r.direction} ${r.strike} (${r.expiry})${r.inTop10 ? ' [TOP10]' : ''} — ${r.openedAtIST}→${r.closedAtIST} — ₹${r.entryPremium}→₹${r.exitPremium ?? '?'} \`${r.exitReason}\` — ${r.pnlPercent != null ? r.pnlPercent + '%' : '?'}, net ₹${r.netPnl != null ? Math.round(r.netPnl).toLocaleString('en-IN') : '?'}`);
+      }
+    }
+    if (currentlyOpen.length) {
+      lines.push('', `Currently open (${currentlyOpen.length}):`);
+      for (const r of currentlyOpen) {
+        lines.push(`- ${r.symbol} ${r.direction} ${r.strike} (${r.expiry})${r.inTop10 ? ' [TOP10]' : ''} — opened ${r.openedAtIST} @ ₹${r.entryPremium}`);
+      }
+    }
+    appendObsidianEntry('Options Shadow Forward-Test — Hourly Report', lines.join('\n'));
+
+    await setSchedulerKV(key, now.toISOString());
+  } catch (err) {
+    console.warn('[AutoTrade] Shadow options report dispatch error:', err);
+  }
+}
+
+// Read-only analysis + reporting — no trading-behavior change. Same 1-hour
+// cadence pattern as dispatchHourlyHeartbeat, gated per asset class so
+// equity and options each get their own "last run" timestamp.
+async function dispatchPostmortemScan(assetClass: 'equity' | 'options', now: Date) {
+  const key = `sched_lastPostmortemScanAt_${assetClass}`;
+  const lastStr = (await db.appSettings.findUnique({ where: { key } }))?.value;
+  const lastTime = lastStr ? new Date(lastStr).getTime() : 0;
+  if (now.getTime() - lastTime < 60 * 60000) return; // 1 hour cadence
+
+  try {
+    const { hourlyPostmortemScan } = await import('@/lib/trading/postmortem');
+    const summary = await hourlyPostmortemScan(assetClass);
+    if (summary) {
+      const { sendDiscordPostmortemSummary } = await import('@/lib/notifications/discord');
+      await sendDiscordPostmortemSummary({
+        assetClass,
+        lookbackDays: summary.lookbackDays,
+        totalChecked: summary.totalChecked,
+        exitedEarlyCount: summary.exitedEarlyCount,
+        exitedEarlyPct: summary.exitedEarlyPct,
+        byExitReason: summary.byExitReason,
+        worstExitReason: summary.worstExitReason,
+      });
+
+      const { appendObsidianEntry } = await import('@/lib/obsidian-log');
+      const label = assetClass === 'options' ? 'Options' : 'Equity Swing';
+      const lines = [
+        `Checked ${summary.totalChecked} trades closed in the last ${summary.lookbackDays}d whose post-exit window has elapsed.`,
+        `Exited early: ${summary.exitedEarlyCount}/${summary.totalChecked} (${summary.exitedEarlyPct}%).`,
+      ];
+      if (summary.worstExitReason) {
+        lines.push(`**Worst exit reason**: \`${summary.worstExitReason.reason}\` — ${summary.worstExitReason.exitedEarly}/${summary.worstExitReason.count} (${summary.worstExitReason.rate}%) exited early.`);
+      }
+      lines.push('', 'By exit reason:');
+      for (const [reason, b] of Object.entries(summary.byExitReason).sort((a, b) => b[1].count - a[1].count)) {
+        lines.push(`- \`${reason}\`: ${b.count} closed — ${b.exitedEarly} early, ${b.justified} justified, ${b.wash} wash`);
+      }
+      appendObsidianEntry(`Swing/Options (${label}) — Hourly Postmortem Scan`, lines.join('\n'));
+    }
+    await setSchedulerKV(key, now.toISOString());
+  } catch (err) {
+    console.warn(`[AutoTrade] Postmortem scan (${assetClass}) dispatch error:`, err);
+  }
 }
 
 // ── Options Auto-Trade Functions ────────────────────────
@@ -1971,9 +2184,27 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
     // took whichever symbol happened to come first in scan order (not
     // sorted at all) — meaning a mediocre signal could claim a scarce slot
     // ahead of a stronger one purely by iteration order.
+    const isTop10OrIndex = (symbol: string) => INDEX_SYMBOLS.includes(symbol) || OPTIONS_TOP10_SYMBOLS.has(symbol.toUpperCase());
+
+    // Shadow forward-test — record EVERY signal above the sniper bar,
+    // whitelisted or not, so real forward evidence accumulates on the full
+    // universe instead of relying on the options backtest (screening-
+    // engine.ts), which has drifted out of sync with this live scanner
+    // (confirmed 2026-07-28). No real capital involved. Best-effort: never
+    // blocks real trading below.
+    try {
+      await recordShadowOptionSignals(
+        scanResult.signals.filter(s => s.confidence >= minConfidence),
+        isTop10OrIndex,
+        { totalCapital: equityForRisk, riskPerTradePct: rules.riskPerTradePct, getLotSize: getOptionLotSize }
+      );
+    } catch (err) {
+      console.warn('[AutoTrade] Shadow option signal recording error:', err);
+    }
+
     const highConfidenceRaw = scanResult.signals
       .filter(s => s.confidence >= minConfidence)
-      .filter(s => INDEX_SYMBOLS.includes(s.symbol) || OPTIONS_TOP10_SYMBOLS.has(s.symbol.toUpperCase()));
+      .filter(s => isTop10OrIndex(s.symbol));
 
     // Score stabilizer (ODSS conviction-engine-inspired, scoped down — see
     // score-stabilizer.ts) — ranks by an EMA-smoothed score across scans
@@ -2387,11 +2618,28 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
     const minsToClose = timeToClose();
     const isIntradayCloseTime = minsToClose <= 15 && minsToClose > 0; // 3:15 PM IST square-off
 
+    // [FIX] Was calling getCurrentPrice() once per open option position in
+    // this loop (same one-call-per-symbol-per-tick pattern already fixed
+    // for equity's autoCheckExits() — see getCurrentPricesBatch() there).
+    // currentSpot here is only used for a liveness check before fetching
+    // the real option premium, so one batched call up front covers it.
+    const { getCurrentPricesBatch } = await import('@/lib/trading/data-provider');
+    const underlyings = [...new Set(openOptions.map((t) => t.symbol.split('_')[0]))];
+    const spotPriceMap = underlyings.length > 0 ? await getCurrentPricesBatch(underlyings) : {};
+
+    // Confluence-decay/flip re-score (Forex-style dynamic exit, see
+    // rescoreForExit in options-scanner.ts) — one batched re-score per
+    // underlying per cycle, reused for every open position on that symbol.
+    const CONFLUENCE_EXIT_FLOOR = 25; // hard floor — always exit below this confidence
+    const CONFLUENCE_EXIT_RATIO = 0.5; // exit if current confidence < 50% of entry confidence
+    const CONFLUENCE_FLIP_MARGIN = 20; // opposing side must clearly dominate, not just edge out
+    const rescoreMap = underlyings.length > 0 ? await rescoreForExit(underlyings) : new Map();
+
     for (const trade of openOptions) {
       checked++;
       try {
         const underlying = trade.symbol.split('_')[0];
-        const { price: currentSpot } = await getCurrentPrice(underlying);
+        const currentSpot = spotPriceMap[underlying];
         if (!currentSpot) continue;
 
         const notes = trade.notes ? JSON.parse(trade.notes) : {};
@@ -2440,6 +2688,30 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
           currentPremium = trade.entryPrice;
         }
 
+        // Confluence-decay/flip check (Forex-style dynamic exit) — re-runs
+        // the same entry-scoring logic; if the original thesis has decayed
+        // past a floor, decayed relative to entry conviction, or the
+        // opposite side now clearly dominates, that's a real reason to cut
+        // the trade even before SL/TP is hit. Only ever acts on a REAL live
+        // premium (never on the mandatory-squareoff synthetic price).
+        let confluenceExitReason: string | null = null;
+        if (hasRealPremium) {
+          const rescore = rescoreMap.get(underlying);
+          if (rescore) {
+            const entryConfidence = typeof notes.confidence === 'number' ? notes.confidence : null;
+            const currentConfidence = direction === 'CE' ? rescore.ceConfidence : rescore.peConfidence;
+            const ownScore = direction === 'CE' ? rescore.ceScore : rescore.peScore;
+            const opposingScore = direction === 'CE' ? rescore.peScore : rescore.ceScore;
+            if (opposingScore - ownScore > CONFLUENCE_FLIP_MARGIN) {
+              confluenceExitReason = 'CONFLUENCE_FLIPPED';
+            } else if (currentConfidence < CONFLUENCE_EXIT_FLOOR) {
+              confluenceExitReason = 'CONFLUENCE_DECAY_FLOOR';
+            } else if (entryConfidence != null && entryConfidence > 0 && currentConfidence < entryConfidence * CONFLUENCE_EXIT_RATIO) {
+              confluenceExitReason = 'CONFLUENCE_DECAY_RATIO';
+            }
+          }
+        }
+
         let exitReason: string | null = null;
         let exitPrice = currentPremium;
 
@@ -2452,6 +2724,12 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
         else if (hasRealPremium && currentPremium >= trade.targetPrice) {
           exitReason = 'TP_HIT';
           exitPrice = trade.targetPrice;
+        }
+        // 2b. Dynamic confluence-decay/flip exit — cuts the trade early if
+        // the original thesis no longer holds, even inside the SL/TP band.
+        else if (hasRealPremium && confluenceExitReason) {
+          exitReason = confluenceExitReason;
+          exitPrice = currentPremium;
         }
         // 3. Mandatory Intraday 3:15 PM Exit (No Overnight Carry)
         else if (isIntradayCloseTime) {
@@ -2790,6 +3068,42 @@ export async function POST(request: NextRequest) {
         const status = await getOptionsStatus();
         return NextResponse.json({ success: true, action, ...status });
       }
+      case 'options_shadow_status': {
+        const { getShadowOptionsSummary, getShadowOpenSignalsDetail, getShadowClosedSignalsSince } = await import('@/lib/trading/shadow-options');
+        const istNow = new Date(Date.now() + 5.5 * 3600000);
+        const istMidnight = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()));
+        const todayStartUtc = new Date(istMidnight.getTime() - 5.5 * 3600000);
+        const [summary, open, closedToday] = await Promise.all([
+          getShadowOptionsSummary(),
+          getShadowOpenSignalsDetail(),
+          getShadowClosedSignalsSince(todayStartUtc),
+        ]);
+        return NextResponse.json({ success: true, action, ...summary, open, closedToday });
+      }
+      case 'options_shadow_timing': {
+        const { getShadowOptionsTimeOfDayBreakdown } = await import('@/lib/trading/shadow-options');
+        const slots = await getShadowOptionsTimeOfDayBreakdown();
+        return NextResponse.json({ success: true, action, slots });
+      }
+      case 'options_debug_scores': {
+        // Read-only diagnostic — scans the full universe with a very low
+        // score floor (so signals well below the real sniper bar still get
+        // created) purely to inspect how close symbols are getting. Does
+        // NOT call recordShadowOptionSignals or the entry/whitelist loop —
+        // no DB writes, no real trades, no shadow rows. Purely a snapshot.
+        const scanResult = await scanOptionsUniverse(200, -9999);
+        const top = scanResult.signals
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 30)
+          .map(s => ({ symbol: s.symbol, direction: s.direction, score: s.score, confidence: s.confidence, reasons: s.reasons }));
+        return NextResponse.json({
+          success: true, action,
+          sniperBar: { minScore: SNIPER_MIN_SCORE, minConfidence: SNIPER_MIN_CONFIDENCE },
+          totalScanned: scanResult.totalScanned,
+          scanDurationMs: scanResult.scanDurationMs,
+          top,
+        });
+      }
       case 'options_toggle': {
         const enabled = body.enabled;
         await setSchedulerKV('opt_enabled', String(!!enabled));
@@ -2812,6 +3126,25 @@ export async function POST(request: NextRequest) {
         const sent = await sendDiscordHealthCheck(report);
         return NextResponse.json({ success: true, sent, report });
       }
+      // Manual force of the Monday-only weekly rebalance — bypasses the
+      // day/time gate in dispatchWeeklyRebalanceNotice() so a real fix to
+      // the universe/proven-symbols pool (e.g. 2026-07-28's) can take
+      // effect the same day instead of waiting for next Monday 8:30 AM IST.
+      case 'force_rebalance': {
+        const { sendDiscordWeeklyRebalanceNotice } = await import('@/lib/notifications/discord');
+        const { computeWeeklyRSRanking, getActiveTop7, getActiveVacantSlots } = await import('@/lib/trading/rs-ranking');
+        const now = new Date();
+        await computeWeeklyRSRanking();
+        const top7 = await getActiveTop7();
+        const vacant = await getActiveVacantSlots();
+        const sent = await sendDiscordWeeklyRebalanceNotice({
+          rebalanceTime: istTimeStr(now),
+          top7Symbols: top7.map((s) => `${s.symbol} (${Math.round(s.weightPct * 100)}%)`),
+          vacantSlotsFilled: vacant.map((s) => `${s.symbol} (${Math.round(s.weightPct * 100)}%)`),
+        });
+        await setSchedulerKV('sched_lastRebalanceDate', istDateString(now));
+        return NextResponse.json({ success: true, sent, top7, vacant });
+      }
     }
     const wallet = await recalcWallet();
     return NextResponse.json({ success: true, wallet });
@@ -2832,7 +3165,15 @@ async function buildSystemHealthReport() {
   const mHours = isMarketHours();
   const minsToClose = timeToClose();
 
-  const openEquityCount = (await db.paperTrade.findMany({ where: { status: 'OPEN', autoTraded: true } })).length;
+  // [FIX 2026-07-28] Was counting ALL open autoTraded positions regardless
+  // of asset class — an open OPTIONS trade got counted toward equity's
+  // maxTotalPositions (7) slot display, showing e.g. "1/7" with no
+  // corresponding equity symbol to show for it (real gating at line 854
+  // already filtered correctly with tags:{not:{contains:'options'}} — this
+  // bug was display-only, never affected actual trading decisions).
+  const openEquityCount = await db.paperTrade.count({
+    where: { status: 'OPEN', autoTraded: true, tags: { not: { contains: 'options' } } },
+  });
   const openOptCount = optStatus.openPositions;
 
   // Check DhanHQ token health (root cause of "no live data" when expired)
@@ -2847,7 +3188,24 @@ async function buildSystemHealthReport() {
   } else if (st.circuitBreaker) {
     equityReason = `🚨 HALTED: Circuit Breaker active (${st.circuitBreakerReason})`;
   } else if (st.niftyRegime === 'BEARISH' && rules.niftyRegimeFilter) {
-    equityReason = '🛑 BLOCKED: Nifty is in Bearish Regime (< EMA200). New longs paused for risk protection.';
+    // Real live numbers instead of a static message — user asked "at what
+    // price will the trade open" rather than just seeing "BLOCKED" every
+    // time. Reuses getNiftyRegime() (same real 350-day fetch the actual
+    // gating check already does), so this is the exact live threshold, not
+    // an approximation — informational only, doesn't change the gate itself.
+    try {
+      const { data: freshNiftyData } = await getHistoricalData('NIFTY50', 350);
+      const liveRegime = await getNiftyRegime(freshNiftyData);
+      if (liveRegime.regime !== 'UNKNOWN') {
+        const gap = liveRegime.currentClose - liveRegime.ema200;
+        const gapPct = (gap / liveRegime.ema200) * 100;
+        equityReason = `🛑 BLOCKED: Nifty ${liveRegime.currentClose.toLocaleString('en-IN')} is below its 200-EMA (₹${liveRegime.ema200.toLocaleString('en-IN')}) by ${Math.abs(gap).toFixed(1)} pts (${gapPct.toFixed(2)}%) — needs to close above ₹${liveRegime.ema200.toLocaleString('en-IN')} for new longs to unblock.`;
+      } else {
+        equityReason = '🛑 BLOCKED: Nifty is in Bearish Regime (< EMA200). New longs paused for risk protection.';
+      }
+    } catch {
+      equityReason = '🛑 BLOCKED: Nifty is in Bearish Regime (< EMA200). New longs paused for risk protection.';
+    }
   } else if (openEquityCount >= rules.maxTotalPositions) {
     equityReason = `🛑 BLOCKED: Max position limit reached (${openEquityCount}/${rules.maxTotalPositions})`;
   } else if (w.available < 25000) {

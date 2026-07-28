@@ -15,6 +15,7 @@
  * model.
  */
 import { db } from '@/lib/db';
+import { checkEquityPostExitMovement, checkOptionsPostExitMovement, type PostExitVerdict } from './postexit-check';
 
 export interface TradePostmortem {
   id: string;
@@ -42,6 +43,12 @@ export interface TradePostmortem {
   // Options only — the richer decisionVote/spot/strike/expiry block
   // already stored in PaperTrade.notes but never parsed back out.
   optionsDetail: Record<string, unknown> | null;
+  // Keyed per-factor booleans at signal time (equity's trendAbove/
+  // pullbackOk/etc, or options' own checks if ever populated) — parsed
+  // from SignalRecord.checksJson, added 2026-07-28 alongside the capture
+  // itself so postmortem analysis can attribute outcomes to specific
+  // factor combinations instead of parsing normalized reason-text.
+  checks: Record<string, boolean> | null;
 }
 
 function isOptionsTrade(tags: string | null): boolean {
@@ -85,6 +92,10 @@ export async function getTradePostmortems(
     if (reasons.length === 0 && sr?.reasons) {
       try { reasons = JSON.parse(sr.reasons); } catch { /* leave empty */ }
     }
+    let checks: Record<string, boolean> | null = null;
+    if (sr?.checksJson) {
+      try { checks = JSON.parse(sr.checksJson); } catch { /* leave null */ }
+    }
 
     let holdDurationMin: number | null = null;
     if (t.exitDate) {
@@ -115,6 +126,7 @@ export async function getTradePostmortems(
       resolved: sr?.resolved ?? false,
       win: sr?.win ?? null,
       optionsDetail,
+      checks,
     });
     if (result.length >= limit) break;
   }
@@ -186,5 +198,86 @@ export function computePostmortemStats(trades: TradePostmortem[]): PostmortemSta
           : 0,
       }))
       .sort((a, b) => b.count - a.count),
+  };
+}
+
+// ── Hourly postmortem scan ──────────────────────────────────────────────
+// Runs the real post-exit price-movement check (postexit-check.ts) against
+// every closed trade in a rolling lookback whose window has actually
+// elapsed, then rolls up exit-reason patterns — same idea as the Forex
+// engine's hourly_postmortem_scan() (engine/postmortem.py), ported to this
+// codebase's data model. A single hour rarely has enough closed trades for
+// a pattern to mean anything, so the lookback defaults to 7 days while the
+// scan itself still runs every hour (freshness of individual verdicts, not
+// of the aggregate).
+
+export interface ExitReasonPostExitBreakdown {
+  count: number;
+  exitedEarly: number;
+  justified: number;
+  wash: number;
+}
+
+export interface HourlyPostmortemSummary {
+  assetClass: 'equity' | 'options';
+  lookbackDays: number;
+  totalChecked: number;
+  exitedEarlyCount: number;
+  exitedEarlyPct: number;
+  byExitReason: Record<string, ExitReasonPostExitBreakdown>;
+  worstExitReason: (ExitReasonPostExitBreakdown & { reason: string; rate: number }) | null;
+}
+
+export async function hourlyPostmortemScan(
+  assetClass: 'equity' | 'options',
+  lookbackDays = 7
+): Promise<HourlyPostmortemSummary | null> {
+  const cutoff = new Date(Date.now() - lookbackDays * 86400000);
+  const trades = await getTradePostmortems(assetClass, 200);
+  const candidates = trades.filter((t) => t.exitDate && new Date(t.exitDate) >= cutoff);
+  if (candidates.length === 0) return null;
+
+  const verdicts: Array<{ trade: TradePostmortem; verdict: PostExitVerdict }> = [];
+  for (const t of candidates) {
+    const pm = assetClass === 'equity'
+      ? await checkEquityPostExitMovement({ symbol: t.symbol, direction: t.direction, exitPrice: t.exitPrice, exitDate: t.exitDate, stopLoss: t.stopLoss })
+      : await checkOptionsPostExitMovement({ symbol: t.symbol, direction: t.direction, exitDate: t.exitDate });
+    if (pm && pm.status === 'ok' && pm.verdict) {
+      verdicts.push({ trade: t, verdict: pm.verdict });
+    }
+  }
+  if (verdicts.length === 0) return null;
+
+  const byExitReason: Record<string, ExitReasonPostExitBreakdown> = {};
+  for (const v of verdicts) {
+    const reason = v.trade.exitReason || 'UNKNOWN';
+    const b = byExitReason[reason] || { count: 0, exitedEarly: 0, justified: 0, wash: 0 };
+    b.count++;
+    if (v.verdict === 'exited_early') b.exitedEarly++;
+    else if (v.verdict === 'exit_justified_reversed' || v.verdict === 'exit_justified_sl_would_have_hit') b.justified++;
+    else b.wash++;
+    byExitReason[reason] = b;
+  }
+
+  let worstExitReason: HourlyPostmortemSummary['worstExitReason'] = null;
+  for (const [reason, b] of Object.entries(byExitReason)) {
+    if (b.count >= 3) {
+      const rate = Math.round((b.exitedEarly / b.count) * 1000) / 10;
+      if (!worstExitReason || rate > worstExitReason.rate) {
+        worstExitReason = { reason, rate, ...b };
+      }
+    }
+  }
+
+  const totalChecked = verdicts.length;
+  const exitedEarlyCount = verdicts.filter((v) => v.verdict === 'exited_early').length;
+  return {
+    assetClass,
+    lookbackDays,
+    totalChecked,
+    exitedEarlyCount,
+    exitedEarlyPct: Math.round((exitedEarlyCount / totalChecked) * 1000) / 10,
+    byExitReason,
+    worstExitReason,
   };
 }

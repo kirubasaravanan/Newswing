@@ -655,3 +655,49 @@ export async function scanOptionsUniverse(maxSignals?: number, minScore: number 
     stockSignals,
   };
 }
+
+// ── Confluence Re-Score for Open Positions (dynamic exit) ──────────────
+// Forex-style: re-runs the EXACT same entry-scoring logic against an open
+// position's underlying, so a decaying or reversed thesis can trigger an
+// early exit even though fixed SL/TP haven't been hit yet (see
+// engine/confluence_exit.py in the Forex repo — same idea, ported).
+// minScore is set far below any real floor so a signal is always returned
+// for both directions, including a negative score if the thesis has fully
+// reversed — that negative number IS the useful exit signal.
+export async function rescoreForExit(
+  symbols: string[]
+): Promise<Map<string, { ceScore: number; peScore: number; ceConfidence: number; peConfidence: number }>> {
+  const result = new Map<string, { ceScore: number; peScore: number; ceConfidence: number; peConfidence: number }>();
+  const uniqueSymbols = [...new Set(symbols)];
+  if (uniqueSymbols.length === 0) return result;
+
+  const sectorMap = buildSectorMap();
+  let vixGuidance: VIXGuidance | null = null;
+  try {
+    const vixData = await fetchVIX();
+    vixGuidance = getVIXGuidance(vixData.value);
+  } catch { /* proceed without VIX — same graceful-degrade as the main scan */ }
+  let niftyCandles: OHLCV[] = [];
+  try {
+    niftyCandles = (await getHistoricalData('NIFTY50', 300)).data;
+  } catch { /* proceed without Nifty regime context */ }
+  let globalCtx: GlobalMarketsContext | null = null;
+  try {
+    globalCtx = await fetchGlobalMarketsContext();
+  } catch { /* proceed without global context */ }
+
+  for (const symbol of uniqueSymbols) {
+    try {
+      const signals = await scanStock(symbol, sectorMap, -9999, vixGuidance, niftyCandles, globalCtx);
+      const ce = signals.find(s => s.direction === 'CE');
+      const pe = signals.find(s => s.direction === 'PE');
+      result.set(symbol, {
+        ceScore: ce?.score ?? 0,
+        peScore: pe?.score ?? 0,
+        ceConfidence: ce?.confidence ?? 0,
+        peConfidence: pe?.confidence ?? 0,
+      });
+    } catch { /* leave this symbol out — caller treats "missing" as "hold, don't guess" */ }
+  }
+  return result;
+}

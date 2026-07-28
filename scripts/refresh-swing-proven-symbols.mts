@@ -162,7 +162,11 @@ async function main() {
     'export const SWING_PROVEN_METRICS: Record<string, SwingProvenMetrics> = {',
     ...included.map(
       (r) =>
-        `  ${r.symbol}: { sector: '${r.sector}', profitFactor: ${r.profitFactor}, totalTrades: ${r.totalTrades}, winRate: ${r.winRate}, sharpeRatio: ${r.sharpeRatio}, maxDrawdown: ${r.maxDrawdown} },`
+        // Quoted key — some real NSE symbols contain '&' (ARE&M, GVT&D,
+        // J&KBANK), which is not a valid bare object-key/identifier
+        // character and previously broke the whole file's parse (caught
+        // 2026-07-28, before market open, when auto-trade returned 500s).
+        `  '${r.symbol}': { sector: '${r.sector}', profitFactor: ${r.profitFactor}, totalTrades: ${r.totalTrades}, winRate: ${r.winRate}, sharpeRatio: ${r.sharpeRatio}, maxDrawdown: ${r.maxDrawdown} },`
     ),
     '};',
     '',

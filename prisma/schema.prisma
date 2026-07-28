@@ -363,6 +363,7 @@ model SignalRecord {
   score       Int
   confidence  Int
   reasons     String                          // JSON array of the raw human-readable reason strings at signal time
+  checksJson  String?                         // JSON object of the keyed per-factor booleans at signal time (trendAbove/pullbackOk/etc for equity, decisionVote-style for options) — was computed live but discarded before 2026-07-28; added so postmortem analysis can attribute outcomes to specific factor combinations instead of parsing normalized reason-text buckets
   executed    Boolean   @default(false)       // did this signal actually become a paper trade?
   tradeId     String?   @unique               // linked PaperTrade.id once/if executed
   resolved    Boolean   @default(false)       // has the linked trade closed?
@@ -374,6 +375,40 @@ model SignalRecord {
   @@index([symbol])
   @@index([resolved])
   @@index([tradeId])
+}
+
+// Shadow forward-test for options — records EVERY signal the live scanner
+// (options-scanner.ts) produces above the sniper score/confidence bar,
+// whitelisted or not, and tracks a simulated SL/TP outcome using real live
+// premiums. No real capital ever touches these rows. Built 2026-07-28
+// because the options backtest (screening-engine.ts) is a SEPARATE
+// implementation that had drifted out of sync with the live scanner as of
+// 2026-07-27 — this is real forward evidence instead of a stale/divergent
+// backtest, for deciding whether to expand past the current TOP-10.
+model ShadowOptionSignal {
+  id           String    @id @default(cuid())
+  symbol       String                          // underlying, e.g. RELIANCE
+  direction    String                          // CE / PE
+  strike       Float
+  expiry       String
+  score        Int
+  confidence   Int
+  entryPremium Float
+  stopLoss     Float
+  targetPrice  Float
+  inTop10      Boolean   @default(false)       // was this symbol part of the real-traded TOP-10/index set at signal time?
+  notionalQty  Int       @default(0)           // lots x lotSize, sized the same way a real entry would be (risk% of capital / risk-per-lot)
+  notionalCapital Float  @default(0)           // entryPremium x notionalQty — capital that WOULD have been deployed
+  status       String    @default("OPEN")      // OPEN / CLOSED
+  exitPremium  Float?
+  exitReason   String?
+  pnlPercent   Float?
+  netPnl       Float?                          // (exitPremium - entryPremium) x notionalQty
+  openedAt     DateTime  @default(now())
+  closedAt     DateTime?
+
+  @@index([symbol])
+  @@index([status])
 }
 
 model OptionStrategy {

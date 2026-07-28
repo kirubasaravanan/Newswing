@@ -355,12 +355,17 @@ export async function fetchDhanOptionChain(
 
     if (quotesMap.size === 0) return null;
 
-    const midAtmIndex = Math.floor(allStrikes.length / 2);
-
-    // Fallback: use mid-strike value if live spot not found in response
+    // [FIX] Was falling back to a guessed mid-strike "spot price" when the
+    // live quote batch didn't include this symbol (found live 2026-07-28 —
+    // HINDUNILVR, ADANIPORTS, TATACONSUM all hit this on the same session,
+    // ADANIPORTS being an actively-traded OPTIONS_PROVEN_SYMBOLS name). That
+    // fabricated price then fed real strike selection and entry pricing —
+    // same "no data beats wrong data" fail-closed principle already applied
+    // to the intraday-candle path in dhan-client.ts (task 6). Skip the
+    // symbol rather than guess.
     if (underlyingPrice === 0) {
-      underlyingPrice = allStrikes[midAtmIndex] || 0;
-      console.warn(`[DhanOptionProvider] Spot not found for ${symUpper}, using mid-strike ${underlyingPrice} as estimate`);
+      console.warn(`[DhanOptionProvider] Spot not found for ${symUpper} in live quote batch — skipping (no fabricated estimate)`);
+      return null;
     }
 
     // Filter scrips and build full quotes map for all scrips in this expiry

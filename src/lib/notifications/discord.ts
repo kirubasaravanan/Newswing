@@ -445,6 +445,11 @@ export interface EODSummaryReport {
   profitFactor: number;          // today's closed trades: gross win / gross loss
   avgCapitalPerTrade: number;    // real avg capital committed per currently-open trade
   estCapitalForConcurrency: number; // avgCapitalPerTrade x current open count — what it actually takes to run today's concurrency
+  // Options shadow forward-test — cumulative (across all days so far) IST
+  // time-of-day win-rate/PnL buckets, best 3 and worst 3 by netPnl. Only
+  // included once at least a few slots have real sample size.
+  shadowBestSlots?: Array<{ slot: string; count: number; winRate: number; netPnl: number; topSymbols: string[] }>;
+  shadowWorstSlots?: Array<{ slot: string; count: number; winRate: number; netPnl: number; topSymbols: string[] }>;
 }
 
 export async function sendDiscordEODSummary(summary: EODSummaryReport): Promise<boolean> {
@@ -477,6 +482,16 @@ export async function sendDiscordEODSummary(summary: EODSummaryReport): Promise<
       { name: '🏦 Capital Needed for Today\'s Concurrency', value: `₹${fmt(summary.estCapitalForConcurrency)}`, inline: true },
       { name: '🟢 Winning Trades', value: `\`\`\`\n${winningText}\n\`\`\``, inline: false },
       { name: '🔴 Losing Trades & SL Exits', value: `\`\`\`\n${losingText}\n\`\`\``, inline: false },
+      ...(summary.shadowBestSlots && summary.shadowBestSlots.length ? [{
+        name: '⏱️ Best time-of-day slots (options shadow, cumulative)',
+        value: summary.shadowBestSlots.map(s => `• ${s.slot} IST — ${s.count} trades, ${s.winRate}% WR, net ₹${fmt(s.netPnl)} (${s.topSymbols.join(', ')})`).join('\n'),
+        inline: false,
+      }] : []),
+      ...(summary.shadowWorstSlots && summary.shadowWorstSlots.length ? [{
+        name: '⏱️ Worst time-of-day slots (options shadow, cumulative)',
+        value: summary.shadowWorstSlots.map(s => `• ${s.slot} IST — ${s.count} trades, ${s.winRate}% WR, net ₹${fmt(s.netPnl)} (${s.topSymbols.join(', ')})`).join('\n'),
+        inline: false,
+      }] : []),
     ],
     footer: { text: 'Consolidated Market Close EOD Summary | NewSwing PMS Engine' },
     timestamp: new Date().toISOString(),
@@ -518,6 +533,10 @@ export interface HeartbeatPayload {
   availableCapital?: number;
   deployedCapital?: number;
   peakCapital?: number;
+  // [ADD 2026-07-28] Was just a bare count ("Options Open: 1") with no way
+  // to tell what it actually was or how it's doing — user flagged this
+  // directly. Real per-position detail, same pattern as swingStocks above.
+  optionsPositionsDetail?: Array<{ symbol: string; strike: number; direction: string; entryPrice: number; currentPremium: number | null; pnl: number | null }>;
 }
 
 export async function sendDiscordHeartbeat(payload: HeartbeatPayload): Promise<boolean> {
@@ -569,6 +588,13 @@ export async function sendDiscordHeartbeat(payload: HeartbeatPayload): Promise<b
   if (payload.availableCapital !== undefined || payload.optionsOpenPositions !== undefined) {
     const lines: string[] = [];
     if (payload.optionsOpenPositions !== undefined) lines.push(`• **Options Open**: ${payload.optionsOpenPositions}`);
+    if (payload.optionsPositionsDetail && payload.optionsPositionsDetail.length > 0) {
+      for (const p of payload.optionsPositionsDetail) {
+        const pnlStr = p.pnl == null ? '(live price unavailable)' : `${p.pnl >= 0 ? '+' : ''}₹${Math.round(p.pnl).toLocaleString('en-IN')}`;
+        const premStr = p.currentPremium == null ? '?' : `₹${p.currentPremium}`;
+        lines.push(`   ↳ ${p.symbol} ${p.strike} ${p.direction} @ ₹${p.entryPrice} → ${premStr} — ${pnlStr}`);
+      }
+    }
     if (payload.availableCapital !== undefined) lines.push(`• **Available**: ₹${Math.round(payload.availableCapital).toLocaleString('en-IN')}`);
     if (payload.deployedCapital !== undefined) lines.push(`• **Deployed**: ₹${Math.round(payload.deployedCapital).toLocaleString('en-IN')}`);
     if (payload.peakCapital !== undefined) lines.push(`• **Peak NAV**: ₹${Math.round(payload.peakCapital).toLocaleString('en-IN')}`);
@@ -597,6 +623,139 @@ export async function sendDiscordHeartbeat(payload: HeartbeatPayload): Promise<b
   };
 
   return postToDiscord(embed, 'swing');
+}
+
+// ── Hourly Postmortem Scan ───────────────────────────────────────────────
+// Read-only reporting only — no trading-behavior change. Sent to the
+// asset-class's own channel (options → 'options', equity → 'swing') so it
+// never gets mixed with the other engine's findings, same separation the
+// user asked for.
+export interface PostmortemScanPayload {
+  assetClass: 'equity' | 'options';
+  lookbackDays: number;
+  totalChecked: number;
+  exitedEarlyCount: number;
+  exitedEarlyPct: number;
+  byExitReason: Record<string, { count: number; exitedEarly: number; justified: number; wash: number }>;
+  worstExitReason: { reason: string; rate: number; count: number; exitedEarly: number } | null;
+}
+
+export async function sendDiscordPostmortemSummary(payload: PostmortemScanPayload): Promise<boolean> {
+  const color = payload.exitedEarlyPct >= 50 ? 0xef4444 : payload.exitedEarlyPct >= 25 ? 0xf59e0b : 0x10b981;
+  const label = payload.assetClass === 'options' ? 'Options' : 'Equity Swing';
+
+  const fields: any[] = [
+    { name: `Trades checked (${payload.lookbackDays}d)`, value: String(payload.totalChecked), inline: true },
+    { name: 'Exited early', value: `${payload.exitedEarlyCount}/${payload.totalChecked} (${payload.exitedEarlyPct}%)`, inline: true },
+  ];
+  if (payload.worstExitReason) {
+    fields.push({
+      name: '⚠️ Worst exit reason',
+      value: `\`${payload.worstExitReason.reason}\` — ${payload.worstExitReason.exitedEarly}/${payload.worstExitReason.count} (${payload.worstExitReason.rate}%) exited early`,
+      inline: false,
+    });
+  }
+  const reasonLines = Object.entries(payload.byExitReason)
+    .sort((a, b) => b[1].count - a[1].count)
+    .map(([reason, b]) => `• \`${reason}\`: ${b.count} closed — ${b.exitedEarly} early, ${b.justified} justified, ${b.wash} wash`);
+  if (reasonLines.length) fields.push({ name: 'By exit reason', value: reasonLines.join('\n').slice(0, 1000), inline: false });
+
+  const embed = {
+    title: `🔬 Hourly Postmortem Scan (${label})`,
+    description: 'Real post-exit price movement vs. each trade\'s actual exit reason.',
+    color,
+    fields,
+    timestamp: new Date().toISOString(),
+  };
+
+  return postToDiscord(embed, payload.assetClass === 'options' ? 'options' : 'swing');
+}
+
+// ── Options Shadow Forward-Test Hourly Report ───────────────────────────
+// Full-universe shadow signals (no real capital) — see shadow-options.ts.
+// Purpose: real forward evidence on trade frequency, concurrency, and PnL
+// across the WHOLE options universe, to judge whether the current TOP-10
+// concurrency cap (3) needs redesigning, not just the current TOP-10 gate.
+export interface ShadowOptionsReportPayload {
+  timeIST: string;
+  openCount: number;
+  capitalDeployed: number;
+  closedTodayCount: number;
+  closedTodayWinRate: number;
+  closedTodayNetPnl: number;
+  capitalRequiredToday: number;
+  cumulativeClosedCount: number;
+  cumulativeWinRate: number;
+  cumulativeNetPnl: number;
+  byExitReason: Array<{ reason: string; count: number; winRate: number; netPnl: number }>;
+  // Full per-contract detail — what actually closed since the last report,
+  // and what's currently open right now (not just aggregate counts).
+  closedSinceLastReport: Array<{
+    symbol: string; direction: string; strike: number; expiry: string; inTop10: boolean;
+    entryPremium: number; exitPremium: number | null; exitReason: string | null;
+    openedAtIST: string; closedAtIST: string; pnlPercent: number | null; netPnl: number | null;
+  }>;
+  currentlyOpen: Array<{
+    symbol: string; direction: string; strike: number; expiry: string; inTop10: boolean;
+    entryPremium: number; openedAtIST: string;
+  }>;
+}
+
+export async function sendDiscordShadowOptionsReport(payload: ShadowOptionsReportPayload): Promise<boolean> {
+  const color = payload.cumulativeNetPnl > 0 ? 0x10b981 : payload.cumulativeNetPnl < 0 ? 0xef4444 : 0xf59e0b;
+  const fmt = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+
+  const fields: any[] = [
+    {
+      name: '📊 Concurrent (uncapped)',
+      value: `${payload.openCount} open — capital deployed ${fmt(payload.capitalDeployed)}\n(real cap is 3 concurrent TOP-10 positions)`,
+      inline: false,
+    },
+    {
+      name: '📅 Today',
+      value: `Closed: ${payload.closedTodayCount} — WinRate ${payload.closedTodayWinRate}% — Net ${fmt(payload.closedTodayNetPnl)}\nCapital required to rotate today's signals: ${fmt(payload.capitalRequiredToday)}`,
+      inline: false,
+    },
+    {
+      name: '📈 Cumulative (since shadow-test start)',
+      value: `Closed: ${payload.cumulativeClosedCount} — WinRate ${payload.cumulativeWinRate}% — Net ${fmt(payload.cumulativeNetPnl)}`,
+      inline: false,
+    },
+  ];
+
+  if (payload.byExitReason.length) {
+    const lines = payload.byExitReason
+      .map(b => `• \`${b.reason}\`: ${b.count} — WinRate ${b.winRate}% — Net ${fmt(b.netPnl)}`)
+      .join('\n')
+      .slice(0, 1000);
+    fields.push({ name: 'By exit reason (cumulative)', value: lines, inline: false });
+  }
+
+  if (payload.closedSinceLastReport.length) {
+    const rows = payload.closedSinceLastReport
+      .slice(0, 15)
+      .map(r => `• ${r.symbol} ${r.direction} ${r.strike} (${r.expiry})${r.inTop10 ? ' [TOP10]' : ''} — ${r.openedAtIST}→${r.closedAtIST} — ₹${r.entryPremium}→₹${r.exitPremium ?? '?'} \`${r.exitReason}\` — ${r.pnlPercent != null ? r.pnlPercent + '%' : '?'}, net ${r.netPnl != null ? fmt(r.netPnl) : '?'}`);
+    const extra = payload.closedSinceLastReport.length > 15 ? `\n…+${payload.closedSinceLastReport.length - 15} more` : '';
+    fields.push({ name: `📋 Closed since last report (${payload.closedSinceLastReport.length})`, value: (rows.join('\n') + extra).slice(0, 1000), inline: false });
+  }
+
+  if (payload.currentlyOpen.length) {
+    const rows = payload.currentlyOpen
+      .slice(0, 15)
+      .map(r => `• ${r.symbol} ${r.direction} ${r.strike} (${r.expiry})${r.inTop10 ? ' [TOP10]' : ''} — opened ${r.openedAtIST} @ ₹${r.entryPremium}`);
+    const extra = payload.currentlyOpen.length > 15 ? `\n…+${payload.currentlyOpen.length - 15} more` : '';
+    fields.push({ name: `📂 Currently open (${payload.currentlyOpen.length})`, value: (rows.join('\n') + extra).slice(0, 1000), inline: false });
+  }
+
+  const embed = {
+    title: `🧪 Options Shadow Forward-Test [${payload.timeIST}]`,
+    description: 'Full-universe signals (whitelisted or not), simulated SL/TP, no real capital. Tracking whether the current TOP-10/cap=3 design is leaving money on the table or is about right.',
+    color,
+    fields,
+    timestamp: new Date().toISOString(),
+  };
+
+  return postToDiscord(embed, 'options');
 }
 
 // ── Weekly Monday 8:30 AM Rebalance Cycle Alert ─────────────────────────

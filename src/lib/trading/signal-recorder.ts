@@ -30,6 +30,12 @@ export interface RecordableSignal {
   score: number;
   confidence: number;
   reasons: string[];
+  // Keyed per-factor booleans at signal time (e.g. equity's
+  // {trendAbove, pullbackOk, triggerOk, volumeOk, rsOk, gapOk}) — was
+  // computed live in runScreening()'s `checks` object but discarded before
+  // this was added (2026-07-28), so postmortem analysis could only work
+  // from normalized reason-text buckets, not clean per-factor keys.
+  checks?: Record<string, boolean>;
 }
 
 /**
@@ -56,6 +62,7 @@ export async function recordSignal(sig: RecordableSignal, executed: boolean, tra
         score: sig.score,
         confidence: sig.confidence,
         reasons: JSON.stringify(sig.reasons),
+        checksJson: sig.checks ? JSON.stringify(sig.checks) : null,
         executed,
         tradeId: tradeId || null,
       },
