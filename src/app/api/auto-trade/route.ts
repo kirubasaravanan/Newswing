@@ -24,11 +24,12 @@ import { runScreening, DEFAULT_CONFIG, type ScreeningConfig } from '@/lib/tradin
 import { getHistoricalData, getCurrentPrice, getContractCurrentPrice } from '@/lib/trading/data-provider';
 import { getFullUniverse, runL1Filter, type NSEStock } from '@/lib/trading/universe-scanner';
 import { isNseTradingHoliday } from '@/lib/trading/market-hours';
-import { scanOptionsUniverse, rescoreForExit, type OptionsSignal, SNIPER_MIN_SCORE, SNIPER_MIN_CONFIDENCE, INDEX_SYMBOLS } from '@/lib/trading/options-scanner';
+import { scanOptionsUniverse, rescoreForExit, type OptionsSignal, SNIPER_MIN_AGGREGATE, SNIPER_MIN_CONFIDENCE, INDEX_SYMBOLS } from '@/lib/trading/options-scanner';
 import { recordShadowOptionSignals, checkShadowOptionExits } from '@/lib/trading/shadow-options';
 import { convertToPremiumTargets } from '@/lib/trading/market-structure';
 import { recordSignal, resolveSignalByTradeId, getSymbolReputationAdjustment } from '@/lib/trading/signal-recorder';
 import { checkIndiaEventBlackout } from '@/lib/trading/india-event-calendar';
+import { isOpeningWindowBlocked, checkGapFilter, isExpiryDayAfternoonBlackout, getDayOfWeekSizeMultiplier, PREMIUM_FLOOR } from '@/lib/trading/options-risk-gate';
 import { getInstitutionalFlowBias } from '@/lib/trading/institutional-flow';
 import { fetchDhanOptionChain } from '@/lib/options/dhan-option-provider';
 import { recordIV, getIVPercentile, getIVSpikePct } from '@/lib/options/iv-percentile';
@@ -1977,6 +1978,37 @@ async function dispatchPostmortemScan(assetClass: 'equity' | 'options', now: Dat
       }
       appendObsidianEntry(`Swing/Options (${label}) — Hourly Postmortem Scan`, lines.join('\n'));
     }
+
+    // Deep postmortem (options only) — richer DATA COLLECTION only, no
+    // entry/exit logic touched (2026-07-28, explicit user instruction).
+    // Multi-window (10/30/60min) + real feature snapshot (RSI/ADX/EMA-
+    // spread/volume) at exit, cross-tabbed by time-of-day/day-of-week/
+    // symbol. Obsidian only, no Discord — explicit instruction to just
+    // watch this accumulate for now, same as the Forex mirror of this.
+    if (assetClass === 'options') {
+      try {
+        const closedOptions = await db.paperTrade.findMany({
+          where: { status: 'CLOSED', tags: { contains: 'options' } },
+          select: { id: true, symbol: true, direction: true, exitDate: true, exitReason: true },
+        });
+        const { runDeepPostmortemBatchOptions, formatDeepPostmortemMarkdownOptions } = await import('@/lib/trading/options-deep-postmortem');
+        const dpTrades = closedOptions.map(t => ({
+          id: t.id, symbol: t.symbol, direction: t.direction,
+          exitDate: t.exitDate ? t.exitDate.toISOString() : null, exitReason: t.exitReason,
+        }));
+        const dpSummary = await runDeepPostmortemBatchOptions(dpTrades);
+        if (dpSummary.newlyAnalyzed > 0) {
+          const dpMd = formatDeepPostmortemMarkdownOptions(dpSummary.newlyAnalyzed);
+          if (dpMd) {
+            const { appendObsidianEntry: appendEntry } = await import('@/lib/obsidian-log');
+            appendEntry('Options — Deep Postmortem (time-of-day/symbol cross-tab)', dpMd);
+          }
+        }
+      } catch (err) {
+        console.warn('[AutoTrade] Options deep postmortem dispatch error:', err);
+      }
+    }
+
     await setSchedulerKV(key, now.toISOString());
   } catch (err) {
     console.warn(`[AutoTrade] Postmortem scan (${assetClass}) dispatch error:`, err);
@@ -2017,7 +2049,7 @@ export function getOptionLotSize(symbol: string): number {
   return 100;
 }
 
-async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFIDENCE, minScore: number = SNIPER_MIN_SCORE): Promise<{
+async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFIDENCE, minScore: number = SNIPER_MIN_AGGREGATE): Promise<{
   signalsGenerated: number; entriesCreated: number; errors: string[];
 }> {
   const errors: string[] = [];
@@ -2052,6 +2084,31 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       await db.autoTradeLog.create({ data: { action: 'OPT_EVENT_BLACKOUT', symbol: 'GUARDRAIL', signal: '', executed: false, reason: `${eventBlackout.event} (${eventBlackout.tier}, ${eventBlackout.minutesToEvent}min) — no new options entries` } });
       return { signalsGenerated: 0, entriesCreated: 0, errors: [`Event blackout: ${eventBlackout.event}`] };
     }
+
+    // ── Pre-entry risk classification gate (2026-07-28) ─────────────────
+    // Runs before the signal engine, per the "Risk Engine ahead of Signal
+    // Engine" architecture — real, web-verified evidence (opening-minute
+    // volatility, overnight-gap chasing) backs both checks below. See
+    // options-risk-gate.ts for the full rationale and what's deliberately
+    // NOT included (max-trades/day and near-close cutoff already exist
+    // above/below this as OPT_DAILY_LIMIT / rules.optNoEntryMinsToClose).
+    const openingGate = isOpeningWindowBlocked();
+    if (openingGate.blocked) {
+      return { signalsGenerated: 0, entriesCreated: 0, errors: [openingGate.reason!] };
+    }
+    try {
+      const niftyDaily = await getHistoricalData('NIFTY50', 3);
+      const niftyCandles = niftyDaily.data || [];
+      if (niftyCandles.length >= 2) {
+        const prevClose = niftyCandles[niftyCandles.length - 2].close;
+        const todayOpen = niftyCandles[niftyCandles.length - 1].open;
+        const gapGate = checkGapFilter(todayOpen, prevClose);
+        if (gapGate.blocked) {
+          await db.autoTradeLog.create({ data: { action: 'OPT_GAP_FILTER', symbol: 'GUARDRAIL', signal: '', executed: false, reason: gapGate.reason! } });
+          return { signalsGenerated: 0, entriesCreated: 0, errors: [gapGate.reason!] };
+        }
+      }
+    } catch { /* NIFTY fetch failed this cycle — fail open, don't block trading on a data hiccup */ }
 
     // ── Options guardrails engine ───────────────────────────────────────
     // Previously the options engine had NO P&L-based circuit breaker at all
@@ -2228,6 +2285,17 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       const tradeSymbol = `${sig.symbol}_${sig.direction}_${sig.strike}_${sig.expiry}`;
       const exchangeLotSize = getOptionLotSize(sig.symbol);
 
+      // Expiry-day afternoon blackout — real, web-verified (2026-07-28):
+      // an ATM option can lose 70-80% of remaining extrinsic value between
+      // 1-3 PM on its own expiry day, independent of the underlying's move.
+      const expiryBlackout = isExpiryDayAfternoonBlackout(sig.expiry);
+      if (expiryBlackout.blocked) {
+        await db.autoTradeLog.create({
+          data: { action: 'OPT_EXPIRY_AFTERNOON_BLOCKED', symbol: tradeSymbol, signal: '', executed: false, reason: expiryBlackout.reason! },
+        });
+        continue;
+      }
+
       // ── DUPLICATE SUPPRESSION (BEFORE sending any signal) ──────────────
       // Rule: once a strike is triggered, don't re-trigger until that trade
       // closes (profit or loss). Prevents Discord flooding with the same
@@ -2298,6 +2366,9 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       // ── Fetch REAL live option premium (+ real delta) from DhanHQ Option Chain ───────
       let premium = 0;
       let realDelta = 0.5;
+      let entryBid = 0;
+      let entryAsk = 0;
+      let entryDepthAvailable = false;
       let ivCautionPenalty = 0; // 0..1, applied to confidence below (graduated, not a hard block by itself)
       let ivCautionReason = '';
       let ivPercentileSnapshot: number | null = null;
@@ -2314,6 +2385,29 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
           if (quote && quote.ltp > 0) {
             premium = quote.ltp;
             realDelta = quote.delta || 0.5;
+            // Real bid/ask at entry — dhan-option-provider.ts already fetches
+            // these from Dhan's WebSocket depth feed (falling back to a
+            // synthetic ltp*0.98/1.02 estimate, flagged via `theoretical`,
+            // when depth isn't available). Kept alongside the LTP-based
+            // premium/P&L rather than replacing it, mirroring ODSS's own
+            // dual pnlAtLtp/pnlAtQuote discipline — this is what lets
+            // autoOptionsCheckExits compute a REAL bought-at-ask/sold-at-bid
+            // P&L later, with NULL (not a guess) when depth wasn't there.
+            entryBid = quote.bid;
+            entryAsk = quote.ask;
+            entryDepthAvailable = !quote.theoretical;
+            if (quote.theoretical) {
+              console.warn(`[Options Auto-Trade] ${sig.symbol} ${sig.strike}${sig.direction}: bid/ask are SYNTHETIC (ltp*0.98/1.02, no real depth) — entryFill.depthAvailable will be false, pnlAtQuote unmeasurable for this trade`);
+            }
+          } else {
+            // [ADD] Chain fetched fine but this specific strike/leg had no
+            // usable LTP (missing from the returned window, or ltp<=0) —
+            // previously fell straight through to premium<=0 -> continue
+            // below with ZERO log output, indistinguishable from "no signal
+            // today" in the logs. No synthetic premium is substituted here
+            // either way (this trade is skipped, same as before) — this
+            // only makes the skip itself visible.
+            console.warn(`[Options Auto-Trade] ${sig.symbol} ${sig.strike}${sig.direction}: no usable LTP in chain response — skipping entry, no synthetic premium substituted`);
           }
 
           // ── IV regime gating (ported from ODSS's iv-percentile.ts +
@@ -2338,6 +2432,17 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
               if (pct !== null && pct >= 0.8) {
                 ivCautionPenalty = Math.max(ivCautionPenalty, 0.15);
                 ivCautionReason = `IV in richest ${Math.round((1 - pct) * 100)}% for ${sig.symbol} — historically the worst time to buy`;
+              }
+              // Low-IV caution (2026-07-28) — the mirror-image case: cheap
+              // premium isn't automatically a good buy if the market itself
+              // isn't pricing in much expected movement. Softer than the
+              // rich-IV penalty (real risk, but a real trend already in
+              // motion — ADX>=25 — is itself evidence expansion may already
+              // be underway, so the caution is waived rather than doubled up
+              // with what the technical/structure categories already reward).
+              if (pct !== null && pct <= 0.2 && sig.adx < 25) {
+                ivCautionPenalty = Math.max(ivCautionPenalty, 0.10);
+                ivCautionReason = `IV in cheapest ${Math.round(pct * 100)}% for ${sig.symbol} with no strong trend (ADX ${sig.adx.toFixed(0)}) — little expected movement priced in`;
               }
               const spike = await getIVSpikePct(sig.symbol);
               if (spike !== null && spike >= 25) {
@@ -2381,6 +2486,27 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       }
 
       if (premium <= 0) continue;
+
+      // [FIX 2026-07-29] Premium floor — re-enabled. Originally built then
+      // deliberately dropped (both here and in the backtest) on the
+      // reasoning that ATM-by-construction strike selection meant the
+      // "cheap because far-OTM and dying" risk it targets shouldn't occur.
+      // Real backtest data disproved that: even with strikes confirmed
+      // genuinely ATM (post the stale-strike-price fix), several trades
+      // still filled at sub-₹5 premiums — a real market wouldn't fill
+      // thousands of quantity on a contract that cheap without brutal
+      // slippage, and cheap premium means almost no room for the thesis to
+      // be right before theta erases the position entirely. Re-enabling
+      // with real evidence behind it this time, not a blind revert.
+      if (premium < PREMIUM_FLOOR) {
+        await db.autoTradeLog.create({
+          data: {
+            action: 'OPT_PREMIUM_TOO_LOW', symbol: tradeSymbol, signal: '', executed: false,
+            reason: `Skipped — premium ₹${premium.toFixed(2)} below floor ₹${PREMIUM_FLOOR} (real evidence: cheap-premium fills tend to be unrealistic size/slippage risk, not genuine edge)`,
+          },
+        });
+        continue;
+      }
 
       if (ivCautionPenalty >= 1) {
         await db.autoTradeLog.create({
@@ -2441,6 +2567,33 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       const sl = Math.round(premium * (1 + structureTargets.stopLossPct / 100) * 100) / 100;
       const tp = Math.round(premium * (1 + structureTargets.targetPct / 100) * 100) / 100;
 
+      // ── Stop-tighter-than-spread refusal ─────────────────────────────
+      // A stop the bid/ask spread alone can trigger on contact is not a
+      // real stop (ODSS found this the hard way — see multi-desk.ts's
+      // initialStop()/sizeIt(), same underlying insight). Only checked when
+      // this specific contract has REAL depth (entryDepthAvailable) — when
+      // it doesn't, there's no reliable spread to compare against, so this
+      // is a pure safety ADDITION on top of existing behavior, never a new
+      // way to block a trade we can't actually evaluate.
+      // SPREAD_FLOOR_MULTIPLIER=2.0 is a starting point, not yet calibrated
+      // against newswing's own real fill data (that data only starts
+      // existing now that entryFill/exitFill are captured — see the
+      // 2026-07-29 dual-P&L addition) — revisit once enough real trades
+      // with real depth have accumulated to check this empirically.
+      const SPREAD_FLOOR_MULTIPLIER = 2.0;
+      if (entryDepthAvailable && entryAsk > entryBid && premium > 0) {
+        const realSpreadPct = ((entryAsk - entryBid) / premium) * 100;
+        if (Math.abs(structureTargets.stopLossPct) < realSpreadPct * SPREAD_FLOOR_MULTIPLIER) {
+          await db.autoTradeLog.create({
+            data: {
+              action: 'OPT_STOP_INSIDE_SPREAD', symbol: tradeSymbol, signal: '', executed: false,
+              reason: `Skipped — stop ${structureTargets.stopLossPct.toFixed(1)}% is inside ${(realSpreadPct * SPREAD_FLOOR_MULTIPLIER).toFixed(1)}% floor (real spread ${realSpreadPct.toFixed(1)}% x${SPREAD_FLOOR_MULTIPLIER})`,
+            },
+          });
+          continue;
+        }
+      }
+
       // ── Risk-based lot sizing ────────────────────────────────────────
       // riskPerLot = what 1 exchange lot actually loses if SL is hit (premium
       // move * lot size), not the full premium paid — matches how the SL is
@@ -2456,6 +2609,16 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       if (lots < 1 && lotsByCapital >= 1) lots = 1;
       if (optAdaptiveFactor < 1.0) lots = Math.max(1, Math.floor(lots * optAdaptiveFactor));
 
+      // Day-of-week size scaling (2026-07-28) — same graduated-penalty style
+      // as the adaptive-loss-streak factor above, not a hard block: a
+      // statistically riskier day doesn't make every setup that day bad,
+      // just means less capital should ride on it. isExpiryDayForSig checks
+      // THIS signal's own expiry against today, not a market-wide flag.
+      const istNowForDow = new Date(Date.now() + 5.5 * 3600000);
+      const isExpiryDayForSig = sig.expiry === istNowForDow.toISOString().split('T')[0];
+      const dowSizing = getDayOfWeekSizeMultiplier(new Date(), isExpiryDayForSig);
+      if (dowSizing.multiplier < 1.0) lots = Math.max(dowSizing.multiplier > 0 ? 1 : 0, Math.floor(lots * dowSizing.multiplier));
+
       if (lots < 1) {
         await db.autoTradeLog.create({
           data: {
@@ -2469,7 +2632,7 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
       await db.autoTradeLog.create({
         data: {
           action: 'OPT_RISK_SIZING', symbol: tradeSymbol, signal: '', executed: false,
-          reason: `Risk sizing: ${lots} lot(s) x ${exchangeLotSize} = ${lots * exchangeLotSize} qty (risk budget ₹${riskBudget.toFixed(0)} @ ${rules.riskPerTradePct}%, risk/lot ₹${riskPerLot.toFixed(0)}, capital cap ${lotsByCapital} lots, adaptive factor ${(optAdaptiveFactor * 100).toFixed(0)}%)`,
+          reason: `Risk sizing: ${lots} lot(s) x ${exchangeLotSize} = ${lots * exchangeLotSize} qty (risk budget ₹${riskBudget.toFixed(0)} @ ${rules.riskPerTradePct}%, risk/lot ₹${riskPerLot.toFixed(0)}, capital cap ${lotsByCapital} lots, adaptive factor ${(optAdaptiveFactor * 100).toFixed(0)}%, ${dowSizing.label})`,
         },
       });
 
@@ -2558,6 +2721,12 @@ async function autoOptionsScanAndTrade(minConfidence: number = SNIPER_MIN_CONFID
             atrPct: sig.atrPct,
             realLtpFetched: true,
             sector: sig.sector,
+            // Real bid/ask at entry (NULL-if-unmeasured discipline, mirrors
+            // ODSS's desk-journal.ts) — depthAvailable:false means bid/ask
+            // is dhan-option-provider.ts's synthetic ltp*0.98/1.02 estimate,
+            // not a real quoted fill. autoOptionsCheckExits reads this back
+            // via trade.notes to compute pnlAtQuote at exit.
+            entryFill: { bid: entryBid, ask: entryAsk, depthAvailable: entryDepthAvailable },
             // Multi-engine decision trace (ODSS-inspired — see the port note
             // in Obsidian/worklog): each of these was computed by an
             // independent check (technical confluence already in `score`/
@@ -2632,7 +2801,6 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
     // underlying per cycle, reused for every open position on that symbol.
     const CONFLUENCE_EXIT_FLOOR = 25; // hard floor — always exit below this confidence
     const CONFLUENCE_EXIT_RATIO = 0.5; // exit if current confidence < 50% of entry confidence
-    const CONFLUENCE_FLIP_MARGIN = 20; // opposing side must clearly dominate, not just edge out
     const rescoreMap = underlyings.length > 0 ? await rescoreForExit(underlyings) : new Map();
 
     for (const trade of openOptions) {
@@ -2649,6 +2817,9 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
 
         // ── Fetch REAL live option premium from DhanHQ Option Chain ───────
         let currentPremium = 0;
+        let exitBid = 0;
+        let exitAsk = 0;
+        let exitDepthAvailable = false;
         if (expiry && strike > 0) {
           try {
             const chain = await fetchDhanOptionChain(underlying, expiry);
@@ -2664,9 +2835,16 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
               const quote = direction === 'CE' ? row?.ce : row?.pe;
               if (quote && quote.ltp > 0) {
                 currentPremium = quote.ltp;
+                exitBid = quote.bid;
+                exitAsk = quote.ask;
+                exitDepthAvailable = !quote.theoretical;
               }
             }
-          } catch { /* handled below */ }
+          } catch (err) {
+            // [FIX] Was silently swallowed — a chain-fetch exception here
+            // looked identical in the logs to "nothing happened this tick."
+            console.warn(`[Options Auto-Trade] Exit premium fetch failed for ${trade.symbol} (trade #${trade.id}):`, err);
+          }
         }
 
         const hasRealPremium = currentPremium > 0;
@@ -2684,15 +2862,73 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
         if (!hasRealPremium) {
           // Mandatory square-off (3:15 PM or day rollover) with no live quote
           // available — close flat at the real entry price rather than
-          // inventing a directional price move.
+          // inventing a directional price move. Still a SYNTHETIC exit price
+          // (not observed in the market), so it needs the same clear warning
+          // as the entry-side synthetic-bid/ask case above.
+          console.warn(`[Options Auto-Trade] ${trade.symbol} (trade #${trade.id}): forced square-off with no live quote — closing flat at entry price ${trade.entryPrice} (synthetic, not a real fill)`);
           currentPremium = trade.entryPrice;
         }
 
+        // MFE (Maximum Favorable Excursion) live tracking (2026-07-28) — to
+        // check the claim that trades "definitely move 20% before turning
+        // back": update the real running peak %-move every cycle a real
+        // premium is seen (never on the synthetic squareoff price), mirrors
+        // Forex paper_broker.py's peak_pnl/mark_to_market. Buying an option
+        // is always long the premium regardless of CE/PE, so the % move
+        // formula doesn't need a direction flip.
+        if (hasRealPremium) {
+          const currentPnlPct = ((currentPremium - trade.entryPrice) / trade.entryPrice) * 100;
+          if (currentPnlPct > (trade.peakPnlPct ?? -Infinity)) {
+            await db.paperTrade.update({ where: { id: trade.id }, data: { peakPnlPct: currentPnlPct } });
+            trade.peakPnlPct = currentPnlPct;
+          }
+          // MAE (Maximum Adverse Excursion) live tracking (2026-07-29) —
+          // mirror of peakPnlPct above; tells us if the -25% SL is too
+          // tight or too loose by recording the worst move reached too.
+          if (currentPnlPct < (trade.troughPnlPct ?? Infinity)) {
+            await db.paperTrade.update({ where: { id: trade.id }, data: { troughPnlPct: currentPnlPct } });
+            trade.troughPnlPct = currentPnlPct;
+          }
+
+          // Real-time price-path logging (2026-07-29) — pure data
+          // collection, no effect on any exit decision. Answers a real
+          // question (once a trade reaches X% gain, how far does it
+          // actually pull back before continuing or reversing) that can't
+          // be answered from backtest-simulated premiums, only real ticks.
+          // Only 5 real live options trades exist as of this build, none
+          // with any path logged — this starts accumulating from here.
+          // Capped at 500 points/trade (a full trading day at typical scan
+          // cadence is well under that) so it can't grow unbounded.
+          try {
+            const path: Array<{ t: number; gainPct: number }> = trade.pricePath ? JSON.parse(trade.pricePath) : [];
+            const minutesSinceEntry = Math.round((Date.now() - new Date(trade.entryDate).getTime()) / 60000);
+            path.push({ t: minutesSinceEntry, gainPct: Math.round(currentPnlPct * 100) / 100 });
+            if (path.length > 500) path.shift();
+            const pricePathJson = JSON.stringify(path);
+            await db.paperTrade.update({ where: { id: trade.id }, data: { pricePath: pricePathJson } });
+            trade.pricePath = pricePathJson;
+          } catch { /* corrupt/missing path — start fresh next cycle rather than blocking exit logic */ }
+        }
+
+        // [2026-07-29] Dynamic profit-lock ratchet — tested three variants
+        // (Forex-style progress^2 at 0.5 and tuned-0.28 activation, a direct
+        // 1:1 lock replacing the fixed TP, and a flat +25% TP) against a
+        // real 3-month/41-trade backtest of the exact same underlying
+        // logic. All four came back worse than the original fixed +50% TP /
+        // -25% SL (best alternative: -67,592 vs this baseline's -68,359;
+        // worst: -76,156). Reverted here to match — DISABLED rather than
+        // deleted, since the sample is small enough that this isn't
+        // necessarily the final word. See intraday-options-backtest.ts for
+        // the same revert and the full comparison table.
+
         // Confluence-decay/flip check (Forex-style dynamic exit) — re-runs
-        // the same entry-scoring logic; if the original thesis has decayed
-        // past a floor, decayed relative to entry conviction, or the
-        // opposite side now clearly dominates, that's a real reason to cut
-        // the trade even before SL/TP is hit. Only ever acts on a REAL live
+        // the same weighted-vote scoring logic used for entries (see
+        // SNIPER_MIN_AGGREGATE / rescoreForExit). [2026-07-28] Now reads
+        // the SAME category-vote decision the entry gate uses, not a
+        // separate hand-rolled score comparison — if the held direction's
+        // own weighted vote has itself turned AVOID, that's the exact same
+        // signal that would have kept a fresh candidate out, applied
+        // symmetrically to an open position. Only ever acts on a REAL live
         // premium (never on the mandatory-squareoff synthetic price).
         let confluenceExitReason: string | null = null;
         if (hasRealPremium) {
@@ -2700,9 +2936,8 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
           if (rescore) {
             const entryConfidence = typeof notes.confidence === 'number' ? notes.confidence : null;
             const currentConfidence = direction === 'CE' ? rescore.ceConfidence : rescore.peConfidence;
-            const ownScore = direction === 'CE' ? rescore.ceScore : rescore.peScore;
-            const opposingScore = direction === 'CE' ? rescore.peScore : rescore.ceScore;
-            if (opposingScore - ownScore > CONFLUENCE_FLIP_MARGIN) {
+            const ownDecision = direction === 'CE' ? rescore.ceDecision : rescore.peDecision;
+            if (ownDecision === 'AVOID') {
               confluenceExitReason = 'CONFLUENCE_FLIPPED';
             } else if (currentConfidence < CONFLUENCE_EXIT_FLOOR) {
               confluenceExitReason = 'CONFLUENCE_DECAY_FLOOR';
@@ -2717,10 +2952,11 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
 
         // 1. Check Fixed SL (-25%) — only on a real premium
         if (hasRealPremium && currentPremium <= trade.stopLoss) {
-          exitReason = 'SL_HIT';
+          exitReason = trade.dynamicLockActive ? 'DYNAMIC_LOCK_HIT' : 'SL_HIT';
           exitPrice = trade.stopLoss;
         }
-        // 2. Check Fixed TP (+50%) — only on a real premium
+        // 2. Check Fixed TP (+50%) — only on a real premium (restored, see
+        // the disabled dynamic-lock block above for why)
         else if (hasRealPremium && currentPremium >= trade.targetPrice) {
           exitReason = 'TP_HIT';
           exitPrice = trade.targetPrice;
@@ -2746,6 +2982,38 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
           const costs = calculateOptionsCosts(trade.entryPrice, exitPrice, lotSize, trade.qty, 'BUY', underlying);
           const netPnl = grossPnl - costs.totalCosts;
           const pnlPercent = ((exitPrice / trade.entryPrice) - 1) * 100;
+          // MFE give-back — how much of the best point this trade ever
+          // reached was given back by the time it actually closed. Null if
+          // the trade never went positive (nothing to give back).
+          const gaveBackPct = trade.peakPnlPct != null && trade.peakPnlPct > 0
+            ? Math.round((trade.peakPnlPct - pnlPercent) * 100) / 100
+            : null;
+
+          // Real bid/ask fill P&L (pnlAtQuote) — bought at entry's real ask,
+          // sold at exit's real bid, alongside the existing LTP-based
+          // grossPnl/netPnl above (unchanged, never replaced — this is a
+          // supplementary measurement, same dual-P&L discipline as ODSS's
+          // desk-journal.ts). Deliberately NULL, not a guess, whenever:
+          //   - entry or exit never had real depth (entryFill/exitDepthAvailable
+          //     false — dhan-option-provider.ts's synthetic ltp*0.98/1.02 case), or
+          //   - this exit priced at a THEORETICAL level (stopLoss/targetPrice)
+          //     rather than the live quote just fetched (exitPrice !== currentPremium)
+          //     — SL_HIT/TP_HIT assume the price crossed exactly at that level,
+          //     but exitBid/exitAsk come from this tick's poll, which can be
+          //     minutes and rupees away from the actual crossing moment. Mixing
+          //     the two would produce a number that looks precise but isn't.
+          const entryFill = notes.entryFill as { bid: number; ask: number; depthAvailable: boolean } | undefined;
+          const exitPricedFromLiveQuote = exitPrice === currentPremium;
+          const canMeasureRealFill = !!entryFill?.depthAvailable && exitDepthAvailable && exitPricedFromLiveQuote;
+          const pnlAtQuote = canMeasureRealFill ? Math.round((exitBid - entryFill!.ask) * trade.qty * 100) / 100 : null;
+          const spreadCostRupees = pnlAtQuote != null ? Math.round((grossPnl - pnlAtQuote) * 100) / 100 : null;
+
+          const updatedNotes = JSON.stringify({
+            ...notes,
+            exitFill: { bid: exitBid, ask: exitAsk, depthAvailable: exitDepthAvailable },
+            pnlAtQuote,
+            spreadCostRupees,
+          });
 
           await db.paperTrade.update({
             where: { id: trade.id },
@@ -2763,6 +3031,8 @@ async function autoOptionsCheckExits(): Promise<{ checked: number; exited: numbe
               slippageCost: Math.round(costs.slippage * 100) / 100,
               otherCharges: Math.round((costs.exchangeCharges + costs.gst + costs.sebiFees + costs.stampDuty) * 100) / 100,
               exitReason,
+              gaveBackPct,
+              notes: updatedNotes,
             },
           });
 
@@ -3055,8 +3325,18 @@ export async function POST(request: NextRequest) {
       }
       // ── Options Auto-Trade Actions ──
       case 'options_scan_and_trade': {
-        const minConf = typeof body.minConfidence === 'number' ? body.minConfidence : 55;
-        const minScore = typeof body.minScore === 'number' ? body.minScore : 40;
+        // [FIX 2026-07-28] minScore now means "minimum aggregate vote"
+        // (-1.5..1.0 scale, see SNIPER_MIN_AGGREGATE), not the old raw
+        // additive score — the previous default of 40 would have blocked
+        // every signal on the new scale (aggregate never reaches 40).
+        // [FIX 2026-07-29] Hardcoded fallbacks (55 / 0.5) had drifted from
+        // the real constants — a manual call with no params used to be
+        // MORE permissive than the scheduler's own default the moment
+        // SNIPER_MIN_AGGREGATE changed (0.7 -> 0.55), since this endpoint
+        // never re-read the constant. Now shares the same source of truth
+        // as autoOptionsScanAndTrade's own defaults.
+        const minConf = typeof body.minConfidence === 'number' ? body.minConfidence : SNIPER_MIN_CONFIDENCE;
+        const minScore = typeof body.minScore === 'number' ? body.minScore : SNIPER_MIN_AGGREGATE;
         const result = await autoOptionsScanAndTrade(minConf, minScore);
         return NextResponse.json({ success: true, action, ...result });
       }
@@ -3093,16 +3373,48 @@ export async function POST(request: NextRequest) {
         // no DB writes, no real trades, no shadow rows. Purely a snapshot.
         const scanResult = await scanOptionsUniverse(200, -9999);
         const top = scanResult.signals
-          .sort((a, b) => b.score - a.score)
+          .sort((a, b) => b.aggregate - a.aggregate)
           .slice(0, 30)
-          .map(s => ({ symbol: s.symbol, direction: s.direction, score: s.score, confidence: s.confidence, reasons: s.reasons }));
+          .map(s => ({ symbol: s.symbol, direction: s.direction, aggregate: s.aggregate, decision: s.decision, score: s.score, confidence: s.confidence, reasons: s.reasons }));
         return NextResponse.json({
           success: true, action,
-          sniperBar: { minScore: SNIPER_MIN_SCORE, minConfidence: SNIPER_MIN_CONFIDENCE },
+          sniperBar: { minAggregate: SNIPER_MIN_AGGREGATE, minConfidence: SNIPER_MIN_CONFIDENCE },
           totalScanned: scanResult.totalScanned,
           scanDurationMs: scanResult.scanDurationMs,
           top,
         });
+      }
+      case 'options_live_pnl': {
+        // Read-only — fetches the same real live premium the exit-check
+        // uses, just to report current unrealized PnL on demand.
+        const openOptions = await db.paperTrade.findMany({
+          where: { status: 'OPEN', tags: { contains: 'options' }, autoTraded: true },
+        });
+        const positions = await Promise.all(openOptions.map(async (t) => {
+          const underlying = t.symbol.split('_')[0];
+          const notes = t.notes ? JSON.parse(t.notes) : {};
+          const strike = notes.strike || 0;
+          const expiry = notes.expiry || '';
+          let currentPremium: number | null = null;
+          try {
+            const chain = await fetchDhanOptionChain(underlying, expiry);
+            const row = chain?.chain?.find(r => r.strike === strike)
+              || chain?.chain?.reduce((closest, r) =>
+                Math.abs(r.strike - strike) < Math.abs(closest.strike - strike) ? r : closest
+              );
+            const quote = t.direction === 'CE' ? row?.ce : row?.pe;
+            if (quote && quote.ltp > 0) currentPremium = quote.ltp;
+          } catch { /* no live quote this check — report null, don't guess */ }
+          const unrealizedPnl = currentPremium != null ? Math.round((currentPremium - t.entryPrice) * t.qty * 100) / 100 : null;
+          const unrealizedPct = currentPremium != null ? Math.round(((currentPremium / t.entryPrice) - 1) * 10000) / 100 : null;
+          return {
+            symbol: underlying, direction: t.direction, strike, expiry,
+            entryPrice: t.entryPrice, currentPremium, qty: t.qty,
+            stopLoss: t.stopLoss, targetPrice: t.targetPrice,
+            unrealizedPnl, unrealizedPct,
+          };
+        }));
+        return NextResponse.json({ success: true, action, positions });
       }
       case 'options_toggle': {
         const enabled = body.enabled;

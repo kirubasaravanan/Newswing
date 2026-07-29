@@ -22,11 +22,6 @@ import { calculatePCR, calculateMaxPain, type OptionChainRow, type OptionChainRe
 import fs from 'fs';
 import path from 'path';
 
-declare global {
-  var _dhanRateLock: Promise<unknown> | undefined;
-  var _lastDhanCall: number | undefined;
-}
-
 interface DhanScrip {
   securityId: number;
   tradingSymbol: string;
@@ -318,15 +313,15 @@ export async function fetchDhanOptionChain(
       }
     }
 
-    // Rate-limiter mutex to prevent DhanHQ 429 Too Many Requests errors
-    if (!globalThis._dhanRateLock) globalThis._dhanRateLock = Promise.resolve();
-    await (globalThis._dhanRateLock = globalThis._dhanRateLock.then(async () => {
-      const now = Date.now();
-      const gap = (globalThis._lastDhanCall || 0) + 1200 - now;
-      if (gap > 0) await new Promise(r => setTimeout(r, gap));
-      globalThis._lastDhanCall = Date.now();
-    }));
-
+    // [FIX 2026-07-29] A duplicate copy of the old rate-limiter mutex used to
+    // sit here, immediately before a dhanFetch() call that acquires the very
+    // same lock itself — so every option-chain fetch paid the inter-request
+    // delay TWICE (2.4s instead of 1.2s). Since the option chain is fetched
+    // once per symbol, that redundant second wait alone added ~1.2s x 192
+    // symbols (~3.8 min) to a full universe scan whose own timeout is 3 min.
+    // Pacing now lives entirely in dhanFetch (see dhan-client.ts), which is
+    // endpoint-aware and handles 429 backoff/retry — duplicating it here can
+    // only slow things down, never make them safer.
     try {
       const res = await dhanFetch<any>('/marketfeed/quote', 'POST', batchPayload);
 
@@ -433,6 +428,14 @@ export async function fetchDhanOptionChain(
     for (const rRow of targetRows) {
       const { strike, ceLtp, peLtp, ceOI, peOI, ceQuote, peQuote } = rRow;
 
+      // depthAvailable distinguishes a REAL bid/ask (from Dhan's WebSocket
+      // depth feed) from the synthetic ltp*0.98/1.02 fallback below — the
+      // `theoretical` field on OptionLegData already existed for exactly
+      // this ("this is theoretical pricing, not live") but was hardcoded
+      // false at both call sites, so every downstream consumer (trade P&L,
+      // spread-cost modeling) had no way to tell a real fill from a guess.
+      const ceDepthAvailable = !!(ceQuote?.depth?.buy?.[0]?.price && ceQuote?.depth?.sell?.[0]?.price);
+      const peDepthAvailable = !!(peQuote?.depth?.buy?.[0]?.price && peQuote?.depth?.sell?.[0]?.price);
       const ceBid = ceQuote?.depth?.buy?.[0]?.price || (ceLtp > 0 ? Math.round(ceLtp * 0.98 * 100) / 100 : 0);
       const ceAsk = ceQuote?.depth?.sell?.[0]?.price || (ceLtp > 0 ? Math.round(ceLtp * 1.02 * 100) / 100 : 0);
       const peBid = peQuote?.depth?.buy?.[0]?.price || (peLtp > 0 ? Math.round(peLtp * 0.98 * 100) / 100 : 0);
@@ -491,7 +494,7 @@ export async function fetchDhanOptionChain(
           bid: Math.round(ceBid * 100) / 100,
           ask: Math.round(ceAsk * 100) / 100,
           itm: strike < underlyingPrice,
-          theoretical: false,
+          theoretical: !ceDepthAvailable,
           changeInOI: ceChangeInOI,
         },
         pe: {
@@ -506,7 +509,7 @@ export async function fetchDhanOptionChain(
           bid: Math.round(peBid * 100) / 100,
           ask: Math.round(peAsk * 100) / 100,
           itm: strike > underlyingPrice,
-          theoretical: false,
+          theoretical: !peDepthAvailable,
           changeInOI: peChangeInOI,
         },
       });
